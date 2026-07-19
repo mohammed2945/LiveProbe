@@ -178,12 +178,13 @@ that the target service is running that revision.
 The accepted GCE path places the broker, three intentionally buggy services,
 their traffic generators, and the JVM bridge on one VM. Only the broker and SSH
 are opened externally, and each managed firewall rule is restricted to the
-operator's current public IPv4 `/32`. The MCP server runs locally through the
-published npm package.
+operator's detected public IPv4 `/32` or one explicit `/24` through `/32` NAT
+pool. The external broker defaults to HTTP port `80`; the local Docker demo
+still defaults to `7070`. The MCP server runs locally through the published npm
+package.
 
 You need a billing-enabled GCP project, Docker, Node.js 20+, npm, and the Google
-Cloud CLI. `gcloud` is not installed on the machine on which this repository was
-prepared; on macOS, install it and authenticate first:
+Cloud CLI. On macOS, install it if needed and authenticate first:
 
 ```sh
 brew install --cask google-cloud-sdk
@@ -200,6 +201,18 @@ archives the clean local `HEAD`. Commit every intended change, confirm
 ```sh
 PROJECT_ID="<PROJECT_ID>" deploy/gcp/deploy.sh
 ```
+
+For the current Stanford visitor Wi-Fi NAT pool and healthy demo, use exactly:
+
+```sh
+PROJECT_ID=totemic-studio-502902-u2 CLIENT_CIDR=68.65.169.128/28 deploy/gcp/deploy.sh
+```
+
+`CLIENT_CIDR` configures the inbound GCP firewall rules; it cannot alter or
+bypass Stanford's outbound campus firewall. The observed network blocks
+outbound TCP `7070` but reaches the current broker on port `80`. If port `80`
+is also blocked, use the SSH-tunnel fallback in the operator guide and point
+the local MCP process at the tunnel.
 
 The default `e2-standard-4` VM, 40 GB balanced disk, premium static IPv4
 address, and network traffic can incur charges until destroyed. The complete

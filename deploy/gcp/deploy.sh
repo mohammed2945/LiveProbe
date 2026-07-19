@@ -17,7 +17,9 @@ DEPLOY_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 validate_commit "$DEPLOY_COMMIT"
 
 load_gcp_config
-client_ip="$(resolve_client_ip)"
+if ! client_source_range="$(resolve_client_source_range)"; then
+  exit 1
+fi
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/liveprobe-deploy.XXXXXX")"
 archive="${tmp_dir}/liveprobe-${DEPLOY_COMMIT}.tar.gz"
@@ -64,7 +66,8 @@ FIREWALL_SSH_RULE="$FIREWALL_SSH_RULE" \
 NETWORK="$NETWORK" \
 NETWORK_TAG="$NETWORK_TAG" \
 BROKER_PORT="$BROKER_PORT" \
-CLIENT_IP="$client_ip" \
+CLIENT_IP="" \
+CLIENT_CIDR="$client_source_range" \
 GCLOUD_BIN="$GCLOUD_BIN" \
   "${SCRIPT_DIR}/refresh-firewall.sh"
 

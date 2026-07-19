@@ -15,7 +15,7 @@ clone GitHub on the VM and does not require GitHub credentials there.
 ```text
 Cursor
   `-- stdio --> local npx @doomslayer2945/liveprobe-mcp@0.1.0
-                   `-- unauthenticated HTTP --> GCE broker :7070
+                   `-- unauthenticated HTTP --> GCE broker :80
                                                    |
                        +---------------------------+------------------+
                        |                           |                  |
@@ -30,7 +30,7 @@ runtime instrumentation. The Java bridge polls the broker and installs or
 removes JDI breakpoints in the inventory JVM over the internal diagnostic
 network.
 
-Only broker HTTP port `7070` is published on the VM's external interface.
+Only broker HTTP port `80` is published on the VM's external interface.
 Payment, billing, and inventory HTTP ports bind to VM loopback. JDWP stays on
 the internal Compose network and is never published to the host. The Compose
 MCP profile is not started because Cursor runs the MCP server locally with
@@ -41,8 +41,8 @@ MCP profile is not started because Cursor runs the MCP server locally with
 - A GCP project with billing enabled and permission to enable Compute Engine
   and manage instances, addresses, firewall rules, and SSH access.
 - `git`, `curl`, Docker with Compose v2, Node.js 20 or newer, and npm.
-- The Google Cloud CLI (`gcloud`). It is missing on the machine on which this
-  repository was prepared, so install it before the first deployment.
+- The Google Cloud CLI (`gcloud`). Install it before the first deployment if it
+  is not already available.
 - A clean checkout of this repository. If needed:
 
   ```sh
@@ -150,6 +150,13 @@ From the repository root, replace `<PROJECT_ID>` and run exactly:
 PROJECT_ID="<PROJECT_ID>" deploy/gcp/deploy.sh
 ```
 
+For the current Stanford visitor Wi-Fi NAT pool and demo project, the exact
+command is:
+
+```sh
+PROJECT_ID=totemic-studio-502902-u2 CLIENT_CIDR=68.65.169.128/28 deploy/gcp/deploy.sh
+```
+
 The first deployment commonly takes several minutes because it creates the VM,
 installs Docker and Node.js 24, installs the pinned pnpm version, restores
 workspace dependencies, and builds every demo image. Deployment succeeds only
@@ -165,10 +172,10 @@ The defaults are:
 - Ubuntu 24.04 on a 40 GB `pd-balanced` boot disk
 - premium-tier regional external address `liveprobe-demo-ip`
 - default VPC network and target tag `liveprobe-demo`
-- broker port `7070`
-- broker firewall rule `liveprobe-demo-broker` for `tcp:7070`
+- broker port `80`
+- broker firewall rule `liveprobe-demo-broker` for `tcp:80`
 - SSH firewall rule `liveprobe-demo-ssh` for `tcp:22`
-- the current public client IPv4 as the source for both managed rules
+- the detected public client IPv4 `/32` as the source for both managed rules
 
 **These resources cost money.** The VM, balanced disk, static external IPv4,
 egress, and other GCP usage can incur charges. Prices vary by region and
@@ -178,9 +185,9 @@ running after the presentation; use `destroy.sh`, not just a Compose stop.
 Every default has an uppercase environment override. The supported deployment
 settings are `PROJECT_ID`, `REGION`, `ZONE`, `VM_NAME`, `MACHINE_TYPE`,
 `DISK_SIZE`, `STATIC_IP_NAME`, `FIREWALL_RULE`, `FIREWALL_SSH_RULE`, `NETWORK`,
-`NETWORK_TAG`, `BROKER_PORT`, `CLIENT_IP`, and `GCLOUD_BIN`. Export the same
-non-default values before every deploy, status, log, firewall, and destroy
-command.
+`NETWORK_TAG`, `BROKER_PORT`, `CLIENT_IP`, `CLIENT_CIDR`, and `GCLOUD_BIN`.
+Export the same non-default values before every deploy, status, log, firewall,
+and destroy command.
 
 ### Resources created
 
@@ -207,17 +214,29 @@ the VM is destroyed.
 
 At deploy time, the scripts obtain the operator's public IPv4 from
 `https://api.ipify.org`, with `https://checkip.amazonaws.com` as a fallback,
-unless `CLIENT_IP` is set. `CLIENT_IP` must be one bare IPv4 address, not a
-CIDR. The scripts always convert it to `<IP>/32` and apply the same source to:
+unless `CLIENT_IP` or `CLIENT_CIDR` is set. `CLIENT_IP` must be one bare IPv4
+address, not a CIDR. The scripts convert it to `<IP>/32`.
 
-- `tcp:7070` on `liveprobe-demo-broker`
+For rotating NAT pools, set `CLIENT_CIDR` instead. It accepts exactly one IPv4
+CIDR with a prefix from `/24` through `/32`, normalizes host bits to the network
+address, and rejects hostnames, comma-separated lists, malformed values, and
+broader ranges. `CLIENT_IP` and `CLIENT_CIDR` are mutually exclusive. The
+deployer resolves this source once and applies the same normalized range to:
+
+- `tcp:80` on `liveprobe-demo-broker`
 - `tcp:22` on `liveprobe-demo-ssh`
 
 If a VPN, office network, hotspot, or ISP changes the public IP, both broker and
 SSH access stop until the rules are refreshed. The scripts do not modify or
 delete unrelated GCP firewall rules. An existing broad rule on the same network
-can still expose these ports, so inspect the project's other firewall rules;
-the managed `/32` rules do not override broader allows.
+can still expose these ports, so inspect the project's other firewall rules.
+
+These are inbound GCP VPC firewall rules. They cannot change or bypass a campus
+network's outbound policy. Stanford visitor Wi-Fi was observed to block
+outbound TCP `7070` while allowing the current broker at
+`http://136.116.88.131:80`; its observed rotating NAT addresses
+`68.65.169.130`, `.131`, `.132`, `.136`, and `.138` are covered by
+`68.65.169.128/28`.
 
 ## Connect Cursor
 
@@ -234,7 +253,7 @@ exact server configuration to Cursor's MCP settings:
         "-y",
         "@doomslayer2945/liveprobe-mcp@0.1.0",
         "--broker-url",
-        "http://<BROKER_IP>:7070"
+        "http://<BROKER_IP>:80"
       ]
     }
   }
@@ -245,12 +264,30 @@ The equivalent command is:
 
 ```sh
 npx -y @doomslayer2945/liveprobe-mcp@0.1.0 \
-  --broker-url "http://<BROKER_IP>:7070"
+  --broker-url "http://<BROKER_IP>:80"
 ```
 
 `--broker-url` matches the published CLI and takes precedence over its
 `BROKER_URL` environment fallback. Restart or reconnect the MCP server in
 Cursor after changing the configuration.
+
+### SSH-tunnel fallback
+
+If the current network also blocks outbound port `80` but permits SSH, refresh
+the managed source range and keep this tunnel running:
+
+```sh
+PROJECT_ID="<PROJECT_ID>" CLIENT_CIDR="<CLIENT_CIDR>" \
+  deploy/gcp/refresh-firewall.sh
+gcloud compute ssh liveprobe-demo \
+  --project="<PROJECT_ID>" \
+  --zone=us-central1-a \
+  -- -N -L 7070:127.0.0.1:80
+```
+
+Point the local MCP process at `http://127.0.0.1:7070` while the tunnel is
+open. This fallback carries broker HTTP inside SSH; it does not expose any
+additional VM port or change the campus firewall.
 
 ## Commit-hash prompt workflow
 
@@ -287,14 +324,16 @@ Run this at least 30 minutes before the presentation:
 npm view @doomslayer2945/liveprobe-mcp@0.1.0 version
 npx -y @doomslayer2945/liveprobe-mcp@0.1.0 --help
 git status --short
-PROJECT_ID="<PROJECT_ID>" deploy/gcp/refresh-firewall.sh
+PROJECT_ID="<PROJECT_ID>" CLIENT_CIDR="<CLIENT_CIDR>" \
+  deploy/gcp/refresh-firewall.sh
 PROJECT_ID="<PROJECT_ID>" deploy/gcp/status.sh
 ```
 
 Expected results are npm version `0.1.0`, empty Git status, healthy Compose
 services, a printed broker URL, and a full deployed SHA. Firewall refresh runs
 first so a changed VPN, hotspot, office, or ISP address does not block the SSH
-status check.
+status check. Omit the `CLIENT_CIDR` assignment when the network has one stable
+public IPv4; refresh then detects it and restores `/32` rules.
 
 ### 2. Start the guided investigation
 
@@ -369,7 +408,13 @@ To set an explicit new firewall source:
 ```sh
 PROJECT_ID="<PROJECT_ID>" CLIENT_IP="<PUBLIC_IPV4>" \
   deploy/gcp/refresh-firewall.sh
+
+PROJECT_ID="<PROJECT_ID>" CLIENT_CIDR="<PUBLIC_IPV4_CIDR>" \
+  deploy/gcp/refresh-firewall.sh
 ```
+
+Set only one of `CLIENT_IP` and `CLIENT_CIDR`. Omit both to redetect the current
+public IPv4 and restore `/32` rules.
 
 To redeploy a new revision, commit every intended change, confirm the tree is
 clean, and run the same deployment command:
@@ -397,7 +442,8 @@ Save the newly printed SHA and give that value to Cursor for subsequent probes.
   `@doomslayer2945/liveprobe-mcp@0.1.0`, then run its `--help` command locally.
 - **Broker or SSH stopped working after a network change:** refresh both
   managed firewall rules. If automatic public-IP detection is wrong, pass a
-  bare IPv4 with `CLIENT_IP`.
+  bare IPv4 with `CLIENT_IP`, or pass one `/24` through `/32` NAT pool with
+  `CLIENT_CIDR`. If outbound port `80` is blocked, use the SSH-tunnel fallback.
 - **Existing VM external IP does not match the reserved IP:** the named VM and
   address are inconsistent. Inspect them in GCP; use matching resource-name
   overrides or destroy the demo resources before recreating them.
@@ -444,9 +490,10 @@ the billable VM, disk, and address in place.
 ## Security boundaries
 
 - The demo carries deterministic fake data only.
-- Broker HTTP is unauthenticated and unencrypted. The source `/32` reduces
-  exposure but is not a substitute for identity, TLS, or a private network.
-- Other GCP firewall rules can broaden access beyond the managed `/32`.
+- Broker HTTP is unauthenticated and unencrypted. A source `/32` or narrowly
+  scoped NAT CIDR reduces exposure but is not a substitute for identity, TLS,
+  or a private network.
+- Other GCP firewall rules can broaden access beyond the managed source range.
 - Node and JVM breakpoints can briefly pause an executing thread, and Python
   line callbacks add target-process work. "Read-only" does not mean zero
   runtime impact.
@@ -459,8 +506,8 @@ the billable VM, disk, and address in place.
 ## Maintainer validation
 
 The static and mocked command-construction tests do not call `gcloud`. They
-cover SDK prerequisites, Cursor MCP JSON, and create/update/delete commands for
-both managed firewall rules:
+cover SDK prerequisites, port-80 defaults, Cursor MCP JSON, strict CIDR
+validation, and create/update/delete commands for both managed firewall rules:
 
 ```sh
 deploy/gcp/test.sh

@@ -7,8 +7,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 load_gcp_config
-client_ip="$(resolve_client_ip)"
-source_range="${client_ip}/32"
+if ! source_range="$(resolve_client_source_range)"; then
+  exit 1
+fi
 
 upsert_firewall_rule() {
   local rule_name="$1"

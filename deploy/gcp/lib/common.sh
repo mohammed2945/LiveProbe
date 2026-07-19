@@ -78,6 +78,44 @@ validate_ipv4() {
   [[ "$ip" != "0.0.0.0" ]] || die "0.0.0.0 is not a valid client address"
 }
 
+normalize_client_cidr() {
+  local cidr="$1"
+  local ip
+  local prefix
+  local a
+  local b
+  local c
+  local d
+  local address
+  local host_bits
+  local mask
+  local network
+
+  [[ "$cidr" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})/(2[4-9]|3[0-2])$ ]] ||
+    die "CLIENT_CIDR must be one IPv4 CIDR with prefix 24-32: ${cidr}"
+  ip="${BASH_REMATCH[1]}"
+  prefix="${BASH_REMATCH[2]}"
+  validate_ipv4 "$ip"
+
+  IFS='.' read -r a b c d <<<"$ip"
+  address="$((
+    (10#${a} << 24) |
+      (10#${b} << 16) |
+      (10#${c} << 8) |
+      10#${d}
+  ))"
+  host_bits="$((32 - 10#${prefix}))"
+  mask="$(((0xFFFFFFFF << host_bits) & 0xFFFFFFFF))"
+  network="$((address & mask))"
+
+  printf '%d.%d.%d.%d/%d\n' \
+    "$(((network >> 24) & 255))" \
+    "$(((network >> 16) & 255))" \
+    "$(((network >> 8) & 255))" \
+    "$((network & 255))" \
+    "$((10#${prefix}))"
+}
+
 print_cursor_mcp_json() {
   local ip="$1"
   local port="$2"
@@ -143,6 +181,21 @@ resolve_client_ip() {
   printf '%s\n' "$ip"
 }
 
+resolve_client_source_range() {
+  local client_ip="${CLIENT_IP:-}"
+  local client_cidr="${CLIENT_CIDR:-}"
+
+  [[ -z "$client_ip" || -z "$client_cidr" ]] ||
+    die "CLIENT_IP and CLIENT_CIDR are mutually exclusive"
+
+  if [[ -n "$client_cidr" ]]; then
+    normalize_client_cidr "$client_cidr"
+  else
+    client_ip="$(resolve_client_ip)" || return 1
+    printf '%s/32\n' "$client_ip"
+  fi
+}
+
 load_gcp_config() {
   GCLOUD_BIN="${GCLOUD_BIN:-gcloud}"
   require_command "$GCLOUD_BIN"
@@ -158,7 +211,7 @@ load_gcp_config() {
   FIREWALL_SSH_RULE="${FIREWALL_SSH_RULE:-${VM_NAME}-ssh}"
   NETWORK="${NETWORK:-default}"
   NETWORK_TAG="${NETWORK_TAG:-liveprobe-demo}"
-  BROKER_PORT="${BROKER_PORT:-7070}"
+  BROKER_PORT="${BROKER_PORT:-80}"
 
   validate_region "$REGION"
   validate_zone "$REGION" "$ZONE"
