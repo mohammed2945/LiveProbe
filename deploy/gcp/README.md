@@ -206,9 +206,9 @@ the VM is destroyed.
 ### Source-IP firewall behavior
 
 At deploy time, the scripts obtain the operator's public IPv4 from
-`https://checkip.googleapis.com`, unless `CLIENT_IP` is set. `CLIENT_IP` must be
-one bare IPv4 address, not a CIDR. The scripts always convert it to `<IP>/32`
-and apply the same source to:
+`https://api.ipify.org`, with `https://checkip.amazonaws.com` as a fallback,
+unless `CLIENT_IP` is set. `CLIENT_IP` must be one bare IPv4 address, not a
+CIDR. The scripts always convert it to `<IP>/32` and apply the same source to:
 
 - `tcp:7070` on `liveprobe-demo-broker`
 - `tcp:22` on `liveprobe-demo-ssh`

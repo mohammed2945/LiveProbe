@@ -115,11 +115,27 @@ resolve_project_id() {
 
 resolve_client_ip() {
   local ip="${CLIENT_IP:-}"
+  local candidate
+  local endpoint
 
   if [[ -z "$ip" ]]; then
     require_command curl
-    ip="$(curl --fail --silent --show-error --max-time 10 \
-      https://checkip.googleapis.com)"
+    for endpoint in \
+      "https://api.ipify.org" \
+      "https://checkip.amazonaws.com"; do
+      candidate="$(
+        curl -4 --fail --silent --max-time 10 "$endpoint" 2>/dev/null || true
+      )"
+      candidate="${candidate//$'\r'/}"
+      candidate="${candidate//$'\n'/}"
+      if [[ -n "$candidate" ]] &&
+        (validate_ipv4 "$candidate") 2>/dev/null; then
+        ip="$candidate"
+        break
+      fi
+    done
+    [[ -n "$ip" ]] ||
+      die "could not detect public IPv4; set CLIENT_IP explicitly"
   fi
   ip="${ip//$'\r'/}"
   ip="${ip//$'\n'/}"
