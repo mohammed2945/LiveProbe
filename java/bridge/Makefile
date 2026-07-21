@@ -35,6 +35,7 @@ test: jar
 	@mkdir -p "$(TEST_CLASSES)"
 	"$(JAVAC)" --release 17 $(JDI_MODULE) -cp "$(MAIN_CLASSES)" -d "$(TEST_CLASSES)" $(TEST_SOURCES)
 	"$(JAVA)" $(JDI_MODULE) -cp "$(MAIN_CLASSES):$(TEST_CLASSES)" "$(TEST_CLASS)"
+	"$(JAVA)" $(JDI_MODULE) -cp "$(MAIN_CLASSES):$(TEST_CLASSES)" "io.liveprobe.bridge.MainSmokeTest"
 
 clean:
 	rm -rf "$(BUILD_DIR)"

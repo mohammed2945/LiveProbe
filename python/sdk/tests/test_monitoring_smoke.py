@@ -20,6 +20,7 @@ def test_real_monitoring_callback_selects_instrumented_frame() -> None:
         agent = LiveProbe(
             service_id="smoke",
             broker_url="http://127.0.0.1:1",
+            commit_sha="abcdef1234567890",
             limits={"hitsPerSec": 100, "pauseBudgetMs": 1000},
         )
 

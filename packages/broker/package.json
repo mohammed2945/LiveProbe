@@ -16,7 +16,14 @@
     "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.test.json"
   },
   "dependencies": {
+    "@jridgewell/trace-mapping": "^0.3.31",
     "fastify": "^5.10.0",
+    "pg": "^8.16.3",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/pg": "^8.15.5",
+    "typescript": "^7.0.2"
   }
 }

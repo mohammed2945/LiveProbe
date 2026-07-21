@@ -6,7 +6,7 @@ The lookup returns `null`; `payments.ts` intentionally treats that value as a
 zero balance and returns `InsufficientFunds`. Premium and enterprise traffic
 continues to succeed.
 
-The process starts the compiled `@liveprobe/sdk-node` package with `SERVICE_ID`
+The process starts the compiled `@doomslayer2945/liveprobe-node` package with `SERVICE_ID`
 and `BROKER_URL` before opening its HTTP listener.
 
 ## Run locally

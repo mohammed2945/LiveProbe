@@ -3,11 +3,26 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "liveprobe-python"
+name = "liveprobe"
 version = "0.1.0"
 description = "Zero-dependency runtime agent for LiveProbe"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "LiveProbe contributors" }]
+keywords = ["debugging", "observability", "liveprobe"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/mohammed2945/LiveProbe"
+Repository = "https://github.com/mohammed2945/LiveProbe"
 
 [project.optional-dependencies]
 test = ["pytest"]

@@ -37,6 +37,70 @@ describe("BrokerClient", () => {
     expect(requested).toBe("http://broker:7070/v1/services/payments%2Fapi/probes?since=1");
   });
 
+  it("requests commit-specific runtime coordinates and validates them", async () => {
+    let requested = "";
+    const runtimeProbe = {
+      ...probe,
+      runtimeLocation: "dist/payments.js",
+      runtimeLine: 71,
+      runtimeColumn: 4,
+    };
+    const client = new BrokerClient("http://broker:7070", {
+      fetch: (async (input: URL) => {
+        requested = input.toString();
+        return new Response(JSON.stringify({ version: 2, probes: [runtimeProbe] }));
+      }) as never,
+    });
+
+    await expect(
+      client.poll("payments/api", 1, "abcdef1234567890"),
+    ).resolves.toEqual({ version: 2, probes: [runtimeProbe] });
+    expect(requested).toBe(
+      "http://broker:7070/v1/services/payments%2Fapi/probes?since=1&commitSha=abcdef1234567890",
+    );
+  });
+
+  it("performs the source-map upload handshake", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const client = new BrokerClient("http://broker:7070", {
+      fetch: (async (input: URL, init: { body: string }) => {
+        requests.push({ url: input.toString(), body: JSON.parse(init.body) });
+        if (input.pathname.endsWith("/status")) {
+          return new Response(
+            JSON.stringify({ isUploader: true, isComplete: false }),
+          );
+        }
+        return new Response(null, { status: 202 });
+      }) as never,
+    });
+    const identity = {
+      serviceId: "payments",
+      commitSha: "abcdef1234567890",
+      uploaderId: "agent-a",
+    };
+
+    await expect(client.sourceMapStatus(identity)).resolves.toEqual({
+      isUploader: true,
+      isComplete: false,
+    });
+    await client.uploadSourceMap({
+      ...identity,
+      mapPath: "dist/payments.js.map",
+      map: { version: 3, sources: [], names: [], mappings: "" },
+    });
+    await client.completeSourceMaps(identity);
+
+    expect(requests.map(({ url }) => new URL(url).pathname)).toEqual([
+      "/v1/source-maps/status",
+      "/v1/source-maps/upload",
+      "/v1/source-maps/complete",
+    ]);
+    expect(requests[1]?.body).toMatchObject({
+      mapPath: "dist/payments.js.map",
+      commitSha: identity.commitSha,
+    });
+  });
+
   it("sends the exact ingest envelope", async () => {
     let body: unknown;
     let method = "";
@@ -56,15 +120,40 @@ describe("BrokerClient", () => {
       },
     ];
 
-    await client.ingest("payments", { state: "green", detail: "1 probe armed" }, events);
+    await client.ingest(
+      "payments",
+      "abcdef1234567890",
+      "config",
+      { state: "green", detail: "1 probe armed" },
+      events,
+    );
 
     expect(method).toBe("POST");
     expect(body).toEqual({
       serviceId: "payments",
       sdk: "node",
+      commitSha: "abcdef1234567890",
+      commitSource: "config",
       agentStatus: { state: "green", detail: "1 probe armed" },
       events,
     });
+  });
+
+  it("sends bearer authorization when configured", async () => {
+    let authorization = "";
+    const client = new BrokerClient("http://broker:7070", {
+      apiKey: "test-key",
+      fetch: (async (_input: URL, init: { headers: Record<string, string> }) => {
+        authorization = init.headers.authorization;
+        return new Response(JSON.stringify({ version: 0, unchanged: true }), {
+          status: 200,
+        });
+      }) as never,
+    });
+
+    await client.poll("payments", 0);
+
+    expect(authorization).toBe("Bearer test-key");
   });
 
   it("rejects malformed definitions instead of installing them", async () => {

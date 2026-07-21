@@ -1,6 +1,6 @@
 import { type Server } from "node:http";
 
-import { LiveProbe } from "@liveprobe/sdk-node";
+import { LiveProbe } from "@doomslayer2945/liveprobe-node";
 
 import { createPaymentApp } from "./app.js";
 import { loadServiceConfig } from "./config.js";

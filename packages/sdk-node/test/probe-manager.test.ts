@@ -64,10 +64,14 @@ function createInspector(
       }
     },
     setBreakpointByUrl(
-      params: { lineNumber: number; url: string },
+      params: { lineNumber: number; columnNumber?: number; url: string },
       callback: (error: Error | null, result?: SetBreakpointResult) => void,
     ) {
-      commands.push(`set:${String(params.lineNumber + 1)}`);
+      commands.push(
+        params.columnNumber === undefined || params.columnNumber === 0
+          ? `set:${String(params.lineNumber + 1)}`
+          : `set:${String(params.lineNumber + 1)}:${String(params.columnNumber)}`,
+      );
       callback(null, {
         breakpointId: `bp-${String(params.lineNumber + 1)}`,
         locations: [{ scriptId: "script-1", lineNumber: params.lineNumber }],
@@ -420,6 +424,40 @@ describe("ProbeManager in-flight invalidation", () => {
 });
 
 describe("ProbeManager reconciliation", () => {
+  it("installs broker-resolved generated line and column coordinates", async () => {
+    const commands: string[] = [];
+    const scripts = new ScriptRegistry();
+    scripts.register({
+      scriptId: "generated",
+      url: "file:///app/dist/payments.js",
+    });
+    const events = new EventBuffer(100_000);
+    const manager = new ProbeManager({
+      inspector: createInspector(commands) as never,
+      scripts,
+      serializerConfig: normalizeSerializerConfig(),
+      rateLimiter: new TokenBucket(10, () => 0),
+      events,
+      aggregates: new AggregateBuffer(),
+      audit: () => {},
+    });
+
+    await manager.reconcile([
+      probe({
+        file: "src/payments.ts",
+        line: 10,
+        runtimeLocation: "dist/payments.js",
+        runtimeLine: 71,
+        runtimeColumn: 4,
+      }),
+    ]);
+
+    expect(commands).toContain("set:71:4");
+    expect(events.takeBatch(100_000)).toEqual([
+      expect.objectContaining({ type: "status", status: "armed" }),
+    ]);
+  });
+
   it("removes breakpoints absent from the broker's full snapshot", async () => {
     const commands: string[] = [];
     const { manager, events } = setup(createInspector(commands));

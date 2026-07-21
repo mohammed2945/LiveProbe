@@ -1,6 +1,6 @@
 {
   "name": "@doomslayer2945/liveprobe-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Laptop-friendly stdio MCP server for LiveProbe",
   "type": "module",
   "main": "./dist/index.js",
@@ -27,11 +27,16 @@
   "scripts": {
     "build": "tsc --project tsconfig.json",
     "start": "node dist/cli.js",
-    "test": "pnpm run build && vitest run --passWithNoTests",
+    "test": "npm run build && vitest run --passWithNoTests",
     "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.test.json"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   }
 }

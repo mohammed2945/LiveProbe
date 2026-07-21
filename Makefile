@@ -26,16 +26,7 @@ python-test:
 	cd python/sdk && sh ../../scripts/python312.sh -m pytest
 
 java-test:
-	@if ! command -v javac >/dev/null 2>&1; then \
-		echo "SKIP Java bridge tests (JDK 17+ not installed)"; \
-	else \
-		major=$$(javac -version 2>&1 | awk '{ split($$2, v, "."); if (v[1] == "1") print v[2]; else print v[1] }'); \
-		if [ "$$major" -ge 17 ]; then \
-			$(MAKE) -C java/bridge test; \
-		else \
-			echo "SKIP Java bridge tests (JDK 17+ required; found javac $$major)"; \
-		fi; \
-	fi
+	sh scripts/java17.sh $(MAKE) -C java/bridge test
 
 payment-deps:
 	@if [ ! -d demo/payment-service/node_modules ]; then \
@@ -52,20 +43,12 @@ python-demo-deps:
 	fi
 
 payment-test: payment-deps
-	pnpm --filter @liveprobe/sdk-node run build
+	pnpm --filter @doomslayer2945/liveprobe-node run build
 	npm --prefix demo/payment-service test
 
 inventory-test:
-	@if ! command -v javac >/dev/null 2>&1 || ! command -v mvn >/dev/null 2>&1; then \
-		echo "SKIP inventory tests (JDK 17+ and Maven required)"; \
-	else \
-		major=$$(javac -version 2>&1 | awk '{ split($$2, v, "."); if (v[1] == "1") print v[2]; else print v[1] }'); \
-		if [ "$$major" -ge 17 ]; then \
-			$(MAKE) -C demo/inventory-service test; \
-		else \
-			echo "SKIP inventory tests (JDK 17+ required; found javac $$major)"; \
-		fi; \
-	fi
+	@command -v mvn >/dev/null 2>&1 || { echo "Maven 3.9+ is required"; exit 127; }
+	sh scripts/java17.sh $(MAKE) -C demo/inventory-service test
 
 demo-unit-test: payment-test inventory-test
 
@@ -73,14 +56,14 @@ typescript-build:
 	pnpm run build
 
 payment-build: payment-deps
-	pnpm --filter @liveprobe/sdk-node run build
+	pnpm --filter @doomslayer2945/liveprobe-node run build
 	npm --prefix demo/payment-service run build
 
 java-build:
-	$(MAKE) -C java/bridge jar
+	sh scripts/java17.sh $(MAKE) -C java/bridge jar
 
 inventory-build:
-	$(MAKE) -C demo/inventory-service package
+	sh scripts/java17.sh $(MAKE) -C demo/inventory-service package
 
 build: typescript-build payment-build java-build inventory-build
 
@@ -91,11 +74,11 @@ readonly-audit:
 	node scripts/readonly-audit.mjs
 
 bench:
-	pnpm --filter @liveprobe/sdk-node run bench
+	pnpm --filter @doomslayer2945/liveprobe-node run bench
 	sh scripts/python312.sh python/sdk/benchmarks/monitoring_overhead.py
 
 e2e-node: payment-deps
-	pnpm --filter @liveprobe/sdk-node run build
+	pnpm --filter @doomslayer2945/liveprobe-node run build
 	pnpm --filter @liveprobe/broker run build
 	npm --prefix demo/payment-service run e2e
 
@@ -105,12 +88,12 @@ e2e-python: python-demo-deps
 
 e2e-jvm:
 	pnpm --filter @liveprobe/broker run build
-	$(MAKE) -C java/bridge jar
-	$(MAKE) -C demo/inventory-service package
+	sh scripts/java17.sh $(MAKE) -C java/bridge jar
+	sh scripts/java17.sh $(MAKE) -C demo/inventory-service package
 	node scripts/e2e-jvm.mjs
 
 demo-prerequisites:
-	pnpm --filter @liveprobe/sdk-node run build
+	pnpm --filter @doomslayer2945/liveprobe-node run build
 	$(DOCKER_COMPOSE) -f demo/docker-compose.yml config --quiet
 
 demo: demo-prerequisites
@@ -122,7 +105,7 @@ demo-down:
 	$(DOCKER_COMPOSE) -f demo/docker-compose.yml down --remove-orphans
 
 gcp-demo-prerequisites:
-	pnpm --filter @liveprobe/sdk-node run build
+	pnpm --filter @doomslayer2945/liveprobe-node run build
 	$(GCP_COMPOSE) config --quiet
 
 gcp-demo-up: gcp-demo-prerequisites

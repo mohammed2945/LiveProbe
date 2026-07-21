@@ -87,6 +87,23 @@ function parseProbe(value: unknown, serviceId: string): ProbeDefinition {
   ) {
     throw new Error("broker returned invalid watch paths");
   }
+  const runtimeFields = [
+    value["runtimeLocation"],
+    value["runtimeLine"],
+    value["runtimeColumn"],
+  ];
+  const hasRuntimeFields = runtimeFields.some((field) => field !== undefined);
+  if (
+    hasRuntimeFields &&
+    (typeof value["runtimeLocation"] !== "string" ||
+      value["runtimeLocation"].length === 0 ||
+      !Number.isSafeInteger(value["runtimeLine"]) ||
+      (value["runtimeLine"] as number) <= 0 ||
+      !Number.isSafeInteger(value["runtimeColumn"]) ||
+      (value["runtimeColumn"] as number) < 0)
+  ) {
+    throw new Error("broker returned invalid runtime probe coordinates");
+  }
   parseCondition(value["condition"]);
   return value as unknown as ProbeDefinition;
 }
@@ -115,12 +132,13 @@ export class BrokerClient {
   readonly #baseUrl: URL;
   readonly #fetch: FetchLike;
   readonly #requestTimeoutMs: number;
+  readonly #apiKey: string | undefined;
   readonly #controllers = new Set<AbortController>();
   #stopped = false;
 
   constructor(
     brokerUrl: string,
-    options: { fetch?: FetchLike; requestTimeoutMs?: number } = {},
+    options: { apiKey?: string; fetch?: FetchLike; requestTimeoutMs?: number } = {},
   ) {
     const baseUrl = new URL(brokerUrl);
     if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
@@ -135,10 +153,17 @@ export class BrokerClient {
     this.#baseUrl = baseUrl;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 5000;
+    this.#apiKey = options.apiKey;
   }
 
-  async poll(serviceId: string, since: number): Promise<PollResponse> {
-    const path = `v1/services/${encodeURIComponent(serviceId)}/probes?since=${String(since)}`;
+  async poll(
+    serviceId: string,
+    since: number,
+    commitSha?: string,
+  ): Promise<PollResponse> {
+    const query = new URLSearchParams({ since: String(since) });
+    if (commitSha !== undefined) query.set("commitSha", commitSha);
+    const path = `v1/services/${encodeURIComponent(serviceId)}/probes?${query.toString()}`;
     const response = await this.#request(path, { method: "GET" });
     if (!response.ok) {
       throw new Error(`broker poll failed with HTTP ${String(response.status)}`);
@@ -146,8 +171,48 @@ export class BrokerClient {
     return parsePollResponse(await response.json(), serviceId);
   }
 
+  async sourceMapStatus(identity: {
+    serviceId: string;
+    commitSha: string;
+    uploaderId: string;
+  }): Promise<{ isUploader: boolean; isComplete: boolean }> {
+    const response = await this.#sourceMapRequest("status", identity);
+    const decoded = (await response.json()) as unknown;
+    if (
+      !isRecord(decoded) ||
+      typeof decoded["isUploader"] !== "boolean" ||
+      typeof decoded["isComplete"] !== "boolean"
+    ) {
+      throw new Error("broker returned an invalid source-map status");
+    }
+    return {
+      isUploader: decoded["isUploader"],
+      isComplete: decoded["isComplete"],
+    };
+  }
+
+  async uploadSourceMap(input: {
+    serviceId: string;
+    commitSha: string;
+    uploaderId: string;
+    mapPath: string;
+    map: Record<string, unknown>;
+  }): Promise<void> {
+    await this.#sourceMapRequest("upload", input, 202);
+  }
+
+  async completeSourceMaps(identity: {
+    serviceId: string;
+    commitSha: string;
+    uploaderId: string;
+  }): Promise<void> {
+    await this.#sourceMapRequest("complete", identity, 202);
+  }
+
   async ingest(
     serviceId: string,
+    commitSha: string,
+    commitSource: "env" | "config",
     agentStatus: AgentStatus,
     events: readonly AgentEvent[],
   ): Promise<void> {
@@ -155,6 +220,8 @@ export class BrokerClient {
       body: JSON.stringify({
         serviceId,
         sdk: "node",
+        commitSha,
+        commitSource,
         agentStatus,
         events,
       }),
@@ -192,11 +259,35 @@ export class BrokerClient {
     try {
       return await this.#fetch(new URL(path, this.#baseUrl), {
         ...init,
+        headers: {
+          ...(this.#apiKey === undefined
+            ? {}
+            : { authorization: `Bearer ${this.#apiKey}` }),
+          ...(init.headers ?? {}),
+        },
         signal: controller.signal,
       });
     } finally {
       clearTimeout(timeout);
       this.#controllers.delete(controller);
     }
+  }
+
+  async #sourceMapRequest(
+    operation: "status" | "upload" | "complete",
+    body: object,
+    expectedStatus = 200,
+  ): Promise<Response> {
+    const response = await this.#request(`v1/source-maps/${operation}`, {
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    if (response.status !== expectedStatus) {
+      throw new Error(
+        `broker source-map ${operation} failed with HTTP ${String(response.status)}`,
+      );
+    }
+    return response;
   }
 }

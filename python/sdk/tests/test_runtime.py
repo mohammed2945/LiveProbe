@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import threading
 import time
 from typing import Any
@@ -48,6 +49,7 @@ def make_agent(
     return LiveProbe(
         service_id="service",
         broker_url="http://127.0.0.1:1",
+        commit_sha="abcdef1234567890",
         monitoring=fake_monitoring,
         limits=limits,
         output=output or io.StringIO(),
@@ -434,6 +436,34 @@ def test_oversized_event_is_dropped_without_exceeding_bandwidth(
     assert "EVENT DROPPED prb_large" in output.getvalue()
 
 
+def test_ingest_payload_includes_commit_metadata(fake_monitoring: Any) -> None:
+    agent = make_agent(fake_monitoring)
+
+    assert agent._ingest_payload([]) == {
+        "serviceId": "service",
+        "sdk": "python",
+        "commitSha": "abcdef1234567890",
+        "commitSource": "config",
+        "agentStatus": {
+            "state": "green",
+            "detail": "0 active locations; 0 dropped hits",
+        },
+        "events": [],
+    }
+
+
+def test_commit_sha_is_required(fake_monitoring: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LIVEPROBE_COMMIT_SHA", raising=False)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+
+    with pytest.raises(ValueError, match="commit_sha is required"):
+        LiveProbe(
+            service_id="service",
+            broker_url="http://127.0.0.1:1",
+            monitoring=fake_monitoring,
+        )
+
+
 def test_stop_releases_monitoring_tool(fake_monitoring: Any) -> None:
     output = io.StringIO()
     agent = make_agent(fake_monitoring, output=output)
@@ -454,6 +484,7 @@ def test_stop_defers_monitoring_cleanup_until_blocked_daemon_exits(
     output = io.StringIO()
     entered_request = threading.Event()
     release_request = threading.Event()
+    final_payloads: list[dict[str, object]] = []
     agent = make_agent(
         fake_monitoring,
         limits={"requestTimeout": 0.05, "shutdownTimeout": 0.05},
@@ -464,8 +495,12 @@ def test_stop_defers_monitoring_cleanup_until_blocked_daemon_exits(
     def blocked_request(
         method: str, path: str, body: bytes | None = None
     ) -> dict[str, object]:
-        assert method == "GET"
-        assert body is None
+        if method == "POST":
+            assert path == "/v1/ingest"
+            assert body is not None
+            final_payloads.append(json.loads(body))
+            return {"accepted": 1}
+        assert method == "GET" and body is None
         entered_request.set()
         assert release_request.wait(timeout=2)
         return {"version": 0, "unchanged": True}
@@ -497,7 +532,8 @@ def test_stop_defers_monitoring_cleanup_until_blocked_daemon_exits(
         event.get("probeId") == "prb_shutdown"
         and event.get("status") == "error"
         and "monitoring cleanup deferred" in str(event.get("detail"))
-        for event in agent._events
+        for payload in final_payloads
+        for event in payload.get("events", [])
     )
     assert "after daemon exit" in output.getvalue()
 

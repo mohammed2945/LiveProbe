@@ -32,6 +32,8 @@ def start(
     *,
     service_id: str,
     broker_url: str,
+    api_key: str | None = None,
+    commit_sha: str | None = None,
     environment: str | None = None,
     redact_keys: list[str] | tuple[str, ...] | None = None,
     redact_values: list[str] | tuple[str, ...] | None = None,
@@ -57,6 +59,8 @@ def start(
         agent = LiveProbe(
             service_id=service_id,
             broker_url=broker_url,
+            api_key=api_key,
+            commit_sha=commit_sha,
             environment=environment,
             redact_keys=redact_keys,
             redact_values=redact_values,

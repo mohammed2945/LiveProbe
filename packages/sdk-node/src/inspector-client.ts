@@ -70,7 +70,7 @@ export class InspectorClient {
   }
 
   setBreakpointByUrl(
-    params: { lineNumber: number; url: string },
+    params: { lineNumber: number; columnNumber?: number; url: string },
     callback: CommandCallback<SetBreakpointResult>,
   ): void {
     this.#send("Debugger.setBreakpointByUrl", params, callback);

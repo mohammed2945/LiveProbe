@@ -64,6 +64,7 @@ DEPLOY_COMMIT="${DEPLOY_COMMIT:-}"
 RELEASE_ARCHIVE="${RELEASE_ARCHIVE:-}"
 BROKER_PORT="${BROKER_PORT:-80}"
 PUBLIC_IP="${PUBLIC_IP:-}"
+LIVEPROBE_API_KEY="${LIVEPROBE_API_KEY:-}"
 
 [[ "$DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
   die "DEPLOY_COMMIT must be a full lowercase Git SHA"
@@ -74,6 +75,7 @@ PUBLIC_IP="${PUBLIC_IP:-}"
 ((10#${BROKER_PORT} >= 1 && 10#${BROKER_PORT} <= 65535)) ||
   die "BROKER_PORT must be between 1 and 65535"
 validate_ipv4 "$PUBLIC_IP"
+[[ -n "$LIVEPROBE_API_KEY" ]] || die "LIVEPROBE_API_KEY must not be empty"
 
 trap 'rm -f -- "$RELEASE_ARCHIVE"' EXIT
 
@@ -165,6 +167,8 @@ ln --symbolic --force --no-dereference --no-target-directory \
   "$release_dir" /opt/liveprobe/current
 
 if ! BROKER_PORT="$BROKER_PORT" \
+  GIT_COMMIT="${DEPLOY_COMMIT:-abcdef1234567890}" \
+  LIVEPROBE_API_KEY="$LIVEPROBE_API_KEY" \
   make --directory=/opt/liveprobe/current \
     DOCKER_COMPOSE="docker compose" \
     gcp-demo-up; then
@@ -177,7 +181,7 @@ post_start_ok=false
 for attempt in {1..12}; do
   if compose_is_healthy "$release_dir" &&
     curl --fail --silent --show-error --max-time 5 \
-      "http://127.0.0.1:${BROKER_PORT}/v1/services" >/dev/null; then
+      "http://127.0.0.1:${BROKER_PORT}/healthz" >/dev/null; then
     post_start_ok=true
     break
   fi

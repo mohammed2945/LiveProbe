@@ -8,10 +8,13 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 require_command git
+require_command node
 [[ "$(git -C "$REPO_ROOT" rev-parse --show-toplevel)" == "$REPO_ROOT" ]] ||
   die "deploy.sh must be located inside the repository root"
 [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]] ||
   die "deployment requires a clean Git working tree"
+[[ -n "${LIVEPROBE_API_KEY:-}" ]] ||
+  die "set LIVEPROBE_API_KEY to the shared broker/MCP/agent bearer key"
 
 DEPLOY_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 validate_commit "$DEPLOY_COMMIT"
@@ -144,11 +147,12 @@ gcloud_cmd compute scp "$archive" "$bootstrap_copy" \
 # The remote shell, not this local shell, must expand status.
 # shellcheck disable=SC2016
 printf -v remote_command \
-  'sudo env DEPLOY_COMMIT=%q RELEASE_ARCHIVE=%q BROKER_PORT=%q PUBLIC_IP=%q bash %q; status=$?; sudo rm -f -- %q; exit $status' \
+  'sudo env DEPLOY_COMMIT=%q RELEASE_ARCHIVE=%q BROKER_PORT=%q PUBLIC_IP=%q LIVEPROBE_API_KEY=%q bash %q; status=$?; sudo rm -f -- %q; exit $status' \
   "$DEPLOY_COMMIT" \
   "$remote_archive" \
   "$BROKER_PORT" \
   "$public_ip" \
+  "$LIVEPROBE_API_KEY" \
   "$remote_bootstrap" \
   "$remote_bootstrap"
 gcloud_cmd compute ssh "$VM_NAME" \
@@ -160,4 +164,4 @@ gcloud_cmd compute ssh "$VM_NAME" \
 printf 'Broker URL: http://%s:%s\n' "$public_ip" "$BROKER_PORT"
 printf 'Deployed SHA to paste when asked: %s\n' "$DEPLOY_COMMIT"
 printf '\nExact Cursor MCP JSON:\n'
-print_cursor_mcp_json "$public_ip" "$BROKER_PORT"
+print_cursor_mcp_json "$public_ip" "$BROKER_PORT" "$LIVEPROBE_API_KEY"

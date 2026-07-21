@@ -20,6 +20,7 @@ APP_SOURCE = DEMO_DIR / "app.py"
 BROKER_ENTRY = REPO_ROOT / "packages" / "broker" / "dist" / "src" / "index.js"
 SERVICE_ID = "billing-worker-e2e"
 PROBE_FILE = "app.py"
+COMMIT_SHA = "abcdef1234567890"
 
 
 def _free_port() -> int:
@@ -261,6 +262,7 @@ def main() -> int:
                         "BUG": "on",
                         "SERVICE_ID": SERVICE_ID,
                         "BROKER_URL": broker_url,
+                        "GIT_COMMIT": COMMIT_SHA,
                         "LIVEPROBE_ENABLED": "on",
                         "LIVEPROBE_POLL_INTERVAL": "0.1",
                         "LIVEPROBE_FLUSH_INTERVAL": "0.25",

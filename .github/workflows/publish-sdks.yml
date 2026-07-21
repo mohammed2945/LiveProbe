@@ -1,0 +1,74 @@
+name: Publish SDK packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and inspect packages without publishing
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/sdk-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+      - run: npm test
+      - run: npm pack --dry-run
+      - if: ${{ !inputs.dry_run }}
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python/sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade build pytest twine
+      - run: python -m pytest
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - if: ${{ !inputs.dry_run }}
+        run: python -m twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+
+  jvm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+      - run: mvn --file java/bridge/pom.xml verify
+      - if: ${{ !inputs.dry_run }}
+        run: mvn --file java/bridge/pom.xml deploy -DskipTests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -103,7 +103,7 @@ public final class Main {
     private static void printUsage() {
         System.err.println("""
                 Usage: java -jar liveprobe-bridge.jar \\
-                  --service <service-id> --attach <host:port> --broker <http(s)://broker>
+                  --service <service-id> --attach <host:port> --broker <http(s)://broker> --commit <sha>
 
                 Optional: --hits-per-second <n>, --redact-key <pattern>, --redact-value <literal>
                 The target must expose JDWP (prefer a localhost bind) and include -g debug information.
@@ -123,6 +123,9 @@ record BridgeConfig(
         String serviceId,
         AttachAddress attach,
         URI brokerUri,
+        String apiKey,
+        String commitSha,
+        String commitSource,
         int hitsPerSecond,
         SafeSerializer.Config serializerConfig,
         boolean help) {
@@ -130,6 +133,8 @@ record BridgeConfig(
         String service = null;
         AttachAddress attach = null;
         URI broker = null;
+        String commit = null;
+        String commitSource = "config";
         int hitsPerSecond = 10;
         ArrayList<String> redactKeys = new ArrayList<>();
         ArrayList<String> redactValues = new ArrayList<>();
@@ -155,6 +160,7 @@ record BridgeConfig(
                         throw new IllegalArgumentException("broker must be a valid URL");
                     }
                 }
+                case "--commit" -> commit = value;
                 case "--hits-per-second" -> hitsPerSecond = positiveInt(value, flag);
                 case "--redact-key" -> redactKeys.add(value);
                 case "--redact-value" -> redactValues.add(value);
@@ -165,7 +171,7 @@ record BridgeConfig(
         if (help) {
             return new BridgeConfig(
                     "", new AttachAddress("localhost", 1), URI.create("http://localhost"),
-                    hitsPerSecond, SafeSerializer.Config.defaults(), true);
+                    "", "abcdef1", "config", hitsPerSecond, SafeSerializer.Config.defaults(), true);
         }
         if (service == null || service.isBlank()) {
             throw new IllegalArgumentException("--service is required");
@@ -176,9 +182,36 @@ record BridgeConfig(
         if (broker == null) {
             throw new IllegalArgumentException("--broker is required");
         }
+        if (commit == null || commit.isBlank()) {
+            commit = env("LIVEPROBE_COMMIT_SHA");
+            if (commit == null || commit.isBlank()) {
+                commit = env("GIT_COMMIT");
+            }
+            commitSource = "env";
+        }
+        if (commit == null || commit.isBlank() || "unknown".equalsIgnoreCase(commit)) {
+            throw new IllegalArgumentException("--commit or LIVEPROBE_COMMIT_SHA/GIT_COMMIT is required");
+        }
+        if (!commit.matches("(?i)^[0-9a-f]{7,64}$")) {
+            throw new IllegalArgumentException("--commit must be a 7-64 character hexadecimal Git object ID");
+        }
         SafeSerializer.Config serializerConfig = new SafeSerializer.Config(
                 3, 3, 50, 1024, 8, redactKeys, redactValues);
-        return new BridgeConfig(service, attach, broker, hitsPerSecond, serializerConfig, false);
+        return new BridgeConfig(
+                service,
+                attach,
+                broker,
+                env("LIVEPROBE_API_KEY"),
+                commit.toLowerCase(),
+                commitSource,
+                hitsPerSecond,
+                serializerConfig,
+                false);
+    }
+
+    private static String env(String name) {
+        String value = System.getenv(name);
+        return value == null || value.isBlank() ? null : value.trim();
     }
 
     private static AttachAddress parseAttach(String value) {
@@ -265,7 +298,12 @@ final class BridgeAgent implements AutoCloseable {
     BridgeAgent(BridgeConfig config, VirtualMachine virtualMachine) {
         this.config = config;
         this.virtualMachine = virtualMachine;
-        this.broker = new BrokerClient(config.brokerUri(), config.serviceId());
+        this.broker = new BrokerClient(
+                config.brokerUri(),
+                config.serviceId(),
+                config.apiKey(),
+                config.commitSha(),
+                config.commitSource());
         this.probeManager = new ProbeManager(
                 virtualMachine,
                 new RateLimiter(config.hitsPerSecond()),
@@ -398,6 +436,19 @@ final class BridgeAgent implements AutoCloseable {
         networkExecutor.shutdownNow();
         safetyExecutor.shutdownNow();
         processorExecutor.shutdown();
+        awaitExecutor(networkExecutor);
+        awaitExecutor(processorExecutor);
+        for (Map<String, Object> event : aggregations.drain()) {
+            eventBuffer.add(event);
+        }
+        List<Map<String, Object>> finalBatch = eventBuffer.drain();
+        try {
+            broker.ingest(probeManager.agentState(), probeManager.agentDetail(), finalBatch);
+        } catch (IOException | RuntimeException exception) {
+            System.err.println("[liveprobe] final broker ingest failed: " + safeMessage(exception));
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
         if (disposeTargetConnection) {
             try {
                 virtualMachine.dispose();
@@ -407,6 +458,17 @@ final class BridgeAgent implements AutoCloseable {
         }
         eventThread.interrupt();
         terminated.countDown();
+    }
+
+    private static void awaitExecutor(ExecutorService executor) {
+        try {
+            if (!executor.awaitTermination(2, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException exception) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static String safeMessage(Throwable throwable) {

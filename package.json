@@ -1,7 +1,6 @@
 {
-<<<<<<< HEAD
   "name": "liveprobe",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "AI-native live production debugger",
   "type": "module",
@@ -9,32 +8,21 @@
   "scripts": {
     "audit:readonly": "node scripts/readonly-audit.mjs",
     "audit:redaction": "sh scripts/redaction-audit.sh",
-    "bench": "pnpm --filter @liveprobe/sdk-node run bench && sh scripts/python312.sh python/sdk/benchmarks/monitoring_overhead.py",
+    "bench": "pnpm --filter @doomslayer2945/liveprobe-node run bench && sh scripts/python312.sh python/sdk/benchmarks/monitoring_overhead.py",
     "build": "pnpm --recursive run build",
     "demo": "make demo",
     "demo:down": "make demo-down",
+    "dev": "tsx server.ts",
     "e2e:jvm": "make e2e-jvm",
     "e2e:node": "make e2e-node",
     "e2e:python": "make e2e-python",
     "fixtures:validate": "node scripts/validate-fixtures.mjs",
+    "frontend:build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "frontend:lint": "tsc --project tsconfig.json --noEmit",
+    "frontend:start": "node dist/server.cjs",
     "test": "pnpm run fixtures:validate && pnpm run typecheck && pnpm run test:packages",
     "test:packages": "pnpm --recursive run test",
     "typecheck": "pnpm --recursive run typecheck"
-  },
-  "devDependencies": {
-    "@types/node": "^26.1.1",
-    "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
-=======
-  "name": "react-example",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
-    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -51,14 +39,15 @@
     "vite": "^6.2.3"
   },
   "devDependencies": {
-    "@types/node": "^22.14.0",
+    "@types/express": "^4.17.21",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.3",
-    "@types/express": "^4.17.21"
->>>>>>> ecf6c31 (Frontend Testing framework)
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   }
 }

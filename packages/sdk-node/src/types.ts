@@ -15,6 +15,9 @@ export interface ProbeDefinition {
   type: ProbeType;
   file: string;
   line: number;
+  runtimeLocation?: string;
+  runtimeLine?: number;
+  runtimeColumn?: number;
   condition?: ProbeCondition;
   watchPaths?: string[];
   template?: string;

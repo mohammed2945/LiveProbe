@@ -292,14 +292,17 @@ export class ProbeManager {
       return;
     }
 
-    const resolution = this.#scripts.resolveBySuffix(probe.file);
+    const targetFile = probe.runtimeLocation ?? probe.file;
+    const targetLine = probe.runtimeLine ?? probe.line;
+    const targetColumn = probe.runtimeColumn ?? 0;
+    const resolution = this.#scripts.resolveBySuffix(targetFile);
     if (resolution.status === "missing") {
-      this.#error(probe, `line-not-found: ${probe.file}:${String(probe.line)}`);
+      this.#error(probe, `line-not-found: ${targetFile}:${String(targetLine)}`);
       return;
     }
     if (resolution.status === "ambiguous") {
       const paths = resolution.matches.map((match) => match.path).join(", ");
-      this.#error(probe, `ambiguous-script: ${probe.file} matched ${paths}`);
+      this.#error(probe, `ambiguous-script: ${targetFile} matched ${paths}`);
       return;
     }
     const script = resolution.script;
@@ -310,7 +313,11 @@ export class ProbeManager {
         { breakpointId: string; locations: readonly unknown[] } | undefined
       >((resolve) => {
         this.#inspector.setBreakpointByUrl(
-          { lineNumber: probe.line - 1, url: script.url },
+          {
+            lineNumber: targetLine - 1,
+            columnNumber: targetColumn,
+            url: script.url,
+          },
           (error, response) => {
             if (error !== null || response === undefined) {
               this.#error(probe, `inspector-arm: ${error?.message ?? "empty response"}`);

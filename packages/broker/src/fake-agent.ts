@@ -28,6 +28,8 @@ const pollResponseSchema = z.union([
 export interface FakeAgentOptions {
   brokerUrl: string;
   serviceId: string;
+  apiKey?: string;
+  commitSha?: string;
   sdk?: AgentSdk;
   pollIntervalMs?: number;
   fetchImplementation?: typeof fetch;
@@ -114,6 +116,8 @@ export function fabricateEvent(
 export class FakeAgent {
   private readonly brokerUrl: string;
   private readonly serviceId: string;
+  private readonly apiKey: string | undefined;
+  private readonly commitSha: string;
   private readonly sdk: AgentSdk;
   private readonly pollIntervalMs: number;
   private readonly fetchImplementation: typeof fetch;
@@ -125,6 +129,8 @@ export class FakeAgent {
   public constructor(options: FakeAgentOptions) {
     this.brokerUrl = options.brokerUrl.replace(/\/+$/, "");
     this.serviceId = options.serviceId;
+    this.apiKey = options.apiKey;
+    this.commitSha = options.commitSha ?? "abcdef1234567890";
     this.sdk = options.sdk ?? "node";
     this.pollIntervalMs = options.pollIntervalMs ?? 1_000;
     this.fetchImplementation = options.fetchImplementation ?? fetch;
@@ -259,11 +265,16 @@ export class FakeAgent {
         method: "POST",
         headers: {
           accept: "application/json",
+          ...(this.apiKey === undefined
+            ? {}
+            : { authorization: `Bearer ${this.apiKey}` }),
           "content-type": "application/json",
         },
         body: JSON.stringify({
           serviceId: this.serviceId,
           sdk: this.sdk,
+          commitSha: this.commitSha,
+          commitSource: "config",
           agentStatus: {
             state: "green",
             detail: `${this.active.size} fake probes active`,

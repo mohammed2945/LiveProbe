@@ -13,6 +13,13 @@ if (!Number.isInteger(pollInterval) || pollInterval <= 0) {
 const agent = new FakeAgent({
   brokerUrl: process.env["BROKER_URL"] ?? "http://127.0.0.1:7070",
   serviceId: process.env["SERVICE_ID"] ?? "fake-service",
+  commitSha:
+    process.env["LIVEPROBE_COMMIT_SHA"] ??
+    process.env["GIT_COMMIT"] ??
+    "abcdef1234567890",
+  ...(process.env["LIVEPROBE_API_KEY"] === undefined
+    ? {}
+    : { apiKey: process.env["LIVEPROBE_API_KEY"] }),
   pollIntervalMs: pollInterval,
   ...(sdk === undefined ? {} : { sdk }),
 });

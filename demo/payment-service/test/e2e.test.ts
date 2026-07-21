@@ -159,12 +159,12 @@ function objectChild(node: SanitizedNode, key: string): SanitizedNode {
   return child;
 }
 
-async function findProbeLine(compiledPaymentsPath: string): Promise<number> {
-  const lines = (await readFile(compiledPaymentsPath, "utf8")).split(/\r?\n/u);
+async function findProbeLine(sourcePaymentsPath: string): Promise<number> {
+  const lines = (await readFile(sourcePaymentsPath, "utf8")).split(/\r?\n/u);
   const matches = lines
     .map((line, index) => (line.includes("LIVEPROBE_SNAPSHOT_TARGET") ? index + 1 : null))
     .filter((line): line is number => line !== null);
-  assert.deepEqual(matches.length, 1, "compiled probe marker must occur exactly once");
+  assert.deepEqual(matches.length, 1, "source probe marker must occur exactly once");
   return matches[0] as number;
 }
 
@@ -205,6 +205,9 @@ test(
           NODE_ENV: "test",
           PORT: String(servicePort),
           SERVICE_ID: serviceId,
+          LIVEPROBE_COMMIT_SHA: "abcdef1234567890",
+          LIVEPROBE_SOURCE_MAP_DIR: resolve(packageRoot, "dist"),
+          LIVEPROBE_DIST_LOCATION: "dist",
         },
       );
       children.push(service);
@@ -231,8 +234,8 @@ test(
       const beforeProbe = await requestJson<StatsResponse>(`${serviceUrl}/stats`);
       assert.equal(beforeProbe.pool.capacity, 5);
 
-      const compiledPaymentsPath = resolve(packageRoot, "dist/src/payments.js");
-      const probeLine = await findProbeLine(compiledPaymentsPath);
+      const sourcePaymentsPath = resolve(packageRoot, "src/payments.ts");
+      const probeLine = await findProbeLine(sourcePaymentsPath);
       const created = await requestJson<{ probe: { id: string } }>(
         `${brokerUrl}/v1/probes`,
         {
@@ -241,7 +244,7 @@ test(
           body: JSON.stringify({
             serviceId,
             type: "snapshot",
-            file: "dist/src/payments.js",
+            file: "src/payments.ts",
             line: probeLine,
             condition: {
               path: "user.tier",

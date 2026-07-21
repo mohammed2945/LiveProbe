@@ -68,6 +68,7 @@ Options:
 
 Environment:
   BROKER_URL          Broker URL fallback
+  LIVEPROBE_API_KEY   Bearer key shared with the broker
 
 Default broker URL: ${DEFAULT_BROKER_URL}`;
 }

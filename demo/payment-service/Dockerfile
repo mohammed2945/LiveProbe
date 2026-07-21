@@ -5,6 +5,8 @@ FROM node:24-bookworm-slim AS build
 WORKDIR /workspace
 COPY packages/sdk-node/package.json packages/sdk-node/package.json
 COPY packages/sdk-node/dist packages/sdk-node/dist
+RUN npm install --prefix packages/sdk-node \
+    --omit=dev --ignore-scripts --no-package-lock --no-audit --no-fund
 COPY demo/payment-service/package.json demo/payment-service/package-lock.json demo/payment-service/
 
 WORKDIR /workspace/demo/payment-service

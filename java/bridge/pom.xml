@@ -1,0 +1,111 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>io.liveprobe</groupId>
+  <artifactId>liveprobe-bridge</artifactId>
+  <version>0.1.0</version>
+  <name>LiveProbe JVM bridge</name>
+  <description>JDI sidecar bridge for LiveProbe</description>
+  <url>https://github.com/mohammed2945/LiveProbe</url>
+
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://opensource.org/license/mit</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <developers>
+    <developer>
+      <name>LiveProbe contributors</name>
+    </developer>
+  </developers>
+  <scm>
+    <connection>scm:git:https://github.com/mohammed2945/LiveProbe.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/mohammed2945/LiveProbe.git</developerConnection>
+    <url>https://github.com/mohammed2945/LiveProbe</url>
+  </scm>
+  <distributionManagement>
+    <repository>
+      <id>github</id>
+      <name>GitHub Packages</name>
+      <url>https://maven.pkg.github.com/mohammed2945/LiveProbe</url>
+    </repository>
+  </distributionManagement>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <build>
+    <resources>
+      <resource>
+        <directory>${project.basedir}</directory>
+        <includes><include>LICENSE</include></includes>
+        <targetPath>META-INF</targetPath>
+      </resource>
+    </resources>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.5.0</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>io.liveprobe.bridge.Main</mainClass>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>3.2.0</version>
+        <executions>
+          <execution>
+            <id>dependency-free-tests</id>
+            <phase>test</phase>
+            <goals><goal>run</goal></goals>
+            <configuration>
+              <target>
+                <java classname="io.liveprobe.bridge.BridgeTests" fork="true" failonerror="true">
+                  <jvmarg value="--add-modules=jdk.jdi" />
+                  <classpath refid="maven.test.classpath" />
+                </java>
+                <java classname="io.liveprobe.bridge.MainSmokeTest" fork="true" failonerror="true">
+                  <jvmarg value="--add-modules=jdk.jdi" />
+                  <classpath refid="maven.test.classpath" />
+                </java>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.4.0</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals><goal>jar-no-fork</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.12.0</version>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

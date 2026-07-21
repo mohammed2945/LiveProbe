@@ -1,13 +1,34 @@
 {
-  "name": "@liveprobe/sdk-node",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@doomslayer2945/liveprobe-node",
+  "version": "0.1.0",
+  "description": "Node.js runtime agent for LiveProbe",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@jridgewell/trace-mapping": "^0.3.31"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
   "scripts": {
     "bench": "node bench/benchmark.mjs",
     "build": "tsc --project tsconfig.json",

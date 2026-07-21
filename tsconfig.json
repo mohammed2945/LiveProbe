@@ -22,5 +22,19 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "server.ts",
+    "vite.config.ts"
+  ],
+  "exclude": [
+    "packages",
+    "demo",
+    "java",
+    "python",
+    "dist",
+    "node_modules"
+  ]
 }

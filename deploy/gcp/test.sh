@@ -33,24 +33,25 @@ grep -F \
   "sudo docker compose -f demo/docker-compose.yml -f deploy/gcp/docker-compose.gcp.yml" \
   <<<"$make_output" >/dev/null ||
   fail "GCP Make targets do not preserve DOCKER_COMPOSE"
-grep -F 'pnpm --filter @liveprobe/sdk-node run build' \
+grep -F 'pnpm --filter @doomslayer2945/liveprobe-node run build' \
   <<<"$make_output" >/dev/null ||
   fail "GCP prerequisites do not build the Node SDK"
 
 # shellcheck source=deploy/gcp/lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
-mcp_json="$(print_cursor_mcp_json 203.0.113.11 80)"
+mcp_json="$(print_cursor_mcp_json 203.0.113.11 80 'fixture-key-with-"quote')"
 node -e '
   const config = JSON.parse(process.argv[1]);
   const server = config.mcpServers?.liveprobe;
   const expected = [
     "-y",
-    "@doomslayer2945/liveprobe-mcp@0.1.0",
+    "@doomslayer2945/liveprobe-mcp@0.1.1",
     "--broker-url",
     "http://203.0.113.11:80",
   ];
   if (server?.command !== "npx" ||
-      JSON.stringify(server.args) !== JSON.stringify(expected)) {
+      JSON.stringify(server.args) !== JSON.stringify(expected) ||
+      server.env?.LIVEPROBE_API_KEY !== "fixture-key-with-\"quote") {
     process.exit(1);
   }
 ' "$mcp_json" || fail "Cursor MCP JSON is invalid"

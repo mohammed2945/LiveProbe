@@ -15,11 +15,22 @@ import java.util.Map;
 final class BrokerClient {
     private final String baseUrl;
     private final String serviceId;
+    private final String apiKey;
+    private final String commitSha;
+    private final String commitSource;
     private final HttpClient client;
 
-    BrokerClient(URI brokerUri, String serviceId) {
+    BrokerClient(
+            URI brokerUri,
+            String serviceId,
+            String apiKey,
+            String commitSha,
+            String commitSource) {
         this.baseUrl = normalizedBase(brokerUri);
         this.serviceId = serviceId;
+        this.apiKey = apiKey;
+        this.commitSha = commitSha;
+        this.commitSource = commitSource;
         this.client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
                 .followRedirects(HttpClient.Redirect.NEVER)
@@ -31,6 +42,7 @@ final class BrokerClient {
         HttpRequest request = HttpRequest.newBuilder(uri)
                 .timeout(Duration.ofSeconds(10))
                 .header("Accept", "application/json")
+                .headers(authHeader())
                 .GET()
                 .build();
         HttpResponse<String> response = client.send(
@@ -43,11 +55,13 @@ final class BrokerClient {
 
     void ingest(String state, String detail, List<Map<String, Object>> events)
             throws IOException, InterruptedException {
-        Map<String, Object> payload = Protocol.ingestPayload(serviceId, state, detail, events);
+        Map<String, Object> payload = Protocol.ingestPayload(
+                serviceId, commitSha, commitSource, state, detail, events);
         HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/ingest"))
                 .timeout(Duration.ofSeconds(10))
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json; charset=utf-8")
+                .headers(authHeader())
                 .POST(HttpRequest.BodyPublishers.ofString(Json.stringify(payload), StandardCharsets.UTF_8))
                 .build();
         HttpResponse<String> response = client.send(
@@ -55,6 +69,13 @@ final class BrokerClient {
         if (response.statusCode() != 202) {
             throw new IOException("broker ingest returned HTTP " + response.statusCode());
         }
+    }
+
+    private String[] authHeader() {
+        if (apiKey == null || apiKey.isBlank()) {
+            return new String[0];
+        }
+        return new String[] {"Authorization", "Bearer " + apiKey};
     }
 
     private static String normalizedBase(URI uri) {

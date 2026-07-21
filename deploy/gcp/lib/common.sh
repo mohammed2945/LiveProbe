@@ -119,24 +119,29 @@ normalize_client_cidr() {
 print_cursor_mcp_json() {
   local ip="$1"
   local port="$2"
+  local api_key="$3"
 
   validate_ipv4 "$ip"
   validate_port "$port"
-  cat <<EOF
-{
-  "mcpServers": {
-    "liveprobe": {
-      "command": "npx",
-      "args": [
+  [[ -n "$api_key" ]] || die "LIVEPROBE_API_KEY must not be empty"
+  node - "$ip" "$port" "$api_key" <<'NODE'
+const [ip, port, apiKey] = process.argv.slice(2);
+const config = {
+  mcpServers: {
+    liveprobe: {
+      command: "npx",
+      args: [
         "-y",
-        "@doomslayer2945/liveprobe-mcp@0.1.0",
+        "@doomslayer2945/liveprobe-mcp@0.1.1",
         "--broker-url",
-        "http://${ip}:${port}"
-      ]
-    }
-  }
-}
-EOF
+        `http://${ip}:${port}`,
+      ],
+      env: { LIVEPROBE_API_KEY: apiKey },
+    },
+  },
+};
+process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
+NODE
 }
 
 resolve_project_id() {

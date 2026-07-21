@@ -206,7 +206,12 @@ final class Protocol {
     }
 
     static Map<String, Object> ingestPayload(
-            String serviceId, String state, String detail, List<Map<String, Object>> events) {
+            String serviceId,
+            String commitSha,
+            String commitSource,
+            String state,
+            String detail,
+            List<Map<String, Object>> events) {
         LinkedHashMap<String, Object> agentStatus = new LinkedHashMap<>();
         agentStatus.put("state", state);
         if (detail != null && !detail.isBlank()) {
@@ -215,6 +220,8 @@ final class Protocol {
         LinkedHashMap<String, Object> payload = new LinkedHashMap<>();
         payload.put("serviceId", serviceId);
         payload.put("sdk", "jvm");
+        payload.put("commitSha", commitSha);
+        payload.put("commitSource", commitSource);
         payload.put("agentStatus", agentStatus);
         payload.put("events", events);
         return payload;

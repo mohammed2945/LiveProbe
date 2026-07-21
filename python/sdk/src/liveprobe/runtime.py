@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import math
+import os
 import queue
 import re
 import sys
@@ -25,6 +26,29 @@ _TEMPLATE_PATH = re.compile(r"\$\{([^{}]+)\}")
 _CONDITION_OPS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte"})
 _MAX_REQUEST_TIMEOUT_SECONDS = 10.0
 _MAX_SHUTDOWN_TIMEOUT_SECONDS = 30.0
+_COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+
+def _env(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip()
+
+
+def _resolve_commit_sha(value: str | None) -> tuple[str, str]:
+    raw = value.strip() if isinstance(value, str) and value.strip() else None
+    source = "config"
+    if raw is None:
+        raw = _env("LIVEPROBE_COMMIT_SHA") or _env("GIT_COMMIT")
+        source = "env"
+    if raw is None or raw.lower() == "unknown":
+        raise ValueError(
+            "commit_sha is required; pass commit_sha or set LIVEPROBE_COMMIT_SHA/GIT_COMMIT"
+        )
+    if _COMMIT_SHA.fullmatch(raw) is None:
+        raise ValueError("commit_sha must be a 7-64 character hexadecimal Git object ID")
+    return raw.lower(), source
 
 
 def _now_rfc3339() -> str:
@@ -431,6 +455,8 @@ class LiveProbe:
         *,
         service_id: str,
         broker_url: str,
+        api_key: str | None = None,
+        commit_sha: str | None = None,
         environment: str | None = None,
         redact_keys: list[str] | tuple[str, ...] | None = None,
         redact_values: list[str] | tuple[str, ...] | None = None,
@@ -451,6 +477,8 @@ class LiveProbe:
 
         self.service_id = service_id
         self.broker_url = broker_url.rstrip("/")
+        self.api_key = api_key if api_key is not None else _env("LIVEPROBE_API_KEY")
+        self.commit_sha, self.commit_source = _resolve_commit_sha(commit_sha)
         self.environment = environment
         self.limits = Limits.from_mapping(limits)
         self.serializer_config = SerializerConfig.from_mapping(
@@ -817,8 +845,7 @@ class LiveProbe:
                 wait_for = min(next_poll, next_flush) - time.monotonic()
                 self._stop_event.wait(max(0.001, min(0.05, wait_for)))
             self._drain_queue()
-            if not self._stopping:
-                self._flush()
+            self._flush()
         finally:
             self._finish_worker()
 
@@ -1249,6 +1276,8 @@ class LiveProbe:
         return {
             "serviceId": self.service_id,
             "sdk": "python",
+            "commitSha": self.commit_sha,
+            "commitSource": self.commit_source,
             "agentStatus": {
                 "state": self._agent_state,
                 "detail": (
@@ -1281,6 +1310,8 @@ class LiveProbe:
         self, method: str, path: str, body: bytes | None = None
     ) -> dict[str, object]:
         headers = {"Accept": "application/json", "User-Agent": "liveprobe-python/0.1"}
+        if self.api_key is not None:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         if body is not None:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(

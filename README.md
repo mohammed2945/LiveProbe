@@ -7,12 +7,12 @@ or metrics from a running Node.js, Python, or JVM process.
 
 This repository is a development prototype, not a production observability
 service. Most packages are intended to be run from this checkout; the stdio MCP
-client is published as `@doomslayer2945/liveprobe-mcp@0.1.0`.
+client release is `@doomslayer2945/liveprobe-mcp@0.1.1`.
 
 ## Architecture
 
 ```text
-AI client -- stdio MCP --> MCP server -- HTTP --> broker + state volume
+AI client -- stdio MCP --> MCP server -- HTTP --> broker + durable store
                                                   |       |        |
                                             Node SDK  Python SDK  Java JDI bridge
                                                   |       |        |
@@ -55,7 +55,7 @@ make test
 Build the SDK and start the broker:
 
 ```sh
-pnpm --filter @liveprobe/sdk-node run build
+pnpm --filter @doomslayer2945/liveprobe-node run build
 pnpm --filter @liveprobe/broker run build
 pnpm --filter @liveprobe/broker start
 ```
@@ -63,11 +63,13 @@ pnpm --filter @liveprobe/broker start
 Start and stop the agent with application lifecycle:
 
 ```ts
-import { LiveProbe } from "@liveprobe/sdk-node";
+import { LiveProbe } from "@doomslayer2945/liveprobe-node";
 
 const agent = await LiveProbe.start({
   serviceId: "payments",
   brokerUrl: "http://127.0.0.1:7070",
+  apiKey: process.env.LIVEPROBE_API_KEY,
+  commitSha: process.env.GIT_COMMIT,
   environment: "development",
 });
 
@@ -86,6 +88,8 @@ import liveprobe
 agent = liveprobe.start(
     service_id="billing",
     broker_url="http://127.0.0.1:7070",
+    api_key="dev-liveprobe-key",
+    commit_sha="abcdef1234567890",
     environment="development",
 )
 
@@ -112,10 +116,12 @@ BUG=on PORT=8082 java \
 In another terminal:
 
 ```sh
+export LIVEPROBE_API_KEY="dev-liveprobe-key"
 java --add-modules jdk.jdi -jar java/bridge/build/liveprobe-bridge.jar \
   --service inventory-service \
   --attach 127.0.0.1:5005 \
-  --broker http://127.0.0.1:7070
+  --broker http://127.0.0.1:7070 \
+  --commit abcdef1234567890
 ```
 
 Keep JDWP on loopback or an equivalent private boundary. Never publish the
@@ -135,17 +141,18 @@ MCP client (replace `/absolute/path/to/LightProbe`):
         "/absolute/path/to/LightProbe/packages/mcp-server/dist/index.js"
       ],
       "env": {
-        "BROKER_URL": "http://127.0.0.1:7070"
+        "BROKER_URL": "http://127.0.0.1:7070",
+        "LIVEPROBE_API_KEY": "dev-liveprobe-key"
       }
     }
   }
 }
 ```
 
-The server exposes tools to list services/probes, create snapshot/log/counter/
-metric probes, read retained data, and remove probes. Creating or removing a
-probe changes diagnostic instrumentation even though it does not intentionally
-change application variables.
+The server exposes ten tools: service/probe listing, four probe setters,
+retained-data retrieval, removal, authenticated connectivity, and a safety
+overview. Creating or removing a probe changes diagnostic instrumentation even
+though it does not intentionally change application variables.
 
 ### Diagnostic workflow
 
@@ -162,18 +169,36 @@ change application variables.
    ```
 
 4. Pass the 7-64 character hexadecimal SHA as `commit_hash` to any MCP
-   set-probe tool. The MCP server normalizes it to lowercase and the broker
-   retains it as `sourceCommit` in probe audit metadata.
+   set-probe tool. The MCP server normalizes it, retains it as probe audit
+   metadata, and warns when it differs from the commit reported by the agent.
 5. Read the evidence and remove the probe when finished.
 
-The commit value is user-supplied metadata, not runtime proof or verification
-that the target service is running that revision.
+The agent-reported commit and operator-provided commit are metadata, not
+cryptographic proof that the target bytecode exactly matches that revision.
+
+## Environment matrix
+
+| Variable | Used by | Purpose |
+| --- | --- | --- |
+| `LIVEPROBE_API_KEY` | broker, MCP, agents | Shared bearer token for all `/v1/*` broker calls. |
+| `DATABASE_URL` | broker | Enables Postgres durable state. If unset, `LIVEPROBE_STATE_FILE` JSON fallback is used. |
+| `LIVEPROBE_STATE_FILE` | broker | Local/dev JSON fallback state file. |
+| `BROKER_URL` | MCP, agents | HTTP origin for the broker. |
+| `LIVEPROBE_COMMIT_SHA` / `GIT_COMMIT` | agents | Required deployed commit SHA reported on every ingest. |
+| `LIVEPROBE_SOURCE_MAP_DIR` | Node agent | Directory containing generated `.map` files. |
+| `LIVEPROBE_DIST_LOCATION` | Node agent | Generated output path segment, default `dist`. |
+| `LIVEPROBE_APP_ROOT` | Node agent | Optional monorepo subdirectory prefixed to uploaded map paths. |
+
+Node agents upload external source maps once per service commit after removing
+embedded source content. The broker resolves source paths and lines to generated
+V8 locations. Python and JVM probes require a runtime-known path suffix; JVM
+targets must include debug line/local-variable metadata.
 
 ## GCP single-VM demo
 
-> **Demo only:** this is a fake-data, single-instance HTTP deployment. The
-> broker has no authentication, authorization, or TLS. It is not a production
-> topology.
+> **Demo only:** this is a fake-data, single-instance HTTP deployment. Broker
+> calls require one shared bearer key, but there is no per-user authorization,
+> tenant isolation, or TLS. It is not a production topology.
 
 The accepted GCE path places the broker, three intentionally buggy services,
 their traffic generators, and the JVM bridge on one VM. Only the broker and SSH
@@ -196,16 +221,21 @@ gcloud config set project "<PROJECT_ID>"
 The deployer rejects tracked modifications and untracked files because it
 archives the clean local `HEAD`. Commit every intended change, confirm
 `git status --short` is empty, make sure
-`@doomslayer2945/liveprobe-mcp@0.1.0` is available from npm, and deploy:
+`@doomslayer2945/liveprobe-mcp@0.1.1` is available from npm, set a strong
+shared key, and deploy:
 
 ```sh
-PROJECT_ID="<PROJECT_ID>" deploy/gcp/deploy.sh
+LIVEPROBE_API_KEY="$(openssl rand -hex 32)" \
+  PROJECT_ID="<PROJECT_ID>" deploy/gcp/deploy.sh
 ```
 
 For the current Stanford visitor Wi-Fi NAT pool and healthy demo, use exactly:
 
 ```sh
-PROJECT_ID=totemic-studio-502902-u2 CLIENT_CIDR=68.65.169.128/28 deploy/gcp/deploy.sh
+LIVEPROBE_API_KEY="<existing-shared-key>" \
+  PROJECT_ID=totemic-studio-502902-u2 \
+  CLIENT_CIDR=68.65.169.128/28 \
+  deploy/gcp/deploy.sh
 ```
 
 `CLIENT_CIDR` configures the inbound GCP firewall rules; it cannot alter or
@@ -239,8 +269,9 @@ prompt:
 
 Host HTTP ports default to broker `7070`, payments `8080`, billing `8081`, and
 inventory `8082`. Override them with `BROKER_PORT`, `PAYMENT_PORT`,
-`BILLING_PORT`, or `INVENTORY_PORT`. Broker state persists in the named
-`broker-state` volume.
+`BILLING_PORT`, or `INVENTORY_PORT`. Broker records persist in the named
+`postgres-data` volume; JSON snapshots remain a fallback only when
+`DATABASE_URL` is unset.
 
 ```sh
 make demo-down
@@ -288,10 +319,12 @@ defense-in-depth filter, not a DLP guarantee: an unrecognized secret can still
 be captured. Keep probe scope narrow, use one-hit/short-TTL probes, review
 custom watch paths, and remove probes promptly.
 
-The broker and demo have no authentication, authorization, or TLS. Run them
-only on a trusted local/development network. The internal Compose network
-reduces JVM diagnostic exposure but is not a substitute for production network
-policy.
+All `/v1/*` broker routes require the shared `LIVEPROBE_API_KEY`; `/healthz` is
+the only unauthenticated route. This is authentication without user-level
+authorization, key rotation, tenant isolation, or TLS. Restrict network access
+and terminate TLS before any use beyond a controlled demo. The internal
+Compose network reduces JVM diagnostic exposure but is not a substitute for
+production network policy.
 
 ## Benchmarks
 
@@ -313,10 +346,10 @@ the deployment hardware for current numbers.
 
 ## Known production limitations
 
-- No broker/MCP authentication, RBAC, tenant isolation, TLS termination, or
-  audit-log durability.
-- Broker persistence is a single-process JSON snapshot, not a transactional or
-  replicated datastore.
+- Shared-key authentication only; no RBAC, tenant isolation, TLS termination,
+  key rotation, or immutable audit-log retention.
+- Postgres mutations are transactional and durable, but the deployment is
+  single-instance and unreplicated. JSON snapshots are a local/dev fallback.
 - No high availability, backpressure service, fleet rollout controller, or
   compatibility guarantees for private package APIs.
 - Source paths, generated JavaScript line mappings, and JVM debug metadata must
@@ -345,7 +378,7 @@ the deployment hardware for current numbers.
 - **MCP client cannot start Docker configuration:** run `make demo` again and
   copy the newly printed absolute-path JSON exactly.
 - **Stale demo evidence:** `make demo-down`, then explicitly remove the
-  `liveprobe-demo_broker-state` volume only if data loss is intended.
+  `liveprobe-demo_postgres-data` volume only if data loss is intended.
 
 ## Prior art and license
 
@@ -354,7 +387,4 @@ Lightrun and Rookout, runtime debugger APIs (V8 Inspector, PEP 669, and JDI),
 and the Model Context Protocol. This is a credit for concepts and ecosystem
 work, not a claim of affiliation.
 
-No `LICENSE` file is currently included. Until one is added, normal copyright
-defaults apply and reuse rights are not granted. Before publishing or accepting
-external contributions, choose an OSI-approved license, add the corresponding
-file, and document dependency/license review.
+LiveProbe is released under the MIT License. See [LICENSE](LICENSE).

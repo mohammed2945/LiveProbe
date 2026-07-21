@@ -18,8 +18,10 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const compiledCli = join(packageRoot, "dist", "cli.js");
 const toolNames = [
   "get_probe_data",
+  "get_safety_overview",
   "list_probes",
   "list_services",
+  "ping_broker",
   "remove_probe",
   "set_counter_probe",
   "set_log_probe",
@@ -63,6 +65,7 @@ describe("liveprobe-mcp CLI", () => {
     expect(output).toContain("Usage: liveprobe-mcp [options]");
     expect(output).toContain("--broker-url <url>");
     expect(output).toContain("BROKER_URL");
+    expect(output).toContain("LIVEPROBE_API_KEY");
   });
 
   it.each([
@@ -80,7 +83,7 @@ describe("liveprobe-mcp CLI", () => {
 
 describe("published tarball", () => {
   it(
-    "installs the packed CLI and lists exactly the eight MCP tools over stdio",
+    "installs the packed CLI and lists exactly the ten MCP tools over stdio",
     async () => {
       const temporaryRoot = mkdtempSync(join(tmpdir(), "liveprobe-mcp-"));
       try {
@@ -143,7 +146,7 @@ describe("published tarball", () => {
         ) as { name?: string; version?: string };
         expect(installedPackageJson).toMatchObject({
           name: "@doomslayer2945/liveprobe-mcp",
-          version: "0.1.0",
+          version: "0.1.1",
         });
 
         const transport = new StdioClientTransport({

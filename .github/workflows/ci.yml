@@ -11,6 +11,22 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: liveprobe_test
+          POSTGRES_USER: liveprobe
+          POSTGRES_PASSWORD: liveprobe
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U liveprobe -d liveprobe_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://liveprobe:liveprobe@127.0.0.1:5432/liveprobe_test
     steps:
       - uses: actions/checkout@v4
 
@@ -64,3 +80,10 @@ jobs:
 
       - name: Build all components
         run: make build
+
+      - name: Verify publishable artifacts
+        run: |
+          (cd packages/mcp-server && npm pack --dry-run)
+          (cd packages/sdk-node && npm pack --dry-run)
+          python/sdk/.venv/bin/python -m pip wheel --no-deps --wheel-dir /tmp/liveprobe-wheel python/sdk
+          mvn --file java/bridge/pom.xml verify

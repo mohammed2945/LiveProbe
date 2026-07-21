@@ -120,10 +120,13 @@ public final class BridgeTests {
 
         Map<String, Object> status = Protocol.statusEvent("prb_test", "armed", "Inventory.java:42");
         Map<String, Object> payload = Protocol.ingestPayload(
-                "inventory-service", "green", "1 probe(s) active", List.of(status));
+                "inventory-service", "abcdef1234567890", "config",
+                "green", "1 probe(s) active", List.of(status));
         Map<String, Object> decoded = Json.parseObject(Json.stringify(payload));
         assertEquals("jvm", decoded.get("sdk"), "JVM SDK mapping");
         assertEquals("inventory-service", decoded.get("serviceId"), "service mapping");
+        assertEquals("abcdef1234567890", decoded.get("commitSha"), "commit SHA mapping");
+        assertEquals("config", decoded.get("commitSource"), "commit source mapping");
         Object events = decoded.get("events");
         assertTrue(events instanceof List<?> list && list.size() == 1, "status event mapping");
     }

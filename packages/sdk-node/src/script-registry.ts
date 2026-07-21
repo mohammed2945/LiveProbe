@@ -36,7 +36,7 @@ export function normalizeScriptPath(value: string): string {
 }
 
 function normalizedProbeSuffix(file: string): string {
-  return normalizeScriptPath(file).replace(/^\.?\//u, "");
+  return normalizeScriptPath(file).replace(/^(?:\.\.\/|\.\/|\/)+/u, "");
 }
 
 function matchesSuffix(path: string, suffix: string): boolean {
@@ -77,6 +77,10 @@ export class ScriptRegistry {
     const matches = [...this.#scripts.values()].filter((script) =>
       matchesSuffix(script.path, suffix),
     );
+    return this.#resolutionFromMatches(matches);
+  }
+
+  #resolutionFromMatches(matches: RegisteredScript[]): ScriptResolution {
     if (matches.length === 0) {
       return { status: "missing" };
     }

@@ -104,6 +104,8 @@ export const SetMetricProbeInputSchema = z
   .strict();
 
 export const ListServicesInputSchema = z.object({}).strict();
+export const PingBrokerInputSchema = z.object({}).strict();
+export const GetSafetyOverviewInputSchema = z.object({}).strict();
 export const ListProbesInputSchema = z
   .object({
     service_id: serviceIdSchema.optional(),
@@ -199,6 +201,8 @@ const serviceSchema = z
   .object({
     serviceId: serviceIdSchema,
     sdk: z.enum(["node", "python", "jvm"]).optional(),
+    commitSha: commitHashSchema.optional(),
+    commitSource: z.enum(["env", "config"]).optional(),
     lastSeen: z.string().datetime({ offset: true }),
     agentStatus: z
       .object({
@@ -215,8 +219,32 @@ const probeEventResponseSchema = z.record(z.string(), z.json());
 const createProbeResponseSchema = z
   .object({ probe: BrokerProbeDefinitionSchema })
   .strict();
+const pingResponseSchema = z.object({ ok: z.literal(true) }).strict();
 const listServicesResponseSchema = z
   .object({ services: z.array(serviceSchema) })
+  .strict();
+const safetyResponseSchema = z
+  .object({
+    services: z.array(
+      z
+        .object({
+          serviceId: serviceIdSchema,
+          sdk: z.enum(["node", "python", "jvm"]).optional(),
+          commitSha: commitHashSchema.optional(),
+          lastSeen: z.string().datetime({ offset: true }),
+          online: z.boolean(),
+          agent: z
+            .object({
+              state: z.enum(["green", "red", "unknown"]),
+              detail: z.string().optional(),
+            })
+            .strict(),
+          probesSummary: z.record(z.string(), z.number().int().nonnegative()),
+          caveats: z.array(z.string()),
+        })
+        .strict(),
+    ),
+  })
   .strict();
 const listProbesResponseSchema = z
   .object({
@@ -309,11 +337,15 @@ export class BrokerClientError extends Error {
 
 export interface BrokerClientOptions {
   fetchImplementation?: typeof fetch;
+  apiKey?: string;
+  requestTimeoutMs?: number;
 }
 
 export class BrokerClient {
   private readonly baseUrl: string;
   private readonly fetchImplementation: typeof fetch;
+  private readonly apiKey: string | undefined;
+  private readonly requestTimeoutMs: number;
 
   public constructor(
     brokerUrl: string,
@@ -335,6 +367,18 @@ export class BrokerClient {
     }
     this.baseUrl = parsed.href.replace(/\/+$/, "");
     this.fetchImplementation = options.fetchImplementation ?? fetch;
+    this.apiKey = options.apiKey;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 5_000;
+    if (
+      !Number.isSafeInteger(this.requestTimeoutMs) ||
+      this.requestTimeoutMs <= 0
+    ) {
+      throw new RangeError("requestTimeoutMs must be a positive safe integer");
+    }
+  }
+
+  public async ping(): Promise<{ ok: true }> {
+    return this.request("GET", "/v1/ping", pingResponseSchema);
   }
 
   public async createProbe(
@@ -385,6 +429,10 @@ export class BrokerClient {
     );
   }
 
+  public async getSafetyOverview(): Promise<z.infer<typeof safetyResponseSchema>> {
+    return this.request("GET", "/v1/safety", safetyResponseSchema);
+  }
+
   public async removeProbe(probeId: string): Promise<void> {
     await this.requestNoContent(
       "DELETE",
@@ -398,10 +446,13 @@ export class BrokerClient {
     schema: z.ZodType<T>,
     body?: unknown,
   ): Promise<T> {
-    const response = await this.fetchImplementation(`${this.baseUrl}${path}`, {
+    const response = await this.fetchWithTimeout(`${this.baseUrl}${path}`, {
       method,
       headers: {
         accept: "application/json",
+        ...(this.apiKey === undefined
+          ? {}
+          : { authorization: `Bearer ${this.apiKey}` }),
         ...(body === undefined
           ? {}
           : { "content-type": "application/json" }),
@@ -418,9 +469,14 @@ export class BrokerClient {
     method: "DELETE",
     path: string,
   ): Promise<void> {
-    const response = await this.fetchImplementation(`${this.baseUrl}${path}`, {
+    const response = await this.fetchWithTimeout(`${this.baseUrl}${path}`, {
       method,
-      headers: { accept: "application/json" },
+      headers: {
+        accept: "application/json",
+        ...(this.apiKey === undefined
+          ? {}
+          : { authorization: `Bearer ${this.apiKey}` }),
+      },
     });
     if (!response.ok) {
       throw await this.toClientError(response);
@@ -430,6 +486,23 @@ export class BrokerClient {
         `broker returned HTTP ${response.status}; expected 204`,
         response.status,
       );
+    }
+  }
+
+  private async fetchWithTimeout(
+    input: string,
+    init: RequestInit,
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    timeout.unref();
+    try {
+      return await this.fetchImplementation(input, {
+        ...init,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -467,11 +540,13 @@ type SetCounterInput = z.input<typeof SetCounterProbeInputSchema>;
 type SetMetricInput = z.input<typeof SetMetricProbeInputSchema>;
 
 export interface ToolHandlers {
-  set_snapshot_probe(input: SetSnapshotInput): Promise<BrokerProbeDefinition>;
-  set_log_probe(input: SetLogInput): Promise<BrokerProbeDefinition>;
-  set_counter_probe(input: SetCounterInput): Promise<BrokerProbeDefinition>;
-  set_metric_probe(input: SetMetricInput): Promise<BrokerProbeDefinition>;
-  list_services(input?: unknown): Promise<{ services: BrokerService[] }>;
+  set_snapshot_probe(input: SetSnapshotInput): Promise<ProbeCreateResult>;
+  set_log_probe(input: SetLogInput): Promise<ProbeCreateResult>;
+  set_counter_probe(input: SetCounterInput): Promise<ProbeCreateResult>;
+  set_metric_probe(input: SetMetricInput): Promise<ProbeCreateResult>;
+  ping_broker(input?: unknown): Promise<{ ok: true }>;
+  get_safety_overview(input?: unknown): Promise<z.infer<typeof safetyResponseSchema>>;
+  list_services(input?: unknown): Promise<{ services: EnrichedService[] }>;
   list_probes(
     input: z.input<typeof ListProbesInputSchema>,
   ): Promise<z.infer<typeof listProbesResponseSchema>>;
@@ -482,6 +557,20 @@ export interface ToolHandlers {
     input: z.input<typeof RemoveProbeInputSchema>,
   ): Promise<{ removed: true; probeId: string }>;
 }
+
+export interface EnrichedService extends BrokerService {
+  online: boolean;
+  caveats: string[];
+}
+
+export type ProbeCreateResult = BrokerProbeDefinition & {
+  probe: BrokerProbeDefinition;
+  commitMismatch?: {
+    requested: string;
+    reported: string;
+    warning: string;
+  };
+};
 
 function optionalCommonFields(input: {
   condition?: BrokerCondition | undefined;
@@ -499,10 +588,44 @@ function optionalCommonFields(input: {
 }
 
 export function createToolHandlers(client: BrokerClient): ToolHandlers {
+  async function createWithCommitWarning(
+    input: BrokerCreateProbeInput,
+  ): Promise<ProbeCreateResult> {
+    const services = await client.listServices();
+    const service = services.services.find(
+      (candidate) => candidate.serviceId === input.serviceId,
+    );
+    if (service === undefined) {
+      throw new BrokerClientError(
+        `service ${input.serviceId} has not reported to the broker; call list_services and use an online service ID`,
+        404,
+        "unknown_service",
+      );
+    }
+    const probe = await client.createProbe(input);
+    if (
+      service?.commitSha !== undefined &&
+      service.commitSha !== input.sourceCommit
+    ) {
+      return {
+        ...probe,
+        probe,
+        commitMismatch: {
+          requested: input.sourceCommit,
+          reported: service.commitSha,
+          warning:
+            `commit_hash ${input.sourceCommit} does not match service ` +
+            `${input.serviceId} reported commitSha ${service.commitSha}`,
+        },
+      };
+    }
+    return { ...probe, probe };
+  }
+
   return {
     async set_snapshot_probe(rawInput) {
       const input = SetSnapshotProbeInputSchema.parse(rawInput);
-      return client.createProbe({
+      return createWithCommitWarning({
         serviceId: input.service_id,
         sourceCommit: input.commit_hash,
         type: "snapshot",
@@ -518,7 +641,7 @@ export function createToolHandlers(client: BrokerClient): ToolHandlers {
     },
     async set_log_probe(rawInput) {
       const input = SetLogProbeInputSchema.parse(rawInput);
-      return client.createProbe({
+      return createWithCommitWarning({
         serviceId: input.service_id,
         sourceCommit: input.commit_hash,
         type: "log",
@@ -532,7 +655,7 @@ export function createToolHandlers(client: BrokerClient): ToolHandlers {
     },
     async set_counter_probe(rawInput) {
       const input = SetCounterProbeInputSchema.parse(rawInput);
-      return client.createProbe({
+      return createWithCommitWarning({
         serviceId: input.service_id,
         sourceCommit: input.commit_hash,
         type: "counter",
@@ -545,7 +668,7 @@ export function createToolHandlers(client: BrokerClient): ToolHandlers {
     },
     async set_metric_probe(rawInput) {
       const input = SetMetricProbeInputSchema.parse(rawInput);
-      return client.createProbe({
+      return createWithCommitWarning({
         serviceId: input.service_id,
         sourceCommit: input.commit_hash,
         type: "metric",
@@ -559,7 +682,29 @@ export function createToolHandlers(client: BrokerClient): ToolHandlers {
     },
     async list_services(rawInput = {}) {
       ListServicesInputSchema.parse(rawInput);
-      return client.listServices();
+      const response = await client.listServices();
+      const now = Date.now();
+      return {
+        services: response.services.map((service) => {
+          const online = now - Date.parse(service.lastSeen) <= 45_000;
+          return {
+            ...service,
+            online,
+            caveats: [
+              "commitSha is agent-reported audit metadata, not cryptographic proof of bytecode identity.",
+              ...(online ? [] : ["service has not heartbeated within 45 seconds"]),
+            ],
+          };
+        }),
+      };
+    },
+    async ping_broker(rawInput = {}) {
+      PingBrokerInputSchema.parse(rawInput);
+      return client.ping();
+    },
+    async get_safety_overview(rawInput = {}) {
+      GetSafetyOverviewInputSchema.parse(rawInput);
+      return client.getSafetyOverview();
     },
     async list_probes(rawInput) {
       const input = ListProbesInputSchema.parse(rawInput);
@@ -585,6 +730,115 @@ function toolResult(value: unknown): {
   };
 }
 
+function toolErrorResult(error: unknown): {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+} {
+  let code = "internal_error";
+  let message = "LiveProbe tool failed unexpectedly";
+  let retryable = false;
+  let checks: string[] = [];
+
+  if (error instanceof BrokerClientError) {
+    code = error.code ?? (error.status === 404 ? "not_found" : "broker_error");
+    message = error.message;
+    if (error.status === 401 || code === "unauthorized") {
+      code = "unauthorized";
+      checks = [
+        "Set LIVEPROBE_API_KEY to the same value used by the broker.",
+        "Restart the MCP server after changing its environment.",
+      ];
+    } else if (code === "unknown_service") {
+      checks = [
+        "Call list_services and use a reported serviceId.",
+        "Confirm the runtime agent is online and heartbeating.",
+      ];
+    } else if (error.status === 404) {
+      checks = [
+        "Refresh services or probes before retrying with the returned ID.",
+      ];
+    }
+  } else if (error instanceof z.ZodError) {
+    code = "invalid_tool_input";
+    message = error.issues[0]?.message ?? "tool input is invalid";
+    checks = ["Correct the tool arguments and retry."];
+  } else if (
+    error instanceof TypeError ||
+    (error instanceof Error && error.name === "AbortError")
+  ) {
+    code = "broker_unreachable";
+    message =
+      error instanceof Error && error.name === "AbortError"
+        ? "The LiveProbe broker request timed out"
+        : "The LiveProbe broker could not be reached";
+    retryable = true;
+    checks = [
+      "Confirm BROKER_URL uses the reachable broker host and port.",
+      "Check that the broker is running and its /healthz endpoint is healthy.",
+    ];
+  }
+
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          { error: { code, message, retryable, checks } },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+}
+
+async function executeTool(
+  action: () => Promise<unknown>,
+  transform: (value: unknown) => unknown = (value) => value,
+): Promise<
+  | ReturnType<typeof toolResult>
+  | ReturnType<typeof toolErrorResult>
+> {
+  try {
+    return toolResult(transform(await action()));
+  } catch (error: unknown) {
+    return toolErrorResult(error);
+  }
+}
+
+function withEmptyStateGuidance(value: unknown): unknown {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "probes" in value &&
+    Array.isArray((value as { probes: unknown[] }).probes) &&
+    (value as { probes: unknown[] }).probes.length === 0
+  ) {
+    return {
+      ...value,
+      guidance: [
+        "No probes matched. Check service_id, whether the service is online, and whether probes have expired or been removed.",
+      ],
+    };
+  }
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "events" in value &&
+    Array.isArray((value as { events: unknown[] }).events) &&
+    (value as { events: unknown[] }).events.length === 0
+  ) {
+    return {
+      ...value,
+      guidance: [
+        "No retained events yet. Check that the probe is armed, the service is online, the line is reachable, and the runtime path matches the probe file.",
+      ],
+    };
+  }
+  return value;
+}
+
 const DEPLOYED_COMMIT_GUIDANCE =
   "Before creating this probe, if the deployed commit SHA is not already known, ask the user for it. When possible, validate that the revision exists in the local repository and inspect source at that exact revision before choosing file and line. commit_hash is user-supplied audit metadata, not runtime proof or runtime verification of the deployed code.";
 
@@ -605,7 +859,8 @@ export function createMcpServer(
       inputSchema: SetSnapshotProbeInputSchema,
       annotations: { destructiveHint: false },
     },
-    async (input) => toolResult(await handlers.set_snapshot_probe(input)),
+    async (input) =>
+      executeTool(() => handlers.set_snapshot_probe(input)),
   );
   server.registerTool(
     "set_log_probe",
@@ -615,7 +870,7 @@ export function createMcpServer(
       inputSchema: SetLogProbeInputSchema,
       annotations: { destructiveHint: false },
     },
-    async (input) => toolResult(await handlers.set_log_probe(input)),
+    async (input) => executeTool(() => handlers.set_log_probe(input)),
   );
   server.registerTool(
     "set_counter_probe",
@@ -625,7 +880,7 @@ export function createMcpServer(
       inputSchema: SetCounterProbeInputSchema,
       annotations: { destructiveHint: false },
     },
-    async (input) => toolResult(await handlers.set_counter_probe(input)),
+    async (input) => executeTool(() => handlers.set_counter_probe(input)),
   );
   server.registerTool(
     "set_metric_probe",
@@ -635,7 +890,7 @@ export function createMcpServer(
       inputSchema: SetMetricProbeInputSchema,
       annotations: { destructiveHint: false },
     },
-    async (input) => toolResult(await handlers.set_metric_probe(input)),
+    async (input) => executeTool(() => handlers.set_metric_probe(input)),
   );
   server.registerTool(
     "list_services",
@@ -646,7 +901,30 @@ export function createMcpServer(
       inputSchema: ListServicesInputSchema,
       annotations: { readOnlyHint: true },
     },
-    async (input) => toolResult(await handlers.list_services(input)),
+    async (input) => executeTool(() => handlers.list_services(input)),
+  );
+  server.registerTool(
+    "ping_broker",
+    {
+      title: "Ping broker",
+      description:
+        "Check cheap broker connectivity. Use this to distinguish broker auth/connectivity failures from empty service state.",
+      inputSchema: PingBrokerInputSchema,
+      annotations: { readOnlyHint: true },
+    },
+    async (input) => executeTool(() => handlers.ping_broker(input)),
+  );
+  server.registerTool(
+    "get_safety_overview",
+    {
+      title: "Get safety overview",
+      description:
+        "Return broker-derived per-service safety state, online status, probe status counts, and caveats about runtime semantics.",
+      inputSchema: GetSafetyOverviewInputSchema,
+      annotations: { readOnlyHint: true },
+    },
+    async (input) =>
+      executeTool(() => handlers.get_safety_overview(input)),
   );
   server.registerTool(
     "list_probes",
@@ -657,7 +935,11 @@ export function createMcpServer(
       inputSchema: ListProbesInputSchema,
       annotations: { readOnlyHint: true },
     },
-    async (input) => toolResult(await handlers.list_probes(input)),
+    async (input) =>
+      executeTool(
+        () => handlers.list_probes(input),
+        withEmptyStateGuidance,
+      ),
   );
   server.registerTool(
     "get_probe_data",
@@ -668,7 +950,11 @@ export function createMcpServer(
       inputSchema: GetProbeDataInputSchema,
       annotations: { readOnlyHint: true },
     },
-    async (input) => toolResult(await handlers.get_probe_data(input)),
+    async (input) =>
+      executeTool(
+        () => handlers.get_probe_data(input),
+        withEmptyStateGuidance,
+      ),
   );
   server.registerTool(
     "remove_probe",
@@ -679,7 +965,7 @@ export function createMcpServer(
       inputSchema: RemoveProbeInputSchema,
       annotations: { destructiveHint: true },
     },
-    async (input) => toolResult(await handlers.remove_probe(input)),
+    async (input) => executeTool(() => handlers.remove_probe(input)),
   );
   return server;
 }
@@ -687,7 +973,12 @@ export function createMcpServer(
 export async function startStdioServer(
   brokerUrl = process.env["BROKER_URL"] ?? "http://127.0.0.1:7070",
 ): Promise<McpServer> {
-  const server = createMcpServer(new BrokerClient(brokerUrl));
+  const apiKey = process.env["LIVEPROBE_API_KEY"];
+  const server = createMcpServer(
+    new BrokerClient(brokerUrl, {
+      ...(apiKey === undefined || apiKey.length === 0 ? {} : { apiKey }),
+    }),
+  );
   await server.connect(new StdioServerTransport());
   return server;
 }

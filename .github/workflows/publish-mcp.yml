@@ -1,0 +1,51 @@
+name: Publish MCP package
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and pack without publishing
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/mcp-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Install package build dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build package
+        run: npm run build
+
+      - name: Test package
+        run: npm test
+
+      - name: Inspect publish contents
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

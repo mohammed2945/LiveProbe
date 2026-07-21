@@ -1,14 +1,36 @@
 name: liveprobe-demo
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: liveprobe
+      POSTGRES_USER: liveprobe
+      POSTGRES_PASSWORD: liveprobe
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U liveprobe -d liveprobe"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - app
+    restart: unless-stopped
+
   broker:
     image: liveprobe-demo-broker:local
     build:
       context: ..
       dockerfile: packages/broker/Dockerfile
     environment:
+      LIVEPROBE_API_KEY: ${LIVEPROBE_API_KEY:-dev-liveprobe-key}
+      DATABASE_URL: postgres://liveprobe:liveprobe@postgres:5432/liveprobe
       LIVEPROBE_STATE_FILE: /var/lib/liveprobe/broker-state.json
       LIVEPROBE_SNAPSHOT_INTERVAL_MS: "1000"
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${BROKER_PORT:-7070}:7070"
     volumes:
@@ -26,6 +48,10 @@ services:
     environment:
       BROKER_URL: http://broker:7070
       BUG: "on"
+      GIT_COMMIT: ${GIT_COMMIT:-abcdef1234567890}
+      LIVEPROBE_API_KEY: ${LIVEPROBE_API_KEY:-dev-liveprobe-key}
+      LIVEPROBE_DIST_LOCATION: dist
+      LIVEPROBE_SOURCE_MAP_DIR: /workspace/demo/payment-service/dist
       SERVICE_ID: payment-service
     depends_on:
       broker:
@@ -64,6 +90,8 @@ services:
     environment:
       BROKER_URL: http://broker:7070
       BUG: "on"
+      GIT_COMMIT: ${GIT_COMMIT:-abcdef1234567890}
+      LIVEPROBE_API_KEY: ${LIVEPROBE_API_KEY:-dev-liveprobe-key}
       SERVICE_ID: billing-worker
       LIVEPROBE_ENABLED: "on"
     depends_on:
@@ -138,6 +166,9 @@ services:
       - inventory-service:5005
       - --broker
       - http://broker:7070
+    environment:
+      GIT_COMMIT: ${GIT_COMMIT:-abcdef1234567890}
+      LIVEPROBE_API_KEY: ${LIVEPROBE_API_KEY:-dev-liveprobe-key}
     healthcheck:
       test: ["CMD-SHELL", "kill -0 1"]
       interval: 5s
@@ -187,6 +218,7 @@ services:
       dockerfile: packages/mcp-server/Dockerfile
     environment:
       BROKER_URL: http://broker:7070
+      LIVEPROBE_API_KEY: ${LIVEPROBE_API_KEY:-dev-liveprobe-key}
     depends_on:
       broker:
         condition: service_healthy
@@ -196,6 +228,7 @@ services:
 
 volumes:
   broker-state:
+  postgres-data:
 
 networks:
   app:

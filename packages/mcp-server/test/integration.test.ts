@@ -23,11 +23,14 @@ afterEach(async () => {
   await Promise.all(openBrokers.splice(0).map((broker) => broker.close()));
 });
 
-async function startBroker(): Promise<{
+async function startBroker(apiKey?: string): Promise<{
   broker: Awaited<ReturnType<typeof buildBroker>>;
   brokerUrl: string;
 }> {
-  const broker = await buildBroker({ ttlSweepIntervalMs: 25 });
+  const broker = await buildBroker({
+    ttlSweepIntervalMs: 25,
+    ...(apiKey === undefined ? {} : { apiKey }),
+  });
   openBrokers.push(broker);
   await broker.listen({ host: "127.0.0.1", port: 0 });
   const address = broker.server.address();
@@ -68,6 +71,7 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       serviceId: "checkout",
       pollIntervalMs: 10,
     });
+    await fakeAgent.tick();
 
     const snapshot = await handlers.set_snapshot_probe({
       service_id: "checkout",
@@ -205,6 +209,15 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       } as never),
     ).rejects.toThrow();
 
+    broker.liveprobeState.ingest({
+      serviceId: "checkout",
+      sdk: "node",
+      commitSha: NORMALIZED_COMMIT,
+      commitSource: "config",
+      agentStatus: { state: "green" },
+      events: [],
+    });
+
     const probe = await handlers.set_counter_probe({
       service_id: "checkout",
       commit_hash: DEPLOYED_COMMIT,
@@ -285,7 +298,43 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     }
   });
 
-  it("publishes exactly the eight official MCP tools", async () => {
+  it("exposes connectivity, safety, and commit mismatch guidance", async () => {
+    const { broker, brokerUrl } = await startBroker();
+    const handlers = createToolHandlers(new BrokerClient(brokerUrl));
+    broker.liveprobeState.ingest({
+      serviceId: "checkout",
+      sdk: "node",
+      commitSha: NORMALIZED_COMMIT,
+      commitSource: "env",
+      agentStatus: { state: "green", detail: "0 probes armed" },
+      events: [],
+    });
+
+    await expect(handlers.ping_broker()).resolves.toEqual({ ok: true });
+    await expect(handlers.get_safety_overview()).resolves.toMatchObject({
+      services: [
+        {
+          serviceId: "checkout",
+          online: true,
+          agent: { state: "green" },
+        },
+      ],
+    });
+
+    const mismatched = await handlers.set_counter_probe({
+      service_id: "checkout",
+      commit_hash: "1234567890abcdef",
+      file: "src/checkout.ts",
+      line: 22,
+    });
+    expect(mismatched.commitMismatch).toMatchObject({
+      requested: "1234567890abcdef",
+      reported: NORMALIZED_COMMIT,
+      warning: expect.stringContaining("does not match"),
+    });
+  });
+
+  it("publishes exactly the ten official MCP tools", async () => {
     const { brokerUrl } = await startBroker();
     const server = createMcpServer(new BrokerClient(brokerUrl));
     const client = new Client(
@@ -301,8 +350,10 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
         "get_probe_data",
+        "get_safety_overview",
         "list_probes",
         "list_services",
+        "ping_broker",
         "remove_probe",
         "set_counter_probe",
         "set_log_probe",
@@ -325,5 +376,118 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       await client.close();
       await server.close();
     }
+  });
+
+  it("returns MCP-friendly auth, unknown-service, and connectivity errors", async () => {
+    const { brokerUrl } = await startBroker("correct-key");
+    const server = createMcpServer(
+      new BrokerClient(brokerUrl, { apiKey: "wrong-key" }),
+    );
+    const client = new Client(
+      { name: "liveprobe-error-test", version: "1.0.0" },
+      { capabilities: {} },
+    );
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const unauthorized = await client.callTool({
+        name: "ping_broker",
+        arguments: {},
+      });
+      expect(unauthorized.isError).toBe(true);
+      expect(unauthorized.content).toEqual([
+        expect.objectContaining({
+          type: "text",
+          text: expect.stringContaining('"code": "unauthorized"'),
+        }),
+      ]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+
+    const serviceServer = createMcpServer(
+      new BrokerClient(brokerUrl, { apiKey: "correct-key" }),
+    );
+    const serviceClient = new Client(
+      { name: "liveprobe-service-error-test", version: "1.0.0" },
+      { capabilities: {} },
+    );
+    const [serviceClientTransport, serviceServerTransport] =
+      InMemoryTransport.createLinkedPair();
+    try {
+      await serviceServer.connect(serviceServerTransport);
+      await serviceClient.connect(serviceClientTransport);
+      const unknownService = await serviceClient.callTool({
+        name: "set_counter_probe",
+        arguments: {
+          service_id: "missing-service",
+          commit_hash: NORMALIZED_COMMIT,
+          file: "src/missing.ts",
+          line: 10,
+        },
+      });
+      expect(unknownService.isError).toBe(true);
+      expect(unknownService.content).toEqual([
+        expect.objectContaining({
+          type: "text",
+          text: expect.stringContaining('"code": "unknown_service"'),
+        }),
+      ]);
+    } finally {
+      await serviceClient.close();
+      await serviceServer.close();
+    }
+
+    const unreachableServer = createMcpServer(
+      new BrokerClient("http://127.0.0.1:1", {
+        fetchImplementation: async () => {
+          throw new TypeError("connection refused");
+        },
+      }),
+    );
+    const unreachableClient = new Client(
+      { name: "liveprobe-connectivity-error-test", version: "1.0.0" },
+      { capabilities: {} },
+    );
+    const [unreachableClientTransport, unreachableServerTransport] =
+      InMemoryTransport.createLinkedPair();
+    try {
+      await unreachableServer.connect(unreachableServerTransport);
+      await unreachableClient.connect(unreachableClientTransport);
+      const unreachable = await unreachableClient.callTool({
+        name: "ping_broker",
+        arguments: {},
+      });
+      expect(unreachable.isError).toBe(true);
+      expect(unreachable.content).toEqual([
+        expect.objectContaining({
+          type: "text",
+          text: expect.stringContaining('"code": "broker_unreachable"'),
+        }),
+      ]);
+    } finally {
+      await unreachableClient.close();
+      await unreachableServer.close();
+    }
+  });
+
+  it("bounds broker requests with a configurable timeout", async () => {
+    const client = new BrokerClient("http://127.0.0.1:7070", {
+      requestTimeoutMs: 10,
+      fetchImplementation: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason),
+            { once: true },
+          );
+        }),
+    });
+
+    await expect(client.ping()).rejects.toMatchObject({ name: "AbortError" });
   });
 });

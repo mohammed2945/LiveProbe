@@ -12,6 +12,8 @@ behavior from another implementation.
    Only a `SanitizedSnapshot` may cross a process or network boundary.
 3. Rate limits are checked before capture work.
 4. Agents communicate only with the configured broker URL.
+5. Agents refuse to start unless a concrete deployed commit SHA is supplied by
+   config or environment.
 
 ## 2. Common conventions
 
@@ -20,9 +22,23 @@ behavior from another implementation.
 - Timestamps are RFC 3339 UTC strings, for example
   `2026-07-19T18:30:00.123Z`.
 - Source lines are one-based positive integers.
+- Runtime columns are zero-based non-negative integers, matching V8 Inspector.
 - Probe IDs are broker-assigned ULIDs prefixed with `prb_`.
 - `serviceId` is a non-empty, deployment-stable identifier supplied by the
   user.
+- All `/v1/*` routes require `Authorization: Bearer <key>` when the broker is
+  configured with `LIVEPROBE_API_KEY`. `GET /healthz` is unauthenticated
+  liveness only. Invalid or missing credentials return HTTP 401:
+
+```json
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "missing or invalid Authorization bearer token"
+  }
+}
+```
+
 - Consumers must ignore unknown response fields. Producers must not emit
   undocumented fields in v1 requests.
 - Errors use this envelope:
@@ -86,6 +102,11 @@ Optional common fields:
   deployed source, retained as probe audit metadata. It is a lowercase
   hexadecimal Git object ID of 7 to 64 characters. It is not runtime proof or
   runtime verification of the code deployed by the target service.
+- `runtimeLocation`, `runtimeLine`, and `runtimeColumn`: an optional complete
+  trio added only to agent poll responses after broker-side source-map
+  resolution. Operators continue to create and read probes using `file` and
+  `line`; runtime coordinates identify the generated JavaScript location used
+  by V8.
 
 Type-specific fields:
 
@@ -124,7 +145,7 @@ Agents short-poll once per second.
 
 ### 4.1 Poll probes
 
-`GET /v1/services/{serviceId}/probes?since={version}`
+`GET /v1/services/{serviceId}/probes?since={version}&commitSha={commitSha}`
 
 When the service's current version is newer than `since`:
 
@@ -148,10 +169,36 @@ Both forms return HTTP 200. The `probes` form contains every currently active,
 non-expired probe for that service, not a delta. A missing `since` is treated as
 `0`.
 
-The broker owns TTL enforcement. Creating, deleting, or expiring a probe
-increments that service's monotonically increasing `version`.
+Node agents include their deployed `commitSha`. When a complete source-map set
+exists for that service and commit, each resolvable probe includes
+`runtimeLocation`, `runtimeLine`, and `runtimeColumn`. Unmapped probes retain
+only their source coordinates so the agent can apply normal runtime-path suffix
+matching for untranspiled JavaScript.
 
-### 4.2 Ingest events and status
+The broker owns TTL enforcement. Creating, deleting, or expiring a probe
+increments that service's monotonically increasing `version`. Completing a new
+source-map set also increments the version so connected agents repoll resolved
+coordinates.
+
+### 4.2 Source-map handshake
+
+Node agents coordinate one uploader per `serviceId` and `commitSha`:
+
+- `POST /v1/source-maps/status` accepts `serviceId`, `commitSha`, and a unique
+  per-process `uploaderId`. It returns `isUploader` and `isComplete`.
+- `POST /v1/source-maps/upload` accepts that identity plus a logical
+  `mapPath` ending in `.js.map` and a Source Map v3 JSON object. It returns HTTP
+  202.
+- `POST /v1/source-maps/complete` marks the set complete and returns HTTP 202.
+
+Only the active uploader lease may upload or complete a set. Uploads are keyed
+durably by service and commit. Agents remove every `sourcesContent` property
+before transmission, and the broker repeats that removal defensively before
+persistence. The broker decodes mappings and converts source file/line
+coordinates into generated file/line/column coordinates; agents do not decode
+maps locally.
+
+### 4.3 Ingest events and status
 
 `POST /v1/ingest`
 
@@ -159,6 +206,8 @@ increments that service's monotonically increasing `version`.
 {
   "serviceId": "payment-service",
   "sdk": "node",
+  "commitSha": "4f3c2a1d9e8b7c6a5f4e3d2c1b0a9876543210ab",
+  "commitSource": "env",
   "agentStatus": {
     "state": "green",
     "detail": "3 probes armed"
@@ -168,6 +217,10 @@ increments that service's monotonically increasing `version`.
 ```
 
 - `sdk` is `node`, `python`, or `jvm`.
+- `commitSha` is required, normalized lowercase hexadecimal, and must be sent
+  on every heartbeat/ingest. It is agent-reported honesty metadata, not
+  cryptographic proof of bytecode identity.
+- `commitSource` is optional and is `env` or `config`.
 - `agentStatus.state` is `green` or `red`.
 - `agentStatus.detail` is optional.
 - `events` may be empty; an empty ingest acts as a service heartbeat.
@@ -182,6 +235,23 @@ A successful ingest returns HTTP 202:
 
 Every event has `probeId`, `type`, and `ts`. Event `type` is `snapshot`, `log`,
 `counter`, `metric`, or `status`.
+
+`GET /v1/services` includes `commitSha` and `commitSource` once an agent has
+heartbeated.
+
+`GET /v1/ping` is the authenticated connectivity check and returns
+`{"ok":true}`. Use `GET /healthz` only for unauthenticated process liveness.
+
+`GET /v1/safety` returns broker-derived per-service `online`, `agent`,
+`probesSummary`, and `caveats`. The caveats are part of the contract: safety is
+agent-reported LiveProbe runtime behavior, not a cross-runtime load metric.
+
+Node agents scan `LIVEPROBE_SOURCE_MAP_DIR` (or the process working directory),
+excluding hidden directories and `node_modules`, and upload external `.js.map`
+files using `LIVEPROBE_DIST_LOCATION` and optional `LIVEPROBE_APP_ROOT` as the
+logical deployment prefix. Python and JVM agents do not load source maps in v1;
+probe `file` must match a runtime-known path suffix and JVM targets must include
+line/local-variable debug information.
 
 Snapshot event:
 

@@ -90,6 +90,7 @@ def test_daemon_polls_captures_flushes_and_stops(fake_monitoring: Any) -> None:
     agent = LiveProbe(
         service_id="integration-service",
         broker_url=f"http://127.0.0.1:{server.server_port}",
+        commit_sha="abcdef1234567890",
         monitoring=fake_monitoring,
         poll_interval=0.02,
         flush_interval=0.02,

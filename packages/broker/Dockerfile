@@ -3,10 +3,10 @@
 FROM node:24-bookworm-slim AS build
 
 WORKDIR /workspace
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages/broker/package.json packages/broker/
 RUN corepack enable \
-    && corepack install \
+    && corepack prepare pnpm@11.9.0 --activate \
     && pnpm install --frozen-lockfile --filter @liveprobe/broker...
 
 COPY packages/broker/tsconfig.json packages/broker/
@@ -22,10 +22,10 @@ ENV NODE_ENV=production \
     LIVEPROBE_STATE_FILE=/var/lib/liveprobe/broker-state.json
 
 WORKDIR /workspace
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/broker/package.json packages/broker/
 RUN corepack enable \
-    && corepack install \
+    && corepack prepare pnpm@11.9.0 --activate \
     && pnpm install --frozen-lockfile --prod --filter @liveprobe/broker...
 COPY --from=build /workspace/packages/broker/dist packages/broker/dist
 
@@ -35,5 +35,5 @@ WORKDIR /workspace/packages/broker
 EXPOSE 7070
 VOLUME ["/var/lib/liveprobe"]
 HEALTHCHECK --interval=5s --timeout=2s --start-period=5s --retries=10 \
-  CMD node -e "fetch('http://127.0.0.1:7070/v1/services').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:7070/healthz').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"
 CMD ["node", "dist/src/index.js"]
