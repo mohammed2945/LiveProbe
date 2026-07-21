@@ -21,8 +21,8 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/mohammed2945/LiveProbe"
-Repository = "https://github.com/mohammed2945/LiveProbe"
+Homepage = "https://github.com/mohammed2945/LightProbe"
+Repository = "https://github.com/mohammed2945/LightProbe"
 
 [project.optional-dependencies]
 test = ["pytest"]

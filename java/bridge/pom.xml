@@ -7,7 +7,7 @@
   <version>0.1.0</version>
   <name>LiveProbe JVM bridge</name>
   <description>JDI sidecar bridge for LiveProbe</description>
-  <url>https://github.com/mohammed2945/LiveProbe</url>
+  <url>https://github.com/mohammed2945/LightProbe</url>
 
   <licenses>
     <license>
@@ -22,15 +22,15 @@
     </developer>
   </developers>
   <scm>
-    <connection>scm:git:https://github.com/mohammed2945/LiveProbe.git</connection>
-    <developerConnection>scm:git:ssh://git@github.com/mohammed2945/LiveProbe.git</developerConnection>
-    <url>https://github.com/mohammed2945/LiveProbe</url>
+    <connection>scm:git:https://github.com/mohammed2945/LightProbe.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/mohammed2945/LightProbe.git</developerConnection>
+    <url>https://github.com/mohammed2945/LightProbe</url>
   </scm>
   <distributionManagement>
     <repository>
       <id>github</id>
       <name>GitHub Packages</name>
-      <url>https://maven.pkg.github.com/mohammed2945/LiveProbe</url>
+      <url>https://maven.pkg.github.com/mohammed2945/LightProbe</url>
     </repository>
   </distributionManagement>
 
