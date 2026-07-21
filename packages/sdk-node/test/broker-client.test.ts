@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BrokerClient } from "../src/broker-client.js";
+import { BrokerClient, BrokerIngestError } from "../src/broker-client.js";
 import type { AgentEvent, ProbeDefinition } from "../src/types.js";
 
 const probe: ProbeDefinition = {
@@ -136,6 +136,25 @@ describe("BrokerClient", () => {
       commitSource: "config",
       agentStatus: { state: "green", detail: "1 probe armed" },
       events,
+    });
+  });
+
+  it("exposes rejected ingest status for retry classification", async () => {
+    const client = new BrokerClient("http://broker:7070", {
+      fetch: (async () => new Response(null, { status: 400 })) as never,
+    });
+
+    await expect(
+      client.ingest(
+        "payments",
+        "abcdef1234567890",
+        "config",
+        { state: "green", detail: "0 probes armed" },
+        [],
+      ),
+    ).rejects.toMatchObject<BrokerIngestError>({
+      name: "BrokerIngestError",
+      statusCode: 400,
     });
   });
 

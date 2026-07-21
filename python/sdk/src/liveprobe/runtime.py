@@ -1252,12 +1252,25 @@ class LiveProbe:
         try:
             self._request_json("POST", "/v1/ingest", body=body)
         except urllib.error.HTTPError as error:
-            self._audit(f"BROKER FLUSH ERROR HTTP {error.code}")
+            if error.code == 400:
+                self._remove_selected_events(selected)
+                self._dropped_hits += len(selected)
+                self._audit(
+                    f"BROKER FLUSH REJECTED HTTP 400; "
+                    f"dropped {len(selected)} event(s)"
+                )
+            else:
+                self._audit(f"BROKER FLUSH ERROR HTTP {error.code}")
             return
         except (OSError, ValueError, json.JSONDecodeError) as error:
             self._audit(f"BROKER FLUSH ERROR {type(error).__name__}")
             return
 
+        self._remove_selected_events(selected)
+
+    def _remove_selected_events(
+        self, selected: list[tuple[str, dict[str, object]]]
+    ) -> None:
         normal_sent = sum(source == "event" for source, _ in selected)
         if normal_sent:
             del self._events[:normal_sent]

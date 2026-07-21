@@ -18,6 +18,13 @@ type FetchLike = (
   },
 ) => Promise<Response>;
 
+export class BrokerIngestError extends Error {
+  constructor(public readonly statusCode: number) {
+    super(`broker ingest failed with HTTP ${String(statusCode)}`);
+    this.name = "BrokerIngestError";
+  }
+}
+
 const PROBE_TYPES = new Set<ProbeType>(["snapshot", "log", "counter", "metric"]);
 const CONDITION_OPERATORS = new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
 
@@ -229,7 +236,7 @@ export class BrokerClient {
       method: "POST",
     });
     if (response.status !== 202) {
-      throw new Error(`broker ingest failed with HTTP ${String(response.status)}`);
+      throw new BrokerIngestError(response.status);
     }
   }
 

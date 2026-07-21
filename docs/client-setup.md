@@ -58,7 +58,7 @@ Install the agent that matches the target service. Use a stable, unique
 Install the published ESM package:
 
 ```sh
-npm install @doomslayer2945/liveprobe-node@0.1.0
+npm install @doomslayer2945/liveprobe-node@0.1.1
 ```
 
 Start it during application startup and stop it during graceful shutdown:
@@ -110,7 +110,7 @@ embedded `sourcesContent` before uploading maps.
 Python uses `sys.monitoring`, so Python 3.12 or newer is required.
 
 ```sh
-python -m pip install liveprobe==0.1.0
+python -m pip install liveprobe==0.1.1
 ```
 
 Start one process-wide agent from the application's lifecycle hook:
@@ -138,7 +138,7 @@ to build and run the service.
 ### JVM bridge, Java 17+
 
 The JVM integration is a zero-dependency JDI sidecar, not a `-javaagent`. The
-artifact is `io.liveprobe:liveprobe-bridge:0.1.0` in the private GitHub Maven
+artifact is `io.liveprobe:liveprobe-bridge:0.1.1` in the private GitHub Maven
 registry for this repository.
 
 Authenticate Maven with a GitHub token that has `read:packages` and access to
@@ -169,7 +169,7 @@ Download the bridge into the local Maven repository:
 
 ```sh
 mvn dependency:get \
-  -Dartifact=io.liveprobe:liveprobe-bridge:0.1.0 \
+  -Dartifact=io.liveprobe:liveprobe-bridge:0.1.1 \
   -DremoteRepositories=github::default::https://maven.pkg.github.com/mohammed2945/LightProbe
 ```
 
@@ -186,7 +186,7 @@ Run the bridge beside the target:
 
 ```sh
 java --add-modules jdk.jdi \
-  -jar "$HOME/.m2/repository/io/liveprobe/liveprobe-bridge/0.1.0/liveprobe-bridge-0.1.0.jar" \
+  -jar "$HOME/.m2/repository/io/liveprobe/liveprobe-bridge/0.1.1/liveprobe-bridge-0.1.1.jar" \
   --service inventory-service \
   --attach 127.0.0.1:5005 \
   --broker "$BROKER_URL" \

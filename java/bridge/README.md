@@ -36,5 +36,5 @@ Optional repeated `--redact-key` and `--redact-value` flags extend the serialize
 `--hits-per-second` defaults to 10.
 
 Maven builds and verifies the publishable artifact with `mvn verify`. The
-package coordinates are `io.liveprobe:liveprobe-bridge:0.1.0`; the first MVP
+package coordinates are `io.liveprobe:liveprobe-bridge:0.1.1`; the first MVP
 publishes to GitHub Packages.

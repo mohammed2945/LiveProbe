@@ -362,6 +362,11 @@ final class BridgeAgent implements AutoCloseable {
         List<Map<String, Object>> batch = eventBuffer.drain();
         try {
             broker.ingest(probeManager.agentState(), probeManager.agentDetail(), batch);
+        } catch (BrokerIngestException exception) {
+            if (!exception.isNonRetryable()) {
+                eventBuffer.restore(batch);
+            }
+            System.err.println("[liveprobe] broker ingest failed: " + safeMessage(exception));
         } catch (IOException | RuntimeException exception) {
             eventBuffer.restore(batch);
             System.err.println("[liveprobe] broker ingest failed: " + safeMessage(exception));

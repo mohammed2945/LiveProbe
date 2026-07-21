@@ -35,6 +35,17 @@ describe("EventBuffer", () => {
 
     expect(buffer.takeBatch(10_000).map((event) => event.probeId)).toEqual(["old", "new"]);
   });
+
+  it("accounts for batches rejected as non-retryable", () => {
+    const buffer = new EventBuffer(10_000);
+    buffer.enqueue(status("removed", "stale"));
+    const rejected = buffer.takeBatch(10_000);
+
+    buffer.recordRejected(rejected);
+
+    expect(buffer.length).toBe(0);
+    expect(buffer.droppedEvents).toBe(1);
+  });
 });
 
 describe("AggregateBuffer", () => {

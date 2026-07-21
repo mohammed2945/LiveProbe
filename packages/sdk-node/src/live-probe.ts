@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { BrokerClient } from "./broker-client.js";
+import { BrokerClient, BrokerIngestError } from "./broker-client.js";
 import { AggregateBuffer, EventBuffer } from "./event-buffer.js";
 import { InspectorClient } from "./inspector-client.js";
 import { ProbeManager } from "./probe-manager.js";
@@ -364,7 +364,11 @@ export class LiveProbe {
       );
       this.#clearBrokerError();
     } catch (error) {
-      this.#events.requeueFront(events);
+      if (error instanceof BrokerIngestError && error.statusCode === 400) {
+        this.#events.recordRejected(events);
+      } else {
+        this.#events.requeueFront(events);
+      }
       this.#reportBrokerError(error);
     }
   }

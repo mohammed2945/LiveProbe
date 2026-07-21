@@ -26,6 +26,7 @@ public final class BridgeTests {
         testSerializerFixtures();
         testConditions();
         testProtocolMapping();
+        testIngestRetryClassification();
         testRateLimiter();
         testFalseThenTrueHitLimit();
         testConcurrentMatchingSlots();
@@ -141,6 +142,15 @@ public final class BridgeTests {
         clock.advance(TimeUnit.SECONDS.toNanos(1));
         assertTrue(limiter.tryAcquire(), "new window permits");
         assertEquals(1, limiter.remaining(), "remaining permits");
+    }
+
+    private static void testIngestRetryClassification() {
+        BrokerIngestException rejected = new BrokerIngestException(400);
+        BrokerIngestException unavailable = new BrokerIngestException(503);
+
+        assertTrue(rejected.isNonRetryable(), "invalid ingest is non-retryable");
+        assertFalse(unavailable.isNonRetryable(), "broker failure remains retryable");
+        assertEquals(400, rejected.statusCode(), "ingest status is retained");
     }
 
     private static void testFalseThenTrueHitLimit() {

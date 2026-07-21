@@ -4,6 +4,7 @@ import io
 import json
 import threading
 import time
+import urllib.error
 from typing import Any
 
 import pytest
@@ -434,6 +435,69 @@ def test_oversized_event_is_dropped_without_exceeding_bandwidth(
     assert sent and len(sent[0]) <= 1024
     assert not agent._events
     assert "EVENT DROPPED prb_large" in output.getvalue()
+
+
+def test_invalid_ingest_batch_is_dropped_and_does_not_block_later_events(
+    fake_monitoring: Any,
+) -> None:
+    output = io.StringIO()
+    agent = make_agent(fake_monitoring, output=output)
+    attempts = 0
+    accepted: list[list[dict[str, object]]] = []
+
+    def request(method: str, path: str, body: bytes | None = None) -> dict[str, object]:
+        nonlocal attempts
+        assert method == "POST"
+        assert path == "/v1/ingest"
+        assert body is not None
+        attempts += 1
+        payload = json.loads(body)
+        if attempts == 1:
+            raise urllib.error.HTTPError(
+                "http://broker/v1/ingest",
+                400,
+                "Bad Request",
+                {},
+                io.BytesIO(
+                    b'{"error":{"code":"invalid_request",'
+                    b'"message":"event references unknown probe prb_removed"}}'
+                ),
+            )
+        accepted.append(payload["events"])
+        return {"accepted": len(payload["events"])}
+
+    agent._request_json = request  # type: ignore[method-assign]
+    agent._append_event(
+        {
+            "probeId": "prb_removed",
+            "type": "log",
+            "ts": "2026-07-19T00:00:00.000Z",
+            "message": "stale",
+            "level": "info",
+        }
+    )
+
+    agent._flush()
+
+    assert not agent._events
+    assert agent._dropped_hits == 1
+    assert "BROKER FLUSH REJECTED HTTP 400; dropped 1 event(s)" in output.getvalue()
+
+    agent._append_event(
+        {
+            "probeId": "prb_current",
+            "type": "log",
+            "ts": "2026-07-19T00:00:01.000Z",
+            "message": "current",
+            "level": "info",
+        }
+    )
+    agent._flush()
+
+    assert not agent._events
+    assert [[event["probeId"] for event in batch] for batch in accepted] == [
+        ["prb_current"]
+    ]
 
 
 def test_ingest_payload_includes_commit_metadata(fake_monitoring: Any) -> None:

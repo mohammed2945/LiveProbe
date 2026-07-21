@@ -10,8 +10,8 @@ or metrics from a running Node.js, Python, or JVM process.
 This repository is a development prototype, not a production observability
 service. Published client packages are
 `@doomslayer2945/liveprobe-mcp@0.1.1`,
-`@doomslayer2945/liveprobe-node@0.1.0`, `liveprobe==0.1.0`, and
-`io.liveprobe:liveprobe-bridge:0.1.0`.
+`@doomslayer2945/liveprobe-node@0.1.1`, `liveprobe==0.1.1`, and
+`io.liveprobe:liveprobe-bridge:0.1.1`.
 
 For application teams connecting to an existing broker, start with the
 **[client setup guide](docs/client-setup.md)**. It covers credentials,

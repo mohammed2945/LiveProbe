@@ -78,6 +78,10 @@ export class EventBuffer {
       }
     }
   }
+
+  recordRejected(events: readonly AgentEvent[]): void {
+    this.#dropped += events.length;
+  }
 }
 
 interface MetricAggregate {

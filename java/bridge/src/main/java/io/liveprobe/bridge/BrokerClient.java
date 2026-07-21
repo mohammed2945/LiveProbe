@@ -67,7 +67,7 @@ final class BrokerClient {
         HttpResponse<String> response = client.send(
                 request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         if (response.statusCode() != 202) {
-            throw new IOException("broker ingest returned HTTP " + response.statusCode());
+            throw new BrokerIngestException(response.statusCode());
         }
     }
 
@@ -96,5 +96,22 @@ final class BrokerClient {
 
     private static String pathSegment(String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
+    }
+}
+
+final class BrokerIngestException extends IOException {
+    private final int statusCode;
+
+    BrokerIngestException(int statusCode) {
+        super("broker ingest returned HTTP " + statusCode);
+        this.statusCode = statusCode;
+    }
+
+    int statusCode() {
+        return statusCode;
+    }
+
+    boolean isNonRetryable() {
+        return statusCode == 400;
     }
 }
