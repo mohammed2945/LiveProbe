@@ -1,4 +1,4 @@
-import { Client, type QueryResultRow } from "pg";
+import { Pool, type PoolClient, type QueryResultRow } from "pg";
 
 import type { BrokerState, IngestInput } from "../index.js";
 import {
@@ -53,29 +53,45 @@ interface SourceMapRow extends QueryResultRow {
   uploaded_at: Date;
 }
 
+export interface PostgresStoreOptions {
+  maxConnections?: number;
+}
+
 export class PostgresStore {
   public readonly incremental = true;
+  private readonly pool: Pool;
+  private migrationPromise: Promise<void> | undefined;
+  private closePromise: Promise<void> | undefined;
 
-  public constructor(private readonly databaseUrl: string) {
+  public constructor(
+    databaseUrl: string,
+    options: PostgresStoreOptions = {},
+  ) {
     if (databaseUrl.trim().length === 0) {
       throw new Error("DATABASE_URL must be non-empty");
     }
+    const maxConnections = options.maxConnections ?? 10;
+    if (!Number.isSafeInteger(maxConnections) || maxConnections <= 0) {
+      throw new RangeError("maxConnections must be a positive safe integer");
+    }
+    this.pool = new Pool({
+      connectionString: databaseUrl,
+      max: maxConnections,
+    });
+    this.pool.on("error", () => {
+      process.stderr.write("[liveprobe] unexpected idle PostgreSQL client error\n");
+    });
   }
 
   public async healthCheck(): Promise<void> {
-    const client = await this.connect();
-    try {
-      await client.query("select 1");
-    } finally {
-      await client.end();
-    }
+    await this.pool.query("select 1");
   }
 
   public async restore(state: BrokerState): Promise<void> {
-    const client = await this.connect();
+    await this.ensureMigrated();
+    const client = await this.pool.connect();
     let restoredLegacySnapshot = false;
     try {
-      await this.migrate(client);
       const services = await client.query<ServiceRow>(
         `select service_id, last_seen, sdk, commit_sha, commit_source, agent_status
          from services order by service_id`,
@@ -196,7 +212,7 @@ export class PostgresStore {
         })),
       });
     } finally {
-      await client.end();
+      client.release();
       if (restoredLegacySnapshot) {
         await this.persist(state);
       }
@@ -205,9 +221,9 @@ export class PostgresStore {
 
   public async persist(state: BrokerState): Promise<void> {
     const snapshot = state.snapshot();
-    const client = await this.connect();
+    await this.ensureMigrated();
+    const client = await this.pool.connect();
     try {
-      await this.migrate(client);
       await client.query("begin");
       await client.query("select pg_advisory_xact_lock($1)", [
         1_276_638_214,
@@ -222,7 +238,7 @@ export class PostgresStore {
       await client.query("rollback").catch(() => undefined);
       throw error;
     } finally {
-      await client.end();
+      client.release();
     }
   }
 
@@ -282,9 +298,9 @@ export class PostgresStore {
   ): Promise<void> {
     const set = state.getSourceMapSet(serviceId, commitSha);
     if (set === undefined) return;
-    const client = await this.connect();
+    await this.ensureMigrated();
+    const client = await this.pool.connect();
     try {
-      await this.migrate(client);
       await client.query("begin");
       await client.query("select pg_advisory_xact_lock($1)", [1_276_638_214]);
       await client.query(
@@ -338,12 +354,17 @@ export class PostgresStore {
       await client.query("rollback").catch(() => undefined);
       throw error;
     } finally {
-      await client.end();
+      client.release();
     }
   }
 
+  public close(): Promise<void> {
+    this.closePromise ??= this.pool.end();
+    return this.closePromise;
+  }
+
   private async insertServices(
-    client: Client,
+    client: PoolClient,
     services: ReturnType<BrokerState["snapshot"]>["services"],
   ): Promise<void> {
     if (services.length === 0) return;
@@ -379,7 +400,7 @@ export class PostgresStore {
   }
 
   private async insertProbes(
-    client: Client,
+    client: PoolClient,
     probes: ReturnType<BrokerState["snapshot"]>["probes"],
   ): Promise<void> {
     if (probes.length === 0) return;
@@ -413,7 +434,7 @@ export class PostgresStore {
   }
 
   private async insertEvents(
-    client: Client,
+    client: PoolClient,
     events: ReturnType<BrokerState["snapshot"]>["events"],
   ): Promise<void> {
     const rows = events.flatMap((entry) =>
@@ -439,7 +460,7 @@ export class PostgresStore {
   }
 
   private async insertStatuses(
-    client: Client,
+    client: PoolClient,
     statuses: ReturnType<BrokerState["snapshot"]>["statuses"],
   ): Promise<void> {
     if (statuses.length === 0) return;
@@ -469,7 +490,7 @@ export class PostgresStore {
   }
 
   private async insertVersions(
-    client: Client,
+    client: PoolClient,
     versions: ReturnType<BrokerState["snapshot"]>["serviceVersions"],
   ): Promise<void> {
     if (versions.length === 0) return;
@@ -491,18 +512,12 @@ export class PostgresStore {
     );
   }
 
-  private async connect(): Promise<Client> {
-    const client = new Client({ connectionString: this.databaseUrl });
-    await client.connect();
-    return client;
-  }
-
   private async withTransaction(
-    action: (client: Client) => Promise<void>,
+    action: (client: PoolClient) => Promise<void>,
   ): Promise<void> {
-    const client = await this.connect();
+    await this.ensureMigrated();
+    const client = await this.pool.connect();
     try {
-      await this.migrate(client);
       await client.query("begin");
       await client.query("select pg_advisory_xact_lock($1)", [1_276_638_214]);
       await action(client);
@@ -511,11 +526,31 @@ export class PostgresStore {
       await client.query("rollback").catch(() => undefined);
       throw error;
     } finally {
-      await client.end();
+      client.release();
     }
   }
 
-  private async migrate(client: Client): Promise<void> {
+  private async ensureMigrated(): Promise<void> {
+    if (this.migrationPromise === undefined) {
+      const migration = this.runMigration();
+      this.migrationPromise = migration.catch((error: unknown) => {
+        this.migrationPromise = undefined;
+        throw error;
+      });
+    }
+    await this.migrationPromise;
+  }
+
+  private async runMigration(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await this.migrate(client);
+    } finally {
+      client.release();
+    }
+  }
+
+  private async migrate(client: PoolClient): Promise<void> {
     await client.query("begin");
     try {
       await client.query("select pg_advisory_xact_lock($1)", [

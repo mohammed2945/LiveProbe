@@ -64,6 +64,46 @@ class EventBeforeRegistrationState extends BrokerState {
 }
 
 describe("broker validation and storage", () => {
+  it("closes its durable store during shutdown", async () => {
+    let closeCalls = 0;
+    const broker = await buildBroker({
+      store: {
+        async restore() {},
+        async persist() {},
+        async close() {
+          closeCalls += 1;
+        },
+      },
+    });
+
+    await broker.close();
+
+    expect(closeCalls).toBe(1);
+  });
+
+  it("releases store and long-poll resources when final persistence fails", async () => {
+    let closeCalls = 0;
+    const broker = await buildBroker({
+      store: {
+        async restore() {},
+        async persist() {
+          throw new Error("final persistence failed");
+        },
+        async close() {
+          closeCalls += 1;
+        },
+      },
+    });
+    const pendingPoll = broker.liveprobeState.waitForEvents("probe-1", 60_000);
+    expect(broker.liveprobeState.pendingLongPollCount()).toBe(1);
+
+    await expect(broker.close()).rejects.toThrow("final persistence failed");
+
+    expect(closeCalls).toBe(1);
+    await expect(pendingPoll).resolves.toBe("aborted");
+    expect(broker.liveprobeState.pendingLongPollCount()).toBe(0);
+  });
+
   it("rolls back a probe mutation when durable persistence fails", async () => {
     const broker = await buildBroker({
       store: {
@@ -722,6 +762,25 @@ describe("TTL and configurable persistence", () => {
 const postgresIt =
   process.env["TEST_DATABASE_URL"] === undefined ? it.skip : it;
 
+describe("Postgres store lifecycle", () => {
+  it("rejects invalid connection pool sizes", () => {
+    expect(
+      () =>
+        new PostgresStore("postgres://localhost/liveprobe", {
+          maxConnections: 0,
+        }),
+    ).toThrow("maxConnections must be a positive safe integer");
+  });
+
+  it("closes an unused pool idempotently", async () => {
+    const store = new PostgresStore("postgres://localhost/liveprobe");
+    const firstClose = store.close();
+
+    expect(store.close()).toBe(firstClose);
+    await firstClose;
+  });
+});
+
 describe("Postgres persistence", () => {
   postgresIt("restores normalized broker state after restart", async () => {
     const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
@@ -734,8 +793,9 @@ describe("Postgres persistence", () => {
     `);
     await cleanup.end();
 
+    const firstStore = new PostgresStore(databaseUrl);
     const first = await buildBroker({
-      store: new PostgresStore(databaseUrl),
+      store: firstStore,
       persistence: false,
     });
     openBrokers.push(first);
@@ -805,6 +865,7 @@ describe("Postgres persistence", () => {
     });
     await first.close();
     openBrokers.splice(openBrokers.indexOf(first), 1);
+    await expect(firstStore.healthCheck()).rejects.toThrow();
 
     const restored = await buildBroker({
       store: new PostgresStore(databaseUrl),

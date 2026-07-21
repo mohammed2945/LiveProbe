@@ -382,6 +382,7 @@ export interface PersistenceOptions {
 
 export interface BrokerStore {
   readonly incremental?: boolean;
+  close?(): Promise<void>;
   healthCheck?(): Promise<void>;
   restore(state: BrokerState): Promise<void>;
   persist(state: BrokerState): Promise<void>;
@@ -1330,7 +1331,13 @@ export async function buildBroker(
     options.store ??
     (process.env["DATABASE_URL"] !== undefined &&
     process.env["DATABASE_URL"].length > 0
-      ? new PostgresStore(process.env["DATABASE_URL"])
+      ? new PostgresStore(process.env["DATABASE_URL"], {
+          maxConnections:
+            optionalPositiveInteger(
+              process.env["LIVEPROBE_DB_POOL_SIZE"],
+              "LIVEPROBE_DB_POOL_SIZE",
+            ) ?? 10,
+        })
       : options.persistence === false || options.persistence === undefined
         ? false
         : new JsonFileStore(options.persistence));
@@ -1665,11 +1672,20 @@ export async function buildBroker(
     if (persistenceTimer !== undefined) {
       clearInterval(persistenceTimer);
     }
-    await mutationQueue;
-    if (store !== false) {
-      await store.persist(state);
+    try {
+      try {
+        await mutationQueue;
+        if (store !== false) {
+          await store.persist(state);
+        }
+      } finally {
+        if (store !== false) {
+          await store.close?.();
+        }
+      }
+    } finally {
+      state.dispose();
     }
-    state.dispose();
   });
 
   return app;

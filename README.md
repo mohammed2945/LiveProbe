@@ -191,6 +191,7 @@ cryptographic proof that the target bytecode exactly matches that revision.
 | --- | --- | --- |
 | `LIVEPROBE_API_KEY` | broker, MCP, agents | Shared bearer token for all `/v1/*` broker calls. |
 | `DATABASE_URL` | broker | Enables Postgres durable state. If unset, `LIVEPROBE_STATE_FILE` JSON fallback is used. |
+| `LIVEPROBE_DB_POOL_SIZE` | broker | Maximum Postgres connections held by the broker. Defaults to `10`. |
 | `LIVEPROBE_STATE_FILE` | broker | Local/dev JSON fallback state file. |
 | `BROKER_URL` | MCP, agents | HTTP origin for the broker. |
 | `LIVEPROBE_COMMIT_SHA` / `GIT_COMMIT` | agents | Required deployed commit SHA reported on every ingest. |
