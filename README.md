@@ -8,8 +8,15 @@ probes; and runtime agents collect bounded snapshots, dynamic logs, counters,
 or metrics from a running Node.js, Python, or JVM process.
 
 This repository is a development prototype, not a production observability
-service. Most packages are intended to be run from this checkout; the stdio MCP
-client release is `@doomslayer2945/liveprobe-mcp@0.1.1`.
+service. Published client packages are
+`@doomslayer2945/liveprobe-mcp@0.1.1`,
+`@doomslayer2945/liveprobe-node@0.1.0`, `liveprobe==0.1.0`, and
+`io.liveprobe:liveprobe-bridge:0.1.0`.
+
+For application teams connecting to an existing broker, start with the
+**[client setup guide](docs/client-setup.md)**. It covers credentials,
+connectivity, SDK installation, source maps, JVM debugging, MCP configuration,
+tool usage, and troubleshooting.
 
 ## Architecture
 
