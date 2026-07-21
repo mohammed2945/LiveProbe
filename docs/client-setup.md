@@ -5,20 +5,19 @@ client to an existing LiveProbe broker. It does not cover deploying the broker.
 
 ## 1. Get connection details
 
-Ask the LiveProbe operator for:
+The current internal test deployment uses:
 
-- `BROKER_URL`: the reachable `http://` or `https://` broker origin.
-- `LIVEPROBE_API_KEY`: the shared bearer key for the test environment.
-- Network access to the broker. The current GCP test deployment allowlists
-  client public IP ranges, so provide the operator with your egress IP when
-  access is blocked.
+- `BROKER_URL`: `http://136.116.88.131`
+- `LIVEPROBE_API_KEY`: `31a0b10124f362ed92a465754d358e28d460fea0659d7d84793cae36fb2a5884`
 
-Set the values only in your shell, secret manager, or deployment environment.
-Do not commit the API key.
+These values are intentionally included for internal testing. The repository
+and broker must remain restricted, and this key must be rotated before broader
+access or non-test data is allowed. The GCP firewall allowlists client public
+IP ranges, so provide the operator with your egress IP when access is blocked.
 
 ```sh
-export BROKER_URL="https://liveprobe.example.internal"
-export LIVEPROBE_API_KEY="<provided-by-the-operator>"
+export BROKER_URL="http://136.116.88.131"
+export LIVEPROBE_API_KEY="31a0b10124f362ed92a465754d358e28d460fea0659d7d84793cae36fb2a5884"
 export GIT_COMMIT="$(git rev-parse HEAD)"
 ```
 
@@ -203,7 +202,7 @@ npx -y @doomslayer2945/liveprobe-mcp@0.1.1 --help
 ```
 
 For Cursor or another client that accepts the common `mcpServers` JSON shape,
-add this configuration and replace the placeholders:
+add this configuration:
 
 ```json
 {
@@ -214,10 +213,10 @@ add this configuration and replace the placeholders:
         "-y",
         "@doomslayer2945/liveprobe-mcp@0.1.1",
         "--broker-url",
-        "https://liveprobe.example.internal"
+        "http://136.116.88.131"
       ],
       "env": {
-        "LIVEPROBE_API_KEY": "<provided-by-the-operator>"
+        "LIVEPROBE_API_KEY": "31a0b10124f362ed92a465754d358e28d460fea0659d7d84793cae36fb2a5884"
       }
     }
   }
@@ -302,4 +301,3 @@ the repository.
   callbacks add work inside the target process.
 - Never expose a JVM JDWP port publicly.
 - Remove probes as soon as the investigation is complete.
-
