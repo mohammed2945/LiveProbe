@@ -12,8 +12,16 @@ The current internal test deployment uses:
 
 These values are intentionally included for internal testing. The repository
 and broker must remain restricted, and this key must be rotated before broader
-access or non-test data is allowed. The GCP firewall allowlists client public
-IP ranges, so provide the operator with your egress IP when access is blocked.
+access or non-test data is allowed. During the Cloud Run integration demo, the
+broker's external TCP port `80` temporarily accepts connections from all IPv4
+sources. Every `/v1/*` request still requires the bearer key. External port
+`7070` is not published; it is only the broker container's internal port.
+
+This public ingress is a temporary testing exception. Before production, route
+Cloud Run outbound traffic through Direct VPC egress and Cloud NAT with a
+reserved static IP, restrict the broker firewall to that IP, terminate TLS,
+and rotate the shared key. See Google's [static outbound IP
+guide](https://docs.cloud.google.com/run/docs/configuring/static-outbound-ip).
 
 ```sh
 export BROKER_URL="http://136.116.88.131"
@@ -280,7 +288,7 @@ the repository.
 | Symptom | Check |
 | --- | --- |
 | MCP returns `unauthorized` | The MCP and agent key must match the broker key; restart the MCP client after changing it. |
-| Broker is unreachable | Check `BROKER_URL`, `/healthz`, VPN/firewall access, and the client's current egress IP. |
+| Broker is unreachable | Check `BROKER_URL`, `/healthz`, Cloud Run logs, and whether the temporary demo firewall rule is still active. |
 | No services are listed | Confirm the agent started, can reach the broker, and has a valid deployed commit. |
 | Service is offline | The broker has not received a heartbeat for more than 45 seconds. Inspect application or bridge logs. |
 | Commit mismatch warning | Use the actual deployed revision; do not substitute local `HEAD`. |
@@ -294,6 +302,8 @@ the repository.
 ## 6. Test-environment safety
 
 - The current MVP uses one shared API key and has no tenant isolation or RBAC.
+- Broker ingress is temporarily public on TCP `80` for Cloud Run testing; the
+  bearer key is the only request-level boundary during this test window.
 - Use TLS, VPN, or another trusted network path for non-demo data.
 - Snapshots can capture values that the redaction rules do not recognize.
 - Use short-lived, narrow probes and avoid broad watch paths.
