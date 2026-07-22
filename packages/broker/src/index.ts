@@ -5,10 +5,22 @@ import { pathToFileURL } from "node:url";
 
 import Fastify, {
   type FastifyInstance,
+  type FastifyRequest,
   type FastifyServerOptions,
 } from "fastify";
 import { z, ZodError } from "zod";
 
+import {
+  SERVICE_API_KEY_PREFIX,
+  createServiceCredentialMaterial,
+  hashBearerToken,
+  servicePrincipal,
+  sharedPrincipal,
+  type BrokerPrincipal,
+  type ResourceScope,
+  type ServiceCredentialRecord,
+  type StoredServiceCredential,
+} from "./auth.js";
 import { PostgresStore } from "./store/postgres.js";
 import {
   resolveSourceLocation,
@@ -18,6 +30,17 @@ import {
 } from "./source-map-resolver.js";
 
 export { PostgresStore } from "./store/postgres.js";
+export {
+  SERVICE_API_KEY_PREFIX,
+  createServiceCredentialMaterial,
+  hashBearerToken,
+} from "./auth.js";
+export type {
+  BrokerPrincipal,
+  ResourceScope,
+  ServiceCredentialRecord,
+  StoredServiceCredential,
+} from "./auth.js";
 export {
   DEFAULT_ENVIRONMENT_ID,
   DEFAULT_PROJECT_ID,
@@ -399,6 +422,19 @@ export interface BrokerStore {
     serviceId: string,
     commitSha: string,
   ): Promise<void>;
+  createServiceCredential?(
+    credential: StoredServiceCredential,
+  ): Promise<ServiceCredentialRecord>;
+  listServiceCredentials?(
+    scope: ResourceScope,
+  ): Promise<ServiceCredentialRecord[]>;
+  revokeServiceCredential?(
+    credentialId: string,
+    scope: ResourceScope,
+  ): Promise<boolean>;
+  authenticateServiceCredential?(
+    secretHash: string,
+  ): Promise<ServiceCredentialRecord | undefined>;
 }
 
 export interface BuildBrokerOptions {
@@ -444,6 +480,48 @@ function bearerTokenMatches(
       supplied.length === expected.length && timingSafeEqual(supplied, expected)
     );
   });
+}
+
+function bearerToken(authorization: string | undefined): string | undefined {
+  if (authorization === undefined || !authorization.startsWith("Bearer ")) {
+    return undefined;
+  }
+  const token = authorization.slice("Bearer ".length);
+  return token.length === 0 ? undefined : token;
+}
+
+function principalFor(request: FastifyRequest): BrokerPrincipal {
+  if (request.liveprobePrincipal === null) {
+    throw new Error("authenticated request is missing its principal");
+  }
+  return request.liveprobePrincipal;
+}
+
+function requireOperator(request: FastifyRequest): BrokerPrincipal {
+  const principal = principalFor(request);
+  if (principal.role !== "operator") {
+    throw new BrokerHttpError(
+      403,
+      "forbidden",
+      "this credential cannot manage probes or broker resources",
+    );
+  }
+  return principal;
+}
+
+function requireServiceAccess(
+  request: FastifyRequest,
+  serviceId: string,
+): BrokerPrincipal {
+  const principal = principalFor(request);
+  if (principal.type === "service" && principal.serviceId !== serviceId) {
+    throw new BrokerHttpError(
+      403,
+      "forbidden",
+      `service credential cannot access service ${serviceId}`,
+    );
+  }
+  return principal;
 }
 
 function encodeCrockford(value: bigint, length: number): string {
@@ -1334,6 +1412,17 @@ const sourceMapUploadSchema = z
     map: z.record(z.string(), z.unknown()),
   })
   .strict();
+const serviceCredentialCreateSchema = z
+  .object({
+    serviceId: serviceIdSchema,
+    label: z.string().trim().min(1).max(200),
+  })
+  .strict();
+const serviceCredentialParamsSchema = z
+  .object({
+    credentialId: z.string().regex(/^svc_[0-9a-f]{32}$/),
+  })
+  .strict();
 
 export async function buildBroker(
   options: BuildBrokerOptions = {},
@@ -1373,6 +1462,7 @@ export async function buildBroker(
     bodyLimit: SOURCE_MAP_BODY_LIMIT_BYTES,
   });
   app.decorate("liveprobeState", state);
+  app.decorateRequest("liveprobePrincipal", null);
 
   app.get("/healthz", async () => ({ ok: true }));
   app.get("/readyz", async (request, reply) => {
@@ -1400,16 +1490,36 @@ export async function buildBroker(
     throw new Error("at most two API keys can be configured");
   }
   app.addHook("preHandler", async (request) => {
-    if (!request.url.startsWith("/v1/") || apiKeys.length === 0) {
+    if (!request.url.startsWith("/v1/")) {
       return;
     }
-    if (!bearerTokenMatches(request.headers.authorization, apiKeys)) {
-      throw new BrokerHttpError(
-        401,
-        "unauthorized",
-        "missing or invalid Authorization bearer token",
-      );
+    if (apiKeys.length === 0) {
+      request.liveprobePrincipal = sharedPrincipal("development");
+      return;
     }
+    if (bearerTokenMatches(request.headers.authorization, apiKeys)) {
+      request.liveprobePrincipal = sharedPrincipal("shared-key");
+      return;
+    }
+    const token = bearerToken(request.headers.authorization);
+    if (
+      token?.startsWith(SERVICE_API_KEY_PREFIX) === true &&
+      store !== false &&
+      store.authenticateServiceCredential !== undefined
+    ) {
+      const credential = await store.authenticateServiceCredential(
+        hashBearerToken(token),
+      );
+      if (credential !== undefined) {
+        request.liveprobePrincipal = servicePrincipal(credential);
+        return;
+      }
+    }
+    throw new BrokerHttpError(
+      401,
+      "unauthorized",
+      "missing or invalid Authorization bearer token",
+    );
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -1493,6 +1603,7 @@ export async function buildBroker(
   };
 
   app.post("/v1/probes", async (request, reply) => {
+    requireOperator(request);
     emptyQuerySchema.parse(request.query);
     const input = CreateProbeSchema.parse(request.body);
     const probe = await mutateDurably(
@@ -1508,6 +1619,7 @@ export async function buildBroker(
   });
 
   app.delete("/v1/probes/:id", async (request, reply) => {
+    requireOperator(request);
     emptyQuerySchema.parse(request.query);
     const { id } = probeParamsSchema.parse(request.params);
     await mutateDurably(
@@ -1523,11 +1635,13 @@ export async function buildBroker(
   });
 
   app.get("/v1/probes", async (request) => {
+    requireOperator(request);
     const { serviceId } = listProbeQuerySchema.parse(request.query);
     return { probes: state.listProbes(serviceId) };
   });
 
   app.get("/v1/services", async (request) => {
+    requireOperator(request);
     emptyQuerySchema.parse(request.query);
     return { services: state.listServices() };
   });
@@ -1538,14 +1652,85 @@ export async function buildBroker(
   });
 
   app.get("/v1/safety", async (request) => {
+    requireOperator(request);
     emptyQuerySchema.parse(request.query);
     return state.safetyOverview();
   });
+
+  app.post("/v1/service-credentials", async (request, reply) => {
+    const principal = requireOperator(request);
+    emptyQuerySchema.parse(request.query);
+    const input = serviceCredentialCreateSchema.parse(request.body);
+    if (store === false || store.createServiceCredential === undefined) {
+      throw new BrokerHttpError(
+        503,
+        "credential_store_unavailable",
+        "service credentials require the PostgreSQL durable store",
+      );
+    }
+    const material = createServiceCredentialMaterial({
+      serviceId: input.serviceId,
+      label: input.label,
+      scope: principal,
+      now: new Date(state.now()),
+    });
+    const credential = await store.createServiceCredential(material.record);
+    return reply.status(201).send({
+      credential,
+      apiKey: material.apiKey,
+    });
+  });
+
+  app.get("/v1/service-credentials", async (request) => {
+    const principal = requireOperator(request);
+    emptyQuerySchema.parse(request.query);
+    if (store === false || store.listServiceCredentials === undefined) {
+      throw new BrokerHttpError(
+        503,
+        "credential_store_unavailable",
+        "service credentials require the PostgreSQL durable store",
+      );
+    }
+    return {
+      credentials: await store.listServiceCredentials(principal),
+    };
+  });
+
+  app.delete(
+    "/v1/service-credentials/:credentialId",
+    async (request, reply) => {
+      const principal = requireOperator(request);
+      emptyQuerySchema.parse(request.query);
+      const { credentialId } = serviceCredentialParamsSchema.parse(
+        request.params,
+      );
+      if (store === false || store.revokeServiceCredential === undefined) {
+        throw new BrokerHttpError(
+          503,
+          "credential_store_unavailable",
+          "service credentials require the PostgreSQL durable store",
+        );
+      }
+      const revoked = await store.revokeServiceCredential(
+        credentialId,
+        principal,
+      );
+      if (!revoked) {
+        throw new BrokerHttpError(
+          404,
+          "not_found",
+          `service credential ${credentialId} was not found or is already revoked`,
+        );
+      }
+      return reply.status(204).send();
+    },
+  );
 
   app.get(
     "/v1/services/:serviceId/probes",
     async (request) => {
       const { serviceId } = pollParamsSchema.parse(request.params);
+      requireServiceAccess(request, serviceId);
       const { since, commitSha } = pollQuerySchema.parse(request.query);
       return state.pollProbes(serviceId, since, commitSha);
     },
@@ -1554,6 +1739,7 @@ export async function buildBroker(
   app.post("/v1/source-maps/status", async (request) => {
     emptyQuerySchema.parse(request.query);
     const input = sourceMapStatusSchema.parse(request.body);
+    requireServiceAccess(request, input.serviceId);
     const previousMapCount =
       state.getSourceMapSet(input.serviceId, input.commitSha)?.maps.length ?? 0;
     const status = state.sourceMapStatus(
@@ -1574,6 +1760,7 @@ export async function buildBroker(
   app.post("/v1/source-maps/upload", async (request, reply) => {
     emptyQuerySchema.parse(request.query);
     const input = sourceMapUploadSchema.parse(request.body);
+    requireServiceAccess(request, input.serviceId);
     await mutateDurably(
       () => state.uploadSourceMap(input),
       async () => persistSourceMapSet(input.serviceId, input.commitSha),
@@ -1584,6 +1771,7 @@ export async function buildBroker(
   app.post("/v1/source-maps/complete", async (request, reply) => {
     emptyQuerySchema.parse(request.query);
     const input = sourceMapStatusSchema.parse(request.body);
+    requireServiceAccess(request, input.serviceId);
     await mutateDurably(
       () =>
         state.completeSourceMaps(
@@ -1599,6 +1787,7 @@ export async function buildBroker(
   app.post("/v1/ingest", async (request, reply) => {
     emptyQuerySchema.parse(request.query);
     const input = IngestSchema.parse(request.body);
+    requireServiceAccess(request, input.serviceId);
     const accepted = await mutateDurably(
       () => state.ingest(input),
       async () => {
@@ -1612,6 +1801,7 @@ export async function buildBroker(
   });
 
   app.get("/v1/probes/:id/data", async (request, reply) => {
+    requireOperator(request);
     const { id } = probeParamsSchema.parse(request.params);
     const query = dataQuerySchema.parse(request.query);
     const waitSeconds = Math.min(30, Math.max(0, query.waitSeconds));
@@ -1723,6 +1913,10 @@ export async function buildBroker(
 declare module "fastify" {
   interface FastifyInstance {
     liveprobeState: BrokerState;
+  }
+
+  interface FastifyRequest {
+    liveprobePrincipal: BrokerPrincipal | null;
   }
 }
 

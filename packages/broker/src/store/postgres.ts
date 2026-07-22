@@ -1,5 +1,10 @@
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
 
+import type {
+  ResourceScope,
+  ServiceCredentialRecord,
+  StoredServiceCredential,
+} from "../auth.js";
 import type { BrokerState, IngestInput } from "../index.js";
 import {
   POSTGRES_MIGRATION_SQL,
@@ -51,6 +56,40 @@ interface SourceMapRow extends QueryResultRow {
   map_path: string;
   source_map: Record<string, unknown>;
   uploaded_at: Date;
+}
+
+interface ServiceCredentialRow extends QueryResultRow {
+  credential_id: string;
+  tenant_id: string;
+  project_id: string;
+  environment_id: string;
+  service_id: string;
+  label: string;
+  key_prefix: string;
+  created_at: Date;
+  last_used_at: Date | null;
+  revoked_at: Date | null;
+}
+
+function serviceCredentialRecord(
+  row: ServiceCredentialRow,
+): ServiceCredentialRecord {
+  return {
+    credentialId: row.credential_id,
+    tenantId: row.tenant_id,
+    projectId: row.project_id,
+    environmentId: row.environment_id,
+    serviceId: row.service_id,
+    label: row.label,
+    keyPrefix: row.key_prefix,
+    createdAt: row.created_at.toISOString(),
+    ...(row.last_used_at === null
+      ? {}
+      : { lastUsedAt: row.last_used_at.toISOString() }),
+    ...(row.revoked_at === null
+      ? {}
+      : { revokedAt: row.revoked_at.toISOString() }),
+  };
 }
 
 export interface PostgresStoreOptions {
@@ -356,6 +395,97 @@ export class PostgresStore {
     } finally {
       client.release();
     }
+  }
+
+  public async createServiceCredential(
+    credential: StoredServiceCredential,
+  ): Promise<ServiceCredentialRecord> {
+    await this.ensureMigrated();
+    const result = await this.pool.query<ServiceCredentialRow>(
+      `insert into service_credentials (
+         credential_id, tenant_id, project_id, environment_id, service_id,
+         label, key_prefix, secret_hash, created_at
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz)
+       returning credential_id, tenant_id, project_id, environment_id,
+         service_id, label, key_prefix, created_at, last_used_at, revoked_at`,
+      [
+        credential.credentialId,
+        credential.tenantId,
+        credential.projectId,
+        credential.environmentId,
+        credential.serviceId,
+        credential.label,
+        credential.keyPrefix,
+        credential.secretHash,
+        credential.createdAt,
+      ],
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new Error("PostgreSQL did not return the created service credential");
+    }
+    return serviceCredentialRecord(row);
+  }
+
+  public async listServiceCredentials(
+    scope: ResourceScope,
+  ): Promise<ServiceCredentialRecord[]> {
+    await this.ensureMigrated();
+    const result = await this.pool.query<ServiceCredentialRow>(
+      `select credential_id, tenant_id, project_id, environment_id,
+         service_id, label, key_prefix, created_at, last_used_at, revoked_at
+       from service_credentials
+       where tenant_id = $1 and project_id = $2 and environment_id = $3
+       order by created_at, credential_id`,
+      [scope.tenantId, scope.projectId, scope.environmentId],
+    );
+    return result.rows.map(serviceCredentialRecord);
+  }
+
+  public async revokeServiceCredential(
+    credentialId: string,
+    scope: ResourceScope,
+  ): Promise<boolean> {
+    await this.ensureMigrated();
+    const result = await this.pool.query(
+      `update service_credentials set revoked_at = now()
+       where credential_id = $1 and tenant_id = $2 and project_id = $3
+         and environment_id = $4 and revoked_at is null
+       returning credential_id`,
+      [
+        credentialId,
+        scope.tenantId,
+        scope.projectId,
+        scope.environmentId,
+      ],
+    );
+    return result.rowCount === 1;
+  }
+
+  public async authenticateServiceCredential(
+    secretHash: string,
+  ): Promise<ServiceCredentialRecord | undefined> {
+    await this.ensureMigrated();
+    const result = await this.pool.query<ServiceCredentialRow>(
+      `select credential_id, tenant_id, project_id, environment_id,
+         service_id, label, key_prefix, created_at, last_used_at, revoked_at
+       from service_credentials
+       where secret_hash = $1 and revoked_at is null`,
+      [secretHash],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return undefined;
+    if (
+      row.last_used_at === null ||
+      row.last_used_at.getTime() < Date.now() - 5 * 60_000
+    ) {
+      await this.pool.query(
+        `update service_credentials set last_used_at = now()
+         where credential_id = $1 and revoked_at is null`,
+        [row.credential_id],
+      );
+    }
+    return serviceCredentialRecord(row);
   }
 
   public close(): Promise<void> {

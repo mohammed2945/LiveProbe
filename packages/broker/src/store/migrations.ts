@@ -1,4 +1,4 @@
-export const POSTGRES_SCHEMA_VERSION = 3;
+export const POSTGRES_SCHEMA_VERSION = 4;
 
 export const DEFAULT_TENANT_ID = "internal";
 export const DEFAULT_PROJECT_ID = "default";
@@ -124,6 +124,23 @@ export const POSTGRES_MIGRATION_SQL = `
       references source_map_sets(service_id, commit_sha) on delete cascade
   );
 
+  create table if not exists service_credentials (
+    credential_id text primary key,
+    tenant_id text not null default '${DEFAULT_TENANT_ID}',
+    project_id text not null default '${DEFAULT_PROJECT_ID}',
+    environment_id text not null default '${DEFAULT_ENVIRONMENT_ID}',
+    service_id text not null,
+    label text not null,
+    key_prefix text not null,
+    secret_hash text not null unique,
+    created_at timestamptz not null,
+    last_used_at timestamptz,
+    revoked_at timestamptz,
+    constraint service_credentials_scope_fk
+      foreign key (tenant_id, project_id, environment_id)
+      references environments(tenant_id, project_id, environment_id)
+  );
+
   alter table services
     add column if not exists tenant_id text not null default '${DEFAULT_TENANT_ID}',
     add column if not exists project_id text not null default '${DEFAULT_PROJECT_ID}',
@@ -218,5 +235,9 @@ export const POSTGRES_MIGRATION_SQL = `
   create index if not exists source_maps_scope_idx
     on source_maps (
       tenant_id, project_id, environment_id, service_id, commit_sha
+    );
+  create index if not exists service_credentials_scope_idx
+    on service_credentials (
+      tenant_id, project_id, environment_id, service_id, created_at
     );
 `;

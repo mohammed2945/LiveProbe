@@ -13,6 +13,7 @@ import {
   DEFAULT_TENANT_ID,
   PostgresStore,
   buildBroker,
+  createServiceCredentialMaterial,
   type ProbeDefinition,
 } from "../src/index.js";
 
@@ -191,6 +192,82 @@ describe("broker validation and storage", () => {
     await expect(
       buildBroker({ apiKeys: ["key-one", "key-two", "key-three"] }),
     ).rejects.toThrow("at most two API keys");
+  });
+
+  it("limits service credentials to their assigned agent routes", async () => {
+    const material = createServiceCredentialMaterial({
+      serviceId: "orders",
+      label: "Orders production",
+    });
+    const broker = await buildBroker({
+      apiKey: "operator-fixture-key",
+      store: {
+        async restore() {},
+        async persist() {},
+        async authenticateServiceCredential(secretHash) {
+          return secretHash === material.record.secretHash
+            ? material.record
+            : undefined;
+        },
+      },
+    });
+    openBrokers.push(broker);
+    const serviceHeaders = {
+      authorization: `Bearer ${material.apiKey}`,
+    };
+
+    const ping = await broker.inject({
+      method: "GET",
+      url: "/v1/ping",
+      headers: serviceHeaders,
+    });
+    expect(ping.statusCode).toBe(200);
+
+    const ingest = await broker.inject({
+      method: "POST",
+      url: "/v1/ingest",
+      headers: serviceHeaders,
+      payload: {
+        serviceId: "orders",
+        sdk: "node",
+        commitSha: "abcdef1234567890",
+        commitSource: "config",
+        agentStatus: { state: "green" },
+        events: [],
+      },
+    });
+    expect(ingest.statusCode).toBe(202);
+
+    const poll = await broker.inject({
+      method: "GET",
+      url: "/v1/services/orders/probes?since=0",
+      headers: serviceHeaders,
+    });
+    expect(poll.statusCode).toBe(200);
+
+    const otherService = await broker.inject({
+      method: "GET",
+      url: "/v1/services/billing/probes?since=0",
+      headers: serviceHeaders,
+    });
+    expect(otherService.statusCode).toBe(403);
+    expect(otherService.json()).toMatchObject({
+      error: { code: "forbidden" },
+    });
+
+    const operatorRoute = await broker.inject({
+      method: "GET",
+      url: "/v1/services",
+      headers: serviceHeaders,
+    });
+    expect(operatorRoute.statusCode).toBe(403);
+
+    const sharedOperator = await broker.inject({
+      method: "GET",
+      url: "/v1/services",
+      headers: { authorization: "Bearer operator-fixture-key" },
+    });
+    expect(sharedOperator.statusCode).toBe(200);
   });
 
   it("reports unavailable when the durable store fails its readiness check", async () => {
@@ -799,9 +876,10 @@ async function resetPostgresSchema(databaseUrl: string): Promise<void> {
   await cleanup.connect();
   try {
     await cleanup.query(`
-      drop table if exists source_maps, source_map_sets, probe_events,
-        probe_statuses, probes, services, service_versions, environments,
-        projects, tenants, liveprobe_schema_migrations, broker_snapshots cascade
+      drop table if exists service_credentials, source_maps, source_map_sets,
+        probe_events, probe_statuses, probes, services, service_versions,
+        environments, projects, tenants, liveprobe_schema_migrations,
+        broker_snapshots cascade
     `);
   } finally {
     await cleanup.end();
@@ -953,6 +1031,7 @@ describe("Postgres persistence", () => {
         "probes",
         "environments",
         "projects",
+        "service_credentials",
         "service_versions",
         "services",
         "source_map_sets",
@@ -966,6 +1045,7 @@ describe("Postgres persistence", () => {
       "probe_statuses",
       "probes",
       "projects",
+      "service_credentials",
       "service_versions",
       "services",
       "source_map_sets",
@@ -1019,6 +1099,7 @@ describe("Postgres persistence", () => {
          values ('legacy-service', now(), 'node')`,
       );
       await legacy.query(`
+        drop table service_credentials;
         drop table environments, projects, tenants cascade;
         alter table services
           drop column tenant_id,
@@ -1094,9 +1175,136 @@ describe("Postgres persistence", () => {
       const versions = await inspection.query<{ version: number }>(
         `select version from liveprobe_schema_migrations order by version`,
       );
-      expect(versions.rows.map(({ version }) => version)).toEqual([2, 3]);
+      expect(versions.rows.map(({ version }) => version)).toEqual([2, 4]);
     } finally {
       await inspection.end();
     }
+  });
+
+  postgresIt("creates, scopes, and revokes hashed service credentials", async () => {
+    const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
+    await resetPostgresSchema(databaseUrl);
+    const operatorKey = "postgres-operator-fixture-key";
+    const broker = await buildBroker({
+      apiKey: operatorKey,
+      store: new PostgresStore(databaseUrl),
+      persistence: false,
+    });
+    openBrokers.push(broker);
+    const operatorHeaders = { authorization: `Bearer ${operatorKey}` };
+
+    const created = await broker.inject({
+      method: "POST",
+      url: "/v1/service-credentials",
+      headers: operatorHeaders,
+      payload: { serviceId: "payments", label: "Payments production" },
+    });
+    expect(created.statusCode).toBe(201);
+    const createdBody = created.json<{
+      apiKey: string;
+      credential: {
+        credentialId: string;
+        serviceId: string;
+        keyPrefix: string;
+      };
+    }>();
+    expect(createdBody.apiKey).toMatch(/^lp_service_[A-Za-z0-9_-]{43}$/);
+    expect(createdBody.credential).toMatchObject({
+      serviceId: "payments",
+      keyPrefix: expect.stringMatching(/^lp_service_[A-Za-z0-9_-]{8}$/),
+    });
+    expect(JSON.stringify(createdBody.credential)).not.toContain("secretHash");
+
+    const serviceHeaders = {
+      authorization: `Bearer ${createdBody.apiKey}`,
+    };
+    const accepted = await broker.inject({
+      method: "POST",
+      url: "/v1/ingest",
+      headers: serviceHeaders,
+      payload: {
+        serviceId: "payments",
+        sdk: "node",
+        commitSha: "abcdef1234567890",
+        commitSource: "config",
+        agentStatus: { state: "green" },
+        events: [],
+      },
+    });
+    expect(accepted.statusCode).toBe(202);
+
+    const wrongService = await broker.inject({
+      method: "POST",
+      url: "/v1/ingest",
+      headers: serviceHeaders,
+      payload: {
+        serviceId: "orders",
+        sdk: "node",
+        commitSha: "abcdef1234567890",
+        commitSource: "config",
+        agentStatus: { state: "green" },
+        events: [],
+      },
+    });
+    expect(wrongService.statusCode).toBe(403);
+
+    const denied = await broker.inject({
+      method: "GET",
+      url: "/v1/services",
+      headers: serviceHeaders,
+    });
+    expect(denied.statusCode).toBe(403);
+
+    const listed = await broker.inject({
+      method: "GET",
+      url: "/v1/service-credentials",
+      headers: operatorHeaders,
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toMatchObject({
+      credentials: [
+        {
+          credentialId: createdBody.credential.credentialId,
+          serviceId: "payments",
+          tenantId: DEFAULT_TENANT_ID,
+          projectId: DEFAULT_PROJECT_ID,
+          environmentId: DEFAULT_ENVIRONMENT_ID,
+        },
+      ],
+    });
+    expect(listed.body).not.toContain(createdBody.apiKey);
+    expect(listed.body).not.toContain("secretHash");
+
+    const inspection = new Client({ connectionString: databaseUrl });
+    await inspection.connect();
+    try {
+      const stored = await inspection.query<{
+        secret_hash: string;
+        last_used_at: Date | null;
+      }>(
+        `select secret_hash, last_used_at from service_credentials
+         where credential_id = $1`,
+        [createdBody.credential.credentialId],
+      );
+      expect(stored.rows[0]?.secret_hash).toMatch(/^[0-9a-f]{64}$/);
+      expect(stored.rows[0]?.secret_hash).not.toBe(createdBody.apiKey);
+      expect(stored.rows[0]?.last_used_at).not.toBeNull();
+    } finally {
+      await inspection.end();
+    }
+
+    const revoked = await broker.inject({
+      method: "DELETE",
+      url: `/v1/service-credentials/${createdBody.credential.credentialId}`,
+      headers: operatorHeaders,
+    });
+    expect(revoked.statusCode).toBe(204);
+
+    const rejected = await broker.inject({
+      method: "GET",
+      url: "/v1/ping",
+      headers: serviceHeaders,
+    });
+    expect(rejected.statusCode).toBe(401);
   });
 });

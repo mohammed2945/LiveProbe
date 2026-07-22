@@ -8,21 +8,25 @@ client to an existing LiveProbe broker. It does not cover deploying the broker.
 The current internal test deployment uses:
 
 - `BROKER_URL`: `https://liveprobe.tryastrea.tech`
-- `LIVEPROBE_API_KEY`: obtain the current key from the LiveProbe operator
+- Runtime `LIVEPROBE_API_KEY`: obtain a key created for the exact `serviceId`
+- MCP `LIVEPROBE_API_KEY`: obtain the current operator key separately
 
-Do not commit the shared key to an application repository or paste it into
-issues, logs, or recordings. Public traffic terminates TLS at the Google
-Cloud load balancer, and HTTP redirects to HTTPS. The VM origin accepts broker
-traffic only from Google's load-balancer and health-check ranges. External port
-`7070` is not published; it is only the broker container's internal port.
+Do not commit either key to an application repository or paste it into issues,
+logs, or recordings. A service key cannot list services, manage probes, or act
+as another service. The current MCP operator key can manage all internal-test
+resources and must not be placed in the target application. Public traffic
+terminates TLS at the Google Cloud load balancer, and HTTP redirects to HTTPS.
+The VM origin accepts broker traffic only from Google's load-balancer and
+health-check ranges. External port `7070` is not published; it is only the
+broker container's internal port.
 
-The public HTTPS endpoint is suitable for internal integration testing with the
-shared bearer key. Before production, rotate the key, store credentials in
-Secret Manager, and add per-operator authorization and tenant isolation.
+The public HTTPS endpoint is suitable for internal integration testing with
+these bearer credentials. Human identities and tenant isolation are still
+required before unrelated customers share the broker.
 
 ```sh
 export BROKER_URL="https://liveprobe.tryastrea.tech"
-export LIVEPROBE_API_KEY="<provided-separately>"
+export LIVEPROBE_API_KEY="<service-key-provided-separately>"
 export GIT_COMMIT="$(git rev-parse HEAD)"
 ```
 
@@ -40,8 +44,8 @@ curl --fail --silent --show-error \
   "$BROKER_URL/v1/ping"
 ```
 
-Each command should return `{"ok":true}`. A `401` means the API key does not
-match. A connection timeout usually means the broker address or network
+Each command should return `{"ok":true}`. A `401` means the API key is invalid
+or revoked. A connection timeout usually means the broker address or network
 allowlist is wrong.
 
 ## 2. Install one runtime agent
@@ -221,7 +225,7 @@ add this configuration:
         "https://liveprobe.tryastrea.tech"
       ],
       "env": {
-        "LIVEPROBE_API_KEY": "<provided-separately>"
+        "LIVEPROBE_API_KEY": "<operator-key-provided-separately>"
       }
     }
   }
@@ -284,7 +288,8 @@ the repository.
 
 | Symptom | Check |
 | --- | --- |
-| MCP returns `unauthorized` | The MCP and agent key must match the broker key; restart the MCP client after changing it. |
+| MCP returns `unauthorized` | Confirm the MCP has the current operator key; restart the MCP client after changing it. |
+| Agent returns `unauthorized` | Confirm its service key has not been revoked and was created for that service ID. |
 | Broker is unreachable | Check `BROKER_URL`, `/healthz`, DNS resolution, and the calling service's outbound HTTPS access. |
 | No services are listed | Confirm the agent started, can reach the broker, and has a valid deployed commit. |
 | Service is offline | The broker has not received a heartbeat for more than 45 seconds. Inspect application or bridge logs. |
@@ -298,9 +303,10 @@ the repository.
 
 ## 6. Test-environment safety
 
-- The current MVP uses one shared API key and has no tenant isolation or RBAC.
-- Broker ingress is temporarily public on TCP `80` for Cloud Run testing; the
-  bearer key is the only request-level boundary during this test window.
+- Runtime agents can use individually revocable service keys. MCP users still
+  share one operator key and there is no human identity or tenant isolation.
+- Public traffic enters through the HTTPS load balancer. Direct broker origin
+  ingress is restricted to Google's load-balancer and health-check ranges.
 - Use TLS, VPN, or another trusted network path for non-demo data.
 - Snapshots can capture values that the redaction rules do not recognize.
 - Use short-lived, narrow probes and avoid broad watch paths.
@@ -308,5 +314,3 @@ the repository.
   callbacks add work inside the target process.
 - Never expose a JVM JDWP port publicly.
 - Remove probes as soon as the investigation is complete.
-
-as of 07/21 11:15 PDT

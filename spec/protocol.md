@@ -27,10 +27,15 @@ behavior from another implementation.
 - `serviceId` is a non-empty, deployment-stable identifier supplied by the
   user.
 - All `/v1/*` routes require `Authorization: Bearer <key>` when the broker is
-  configured with `LIVEPROBE_API_KEY`. `GET /healthz` is unauthenticated
+  configured with `LIVEPROBE_API_KEY`. Shared operator keys can access every
+  v1 route. Per-service keys begin with `lp_service_` and can access only
+  `GET /v1/ping` plus agent poll, ingest, and source-map routes for their exact
+  `serviceId`. A service key receives HTTP 403 `forbidden` when it attempts an
+  operator route or names another service. `GET /healthz` is unauthenticated
   process liveness. `GET /readyz` is also unauthenticated and returns 200 only
   when the configured durable store is reachable. Neither endpoint exposes
-  configuration or secrets. Invalid or missing credentials return HTTP 401:
+  configuration or secrets. Invalid, revoked, or missing credentials return
+  HTTP 401:
 
 ```json
 {
@@ -40,6 +45,11 @@ behavior from another implementation.
   }
 }
 ```
+
+Service credentials are random bearer secrets stored in PostgreSQL as SHA-256
+hashes. The plaintext value is returned only by the create operation. Their
+high entropy, rather than password hashing cost, protects against offline
+guessing. Operators must transmit and store the returned value as a secret.
 
 - Consumers must ignore unknown response fields. Producers must not emit
   undocumented fields in v1 requests.
@@ -349,6 +359,9 @@ Status event:
 
 ## 5. Client-facing broker API
 
+Every route in this section requires a shared operator credential. Service
+credentials are rejected with HTTP 403.
+
 ### 5.1 Create a probe
 
 `POST /v1/probes`
@@ -436,7 +449,43 @@ until the first event arrives or the timeout elapses.
 Events are retained, not consumed, in a per-probe ring buffer capped at 500
 events. The oldest event is discarded first.
 
-### 5.6 MCP set-probe commit metadata
+### 5.6 Service credentials
+
+`POST /v1/service-credentials` accepts:
+
+```json
+{
+  "serviceId": "payment-service",
+  "label": "Payments production"
+}
+```
+
+It requires PostgreSQL and returns HTTP 201 with the plaintext `apiKey` exactly
+once alongside its non-secret metadata:
+
+```json
+{
+  "credential": {
+    "credentialId": "svc_0123456789abcdef0123456789abcdef",
+    "tenantId": "internal",
+    "projectId": "default",
+    "environmentId": "default",
+    "serviceId": "payment-service",
+    "label": "Payments production",
+    "keyPrefix": "lp_service_AbCd1234",
+    "createdAt": "2026-07-22T18:00:00.000Z"
+  },
+  "apiKey": "lp_service_<secret>"
+}
+```
+
+`GET /v1/service-credentials` returns metadata only. It never returns a secret
+or secret hash. `DELETE /v1/service-credentials/{credentialId}` revokes an
+active credential and returns HTTP 204. A revoked credential immediately
+receives HTTP 401. Credential management returns HTTP 503
+`credential_store_unavailable` when PostgreSQL is not configured.
+
+### 5.7 MCP set-probe commit metadata
 
 The `set_snapshot_probe`, `set_log_probe`, `set_counter_probe`, and
 `set_metric_probe` MCP tools require `commit_hash`, using snake_case at the MCP

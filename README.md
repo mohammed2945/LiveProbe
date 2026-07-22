@@ -189,8 +189,8 @@ cryptographic proof that the target bytecode exactly matches that revision.
 
 | Variable | Used by | Purpose |
 | --- | --- | --- |
-| `LIVEPROBE_API_KEY` | broker, MCP, agents | Shared bearer token for all `/v1/*` broker calls. |
-| `LIVEPROBE_API_KEYS` | broker | One or two comma-separated bearer keys during rotation; the first is primary. |
+| `LIVEPROBE_API_KEY` | broker, MCP, agents | Broker/MCP operator key, or an agent's per-service key in that agent process. |
+| `LIVEPROBE_API_KEYS` | broker | One or two comma-separated shared operator keys during rotation; the first is primary. |
 | `SECRETS_BACKEND` | GCP deploy | `secret-manager` by default; `environment` is the recovery fallback. |
 | `LIVEPROBE_API_KEYS_SECRET` | GCP deploy | Secret Manager ID containing the one- or two-key broker ring. |
 | `POSTGRES_PASSWORD_SECRET` | GCP deploy | Secret Manager ID containing the Postgres password. |
@@ -211,9 +211,10 @@ targets must include debug line/local-variable metadata.
 ## GCP single-VM demo
 
 > **Pilot topology:** this is a fake-data, single-broker deployment. Broker
-> calls require one shared bearer key, and the operator guide provides optional
-> Cloud SQL plus a global HTTPS load balancer. There is still no per-user
-> authorization or tenant isolation.
+> calls require bearer authentication; operators share a key while agents may
+> use per-service credentials. The operator guide provides optional Cloud SQL
+> plus a global HTTPS load balancer. There is still no per-user authorization
+> or tenant isolation.
 
 The accepted GCE path places the broker, three intentionally buggy services,
 their traffic generators, and the JVM bridge on one VM. Only the broker and SSH
@@ -347,14 +348,15 @@ defense-in-depth filter, not a DLP guarantee: an unrecognized secret can still
 be captured. Keep probe scope narrow, use one-hit/short-TTL probes, review
 custom watch paths, and remove probes promptly.
 
-All `/v1/*` broker routes require the shared `LIVEPROBE_API_KEY`; `/healthz`
-and `/readyz` are unauthenticated liveness and database-readiness routes. This
-is authentication without user-level authorization or tenant isolation. The
-GCP operator path supports an overlapping two-key rotation, but rotation still
-affects every agent and operator using the shared credential. The GCP path can
-terminate TLS at a managed load balancer; local and pre-activation HTTP must
-remain on a trusted network. The internal Compose network reduces JVM
-diagnostic exposure but is not a substitute for production network policy.
+All `/v1/*` broker routes require a bearer key; `/healthz` and `/readyz` are
+unauthenticated liveness and database-readiness routes. Shared keys have
+operator access. PostgreSQL-backed `lp_service_...` keys are individually
+revocable and limited to one service's agent routes. There is still no human
+identity or tenant isolation. The GCP operator path supports an overlapping
+two-key operator rotation. The GCP path can terminate TLS at a managed load
+balancer; local and pre-activation HTTP must remain on a trusted network. The
+internal Compose network reduces JVM diagnostic exposure but is not a
+substitute for production network policy.
 
 Postgres schema version 3 includes tenants, projects, environments, and scope
 columns on durable runtime records. Existing records are assigned to the
@@ -382,10 +384,10 @@ the deployment hardware for current numbers.
 
 ## Known production limitations
 
-- Shared-key authentication only; no RBAC, tenant isolation, or immutable
-  audit-log retention. Shared-key rotation is coordinated across all clients.
-  Managed TLS is available only on the GCP deployment path after explicit
-  activation.
+- Operator authentication still uses a shared key; service agents can use
+  individually revocable keys. There is no human RBAC, tenant isolation, or
+  immutable audit-log retention. Managed TLS is available only on the GCP
+  deployment path after explicit activation.
 - Postgres mutations are transactional and durable. Cloud SQL mode can provide
   regional database HA, but the broker remains single-instance. JSON snapshots
   are a local/dev fallback.

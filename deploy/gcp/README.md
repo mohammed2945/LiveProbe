@@ -7,10 +7,11 @@ least expensive demo or Cloud SQL for a durable pilot. The MCP server runs on
 the operator's computer. An optional global HTTPS load balancer provides a
 Google-managed certificate and redirects public HTTP to HTTPS.
 
-This remains a demo deployment. Every `/v1/*` request requires a shared bearer
-key, but there is no per-user authorization, key rotation, or tenant isolation.
-Cloud SQL and TLS improve durability and transport security, but the broker is
-still a single instance.
+This remains a demo deployment. Every `/v1/*` request requires a bearer key.
+Operators share a rotatable key; Cloud SQL deployments can issue individually
+revocable keys restricted to one agent service. There is no human identity or
+tenant isolation. Cloud SQL and TLS improve durability and transport security,
+but the broker is still a single instance.
 
 ## Topology
 
@@ -147,9 +148,10 @@ PROJECT_ID="<PROJECT_ID>" DATABASE_BACKEND=cloud-sql \
   CLOUD_SQL_AVAILABILITY_TYPE=zonal deploy/gcp/deploy.sh
 ```
 
-Securely distribute the printed new key and update every MCP and agent process.
-During this window, the broker accepts the new key and the immediately previous
-key. Once migration is complete:
+Securely distribute the printed new key and update every MCP/operator process
+plus any legacy agent still using the shared key. Per-service agent keys are
+unaffected. During this window, the broker accepts the new key and the
+immediately previous key. Once migration is complete:
 
 ```sh
 PROJECT_ID="<PROJECT_ID>" deploy/gcp/rotate-api-key.sh finish
@@ -160,6 +162,35 @@ PROJECT_ID="<PROJECT_ID>" DATABASE_BACKEND=cloud-sql \
 The second deployment removes acceptance of the previous key. Never start a
 second rotation while an overlap is active. Use `SECRETS_BACKEND=environment`
 only for recovery or non-GCP development.
+
+### Per-service agent credentials
+
+Keep the shared key out of customer runtime processes. With Cloud SQL enabled,
+an operator can create a revocable key for one exact service ID:
+
+```sh
+umask 077
+curl --fail --silent --show-error \
+  -H "Authorization: Bearer ${LIVEPROBE_API_KEY}" \
+  -H "Content-Type: application/json" \
+  --data '{"serviceId":"payments-api","label":"Payments production"}' \
+  "https://liveprobe.tryastrea.tech/v1/service-credentials" \
+  > service-credential.json
+```
+
+The response contains the plaintext `apiKey` once. Deliver it through the
+customer's secret-management channel and use it as `LIVEPROBE_API_KEY` only in
+that service's agent process. List non-secret metadata with
+`GET /v1/service-credentials`. Revoke a key with:
+
+```sh
+curl --fail --silent --show-error -X DELETE \
+  -H "Authorization: Bearer ${LIVEPROBE_API_KEY}" \
+  "https://liveprobe.tryastrea.tech/v1/service-credentials/<credential-id>"
+```
+
+Service credentials can call ping and the agent routes for their assigned
+service. They cannot list services, inspect evidence, or create/remove probes.
 
 ### HTTPS and TLS
 
