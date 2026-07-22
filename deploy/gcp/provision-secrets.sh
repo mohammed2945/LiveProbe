@@ -12,6 +12,7 @@ load_gcp_config
 
 initial_api_keys="${LIVEPROBE_API_KEYS:-${LIVEPROBE_API_KEY:-}}"
 initial_postgres_password="${POSTGRES_PASSWORD:-}"
+initial_clerk_secret_key="${CLERK_SECRET_KEY:-}"
 runtime_service_account="${RUNTIME_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 gcloud_cmd services enable \
@@ -83,6 +84,17 @@ ensure_secret \
   "$initial_postgres_password" \
   "POSTGRES_PASSWORD"
 
-printf 'Secret Manager resources are ready: %s, %s\n' \
+if [[ -n "$CLERK_AUTHORIZED_PARTIES" ]]; then
+  ensure_secret \
+    "$CLERK_SECRET_KEY_SECRET" \
+    "$initial_clerk_secret_key" \
+    "CLERK_SECRET_KEY"
+fi
+
+printf 'Secret Manager resources are ready: %s, %s' \
   "$LIVEPROBE_API_KEYS_SECRET" \
   "$POSTGRES_PASSWORD_SECRET"
+if [[ -n "$CLERK_AUTHORIZED_PARTIES" ]]; then
+  printf ', %s' "$CLERK_SECRET_KEY_SECRET"
+fi
+printf '\n'

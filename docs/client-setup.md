@@ -21,8 +21,10 @@ health-check ranges. External port `7070` is not published; it is only the
 broker container's internal port.
 
 The public HTTPS endpoint is suitable for internal integration testing with
-these bearer credentials. Human identities and tenant isolation are still
-required before unrelated customers share the broker.
+these bearer credentials. The broker supports Clerk organization identities
+and tenant isolation when the hosted deployment enables them. MCP browser
+login is not implemented yet, so this guide continues to use the transitional
+shared operator key for MCP.
 
 ```sh
 export BROKER_URL="https://liveprobe.tryastrea.tech"
@@ -303,8 +305,9 @@ the repository.
 
 ## 6. Test-environment safety
 
-- Runtime agents can use individually revocable service keys. MCP users still
-  share one operator key and there is no human identity or tenant isolation.
+- Runtime agents can use individually revocable service keys. Clerk-enabled
+  broker users are isolated by active organization, but MCP users still share
+  the internal-scope operator key until browser login is implemented.
 - Public traffic enters through the HTTPS load balancer. Direct broker origin
   ingress is restricted to Google's load-balancer and health-check ranges.
 - Use TLS, VPN, or another trusted network path for non-demo data.

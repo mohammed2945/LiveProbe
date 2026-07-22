@@ -77,6 +77,41 @@ validate_api_key_ring() {
   fi
 }
 
+validate_clerk_authorized_parties() {
+  local value="$1"
+  local party
+  local -a parties
+
+  IFS=',' read -r -a parties <<<"$value"
+  [[ ${#parties[@]} -ge 1 ]] ||
+    die "CLERK_AUTHORIZED_PARTIES must contain at least one origin"
+  for party in "${parties[@]}"; do
+    [[ "$party" =~ ^https?://[^/,[:space:]]+$ ]] ||
+      die "invalid Clerk authorized-party origin: ${party:-<empty>}"
+  done
+}
+
+validate_clerk_secret_key() {
+  local value="$1"
+
+  [[ ${#value} -ge 20 && ${#value} -le 512 &&
+    "$value" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die "CLERK_SECRET_KEY must be a 20-512 character single-line key"
+}
+
+validate_clerk_audience() {
+  local value="$1"
+  local audience
+  local -a audiences
+
+  [[ -z "$value" ]] && return
+  IFS=',' read -r -a audiences <<<"$value"
+  for audience in "${audiences[@]}"; do
+    [[ "$audience" =~ ^[A-Za-z0-9._:/-]+$ ]] ||
+      die "invalid Clerk audience: ${audience:-<empty>}"
+  done
+}
+
 primary_api_key() {
   local key_ring="$1"
 
@@ -362,6 +397,10 @@ load_gcp_config() {
   SECRETS_BACKEND="${SECRETS_BACKEND:-secret-manager}"
   LIVEPROBE_API_KEYS_SECRET="${LIVEPROBE_API_KEYS_SECRET:-${VM_NAME}-broker-api-keys}"
   POSTGRES_PASSWORD_SECRET="${POSTGRES_PASSWORD_SECRET:-${VM_NAME}-postgres-password}"
+  CLERK_SECRET_KEY_SECRET="${CLERK_SECRET_KEY_SECRET:-${VM_NAME}-clerk-secret-key}"
+  CLERK_SECRET_KEY="${CLERK_SECRET_KEY:-}"
+  CLERK_AUTHORIZED_PARTIES="${CLERK_AUTHORIZED_PARTIES:-}"
+  CLERK_AUDIENCE="${CLERK_AUDIENCE:-}"
   HTTPS_DOMAIN="${HTTPS_DOMAIN:-}"
   HTTPS_IP_NAME="${HTTPS_IP_NAME:-${VM_NAME}-https-ip}"
   HTTPS_INSTANCE_GROUP="${HTTPS_INSTANCE_GROUP:-${VM_NAME}-https-backend}"
@@ -395,6 +434,21 @@ load_gcp_config() {
   validate_secrets_backend "$SECRETS_BACKEND"
   validate_resource_name "broker API keys secret name" "$LIVEPROBE_API_KEYS_SECRET"
   validate_resource_name "Postgres password secret name" "$POSTGRES_PASSWORD_SECRET"
+  validate_resource_name "Clerk secret key secret name" "$CLERK_SECRET_KEY_SECRET"
+  if [[ -n "$CLERK_SECRET_KEY" || -n "$CLERK_AUTHORIZED_PARTIES" ||
+    -n "$CLERK_AUDIENCE" ]]; then
+    [[ -n "$CLERK_AUTHORIZED_PARTIES" ]] ||
+      die "CLERK_AUTHORIZED_PARTIES is required when Clerk is configured"
+    validate_clerk_authorized_parties "$CLERK_AUTHORIZED_PARTIES"
+    if [[ -n "$CLERK_SECRET_KEY" ]]; then
+      validate_clerk_secret_key "$CLERK_SECRET_KEY"
+    fi
+    validate_clerk_audience "$CLERK_AUDIENCE"
+    if [[ "$SECRETS_BACKEND" == "environment" ]]; then
+      [[ -n "$CLERK_SECRET_KEY" ]] ||
+        die "CLERK_SECRET_KEY is required for environment-backed Clerk auth"
+    fi
+  fi
   validate_resource_name "Cloud SQL instance name" "$CLOUD_SQL_INSTANCE"
   validate_database_identifier "Cloud SQL database name" "$CLOUD_SQL_DATABASE"
   validate_database_identifier "Cloud SQL user name" "$CLOUD_SQL_USER"

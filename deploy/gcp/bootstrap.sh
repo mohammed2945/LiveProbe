@@ -143,6 +143,10 @@ PROJECT_ID="${PROJECT_ID:-}"
 SECRETS_BACKEND="${SECRETS_BACKEND:-environment}"
 LIVEPROBE_API_KEYS_SECRET="${LIVEPROBE_API_KEYS_SECRET:-}"
 POSTGRES_PASSWORD_SECRET="${POSTGRES_PASSWORD_SECRET:-}"
+CLERK_SECRET_KEY_SECRET="${CLERK_SECRET_KEY_SECRET:-}"
+CLERK_SECRET_KEY="${CLERK_SECRET_KEY:-}"
+CLERK_AUTHORIZED_PARTIES="${CLERK_AUTHORIZED_PARTIES:-}"
+CLERK_AUDIENCE="${CLERK_AUDIENCE:-}"
 DATABASE_BACKEND="${DATABASE_BACKEND:-local}"
 CLOUD_SQL_INSTANCE_CONNECTION_NAME="${CLOUD_SQL_INSTANCE_CONNECTION_NAME:-}"
 CLOUD_SQL_DATABASE="${CLOUD_SQL_DATABASE:-liveprobe}"
@@ -163,9 +167,14 @@ case "$SECRETS_BACKEND" in
   secret-manager)
     [[ "$PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] ||
       die "invalid PROJECT_ID"
-    for secret_name in \
-      "$LIVEPROBE_API_KEYS_SECRET" \
-      "$POSTGRES_PASSWORD_SECRET"; do
+    secret_names=(
+      "$LIVEPROBE_API_KEYS_SECRET"
+      "$POSTGRES_PASSWORD_SECRET"
+    )
+    if [[ -n "$CLERK_AUTHORIZED_PARTIES" ]]; then
+      secret_names+=("$CLERK_SECRET_KEY_SECRET")
+    fi
+    for secret_name in "${secret_names[@]}"; do
       [[ ${#secret_name} -le 63 &&
         "$secret_name" =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ ]] ||
         die "invalid Secret Manager secret name: ${secret_name:-<empty>}"
@@ -241,6 +250,9 @@ docker compose version >/dev/null
 if [[ "$SECRETS_BACKEND" == "secret-manager" ]]; then
   LIVEPROBE_API_KEYS="$(fetch_secret "$PROJECT_ID" "$LIVEPROBE_API_KEYS_SECRET")"
   POSTGRES_PASSWORD="$(fetch_secret "$PROJECT_ID" "$POSTGRES_PASSWORD_SECRET")"
+  if [[ -n "$CLERK_AUTHORIZED_PARTIES" ]]; then
+    CLERK_SECRET_KEY="$(fetch_secret "$PROJECT_ID" "$CLERK_SECRET_KEY_SECRET")"
+  fi
 elif [[ -z "$LIVEPROBE_API_KEYS" ]]; then
   LIVEPROBE_API_KEYS="$LIVEPROBE_API_KEY"
 fi
@@ -248,6 +260,22 @@ validate_api_key_ring "$LIVEPROBE_API_KEYS"
 LIVEPROBE_API_KEY="${LIVEPROBE_API_KEYS%%,*}"
 [[ "$POSTGRES_PASSWORD" =~ ^[0-9a-f]{64}$ ]] ||
   die "POSTGRES_PASSWORD must be a 64-character lowercase hex value"
+if [[ -n "$CLERK_AUTHORIZED_PARTIES" ]]; then
+  [[ ${#CLERK_SECRET_KEY} -ge 20 && ${#CLERK_SECRET_KEY} -le 512 &&
+    "$CLERK_SECRET_KEY" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die "CLERK_SECRET_KEY must be a 20-512 character single-line key"
+  IFS=',' read -r -a clerk_authorized_parties <<<"$CLERK_AUTHORIZED_PARTIES"
+  for party in "${clerk_authorized_parties[@]}"; do
+    [[ "$party" =~ ^https?://[^/,[:space:]]+$ ]] ||
+      die "invalid Clerk authorized-party origin: ${party:-<empty>}"
+  done
+  if [[ -n "$CLERK_AUDIENCE" ]]; then
+    [[ "$CLERK_AUDIENCE" =~ ^[A-Za-z0-9._:/-]+(,[A-Za-z0-9._:/-]+)*$ ]] ||
+      die "invalid CLERK_AUDIENCE"
+  fi
+elif [[ -n "$CLERK_SECRET_KEY" || -n "$CLERK_AUDIENCE" ]]; then
+  die "CLERK_AUTHORIZED_PARTIES is required when Clerk is configured"
+fi
 
 release_root="/opt/liveprobe/releases"
 release_dir="${release_root}/${DEPLOY_COMMIT}"
@@ -302,6 +330,10 @@ chmod 0600 "$deployment_env_tmp"
   printf 'SECRETS_BACKEND=%s\n' "$SECRETS_BACKEND"
   printf 'LIVEPROBE_API_KEYS_SECRET=%s\n' "$LIVEPROBE_API_KEYS_SECRET"
   printf 'POSTGRES_PASSWORD_SECRET=%s\n' "$POSTGRES_PASSWORD_SECRET"
+  printf 'CLERK_SECRET_KEY_SECRET=%s\n' "$CLERK_SECRET_KEY_SECRET"
+  printf 'CLERK_SECRET_KEY=%s\n' "$CLERK_SECRET_KEY"
+  printf 'CLERK_AUTHORIZED_PARTIES=%s\n' "$CLERK_AUTHORIZED_PARTIES"
+  printf 'CLERK_AUDIENCE=%s\n' "$CLERK_AUDIENCE"
   printf 'LIVEPROBE_API_KEY=%s\n' "$LIVEPROBE_API_KEY"
   printf 'LIVEPROBE_API_KEYS=%s\n' "$LIVEPROBE_API_KEYS"
   printf 'POSTGRES_PASSWORD=%s\n' "$POSTGRES_PASSWORD"

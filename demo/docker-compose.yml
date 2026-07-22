@@ -26,6 +26,10 @@ services:
     environment:
       LIVEPROBE_API_KEY: ${LIVEPROBE_API_KEY:-dev-liveprobe-key}
       LIVEPROBE_API_KEYS: ${LIVEPROBE_API_KEYS:-}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+      CLERK_JWT_KEY: ${CLERK_JWT_KEY:-}
+      CLERK_AUTHORIZED_PARTIES: ${CLERK_AUTHORIZED_PARTIES:-}
+      CLERK_AUDIENCE: ${CLERK_AUDIENCE:-}
       DATABASE_URL: postgres://liveprobe:${POSTGRES_PASSWORD:-liveprobe}@postgres:5432/liveprobe
       LIVEPROBE_STATE_FILE: /var/lib/liveprobe/broker-state.json
       LIVEPROBE_SNAPSHOT_INTERVAL_MS: "1000"

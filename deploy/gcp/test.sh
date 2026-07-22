@@ -166,10 +166,16 @@ grep -F 'remote_api_keys=""' "${SCRIPT_DIR}/deploy.sh" >/dev/null ||
   fail "Secret Manager deploy does not clear API keys from the SSH command"
 grep -F 'remote_postgres_password=""' "${SCRIPT_DIR}/deploy.sh" >/dev/null ||
   fail "Secret Manager deploy does not clear the database password from SSH"
+grep -F 'remote_clerk_secret_key=""' "${SCRIPT_DIR}/deploy.sh" >/dev/null ||
+  fail "Secret Manager deploy does not clear the Clerk secret from SSH"
 # shellcheck disable=SC2016
 grep -F 'LIVEPROBE_API_KEYS: ${LIVEPROBE_API_KEYS:-}' \
   "${REPO_ROOT}/demo/docker-compose.yml" >/dev/null ||
   fail "broker Compose service does not receive the rotation key ring"
+# shellcheck disable=SC2016
+grep -F 'CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}' \
+  "${REPO_ROOT}/demo/docker-compose.yml" >/dev/null ||
+  fail "broker Compose service does not receive the Clerk secret"
 
 cloud_sql_password="$(printf 'a%.0s' {1..64})"
 cloud_sql_connection_name="lightprobe-test:us-central1:lp-test-postgres"
@@ -322,7 +328,8 @@ if [[ "${MOCK_PROVISION_SECRETS:-false}" == true ||
       exit 1
       ;;
     "secrets describe liveprobe-test-broker-api-keys"|\
-    "secrets describe liveprobe-test-postgres-password")
+    "secrets describe liveprobe-test-postgres-password"|\
+    "secrets describe liveprobe-test-clerk-secret-key")
       [[ "${MOCK_SECRETS_EXIST:-false}" == true ]] && exit 0
       exit 1
       ;;
@@ -406,6 +413,8 @@ VM_NAME=liveprobe-test \
 SECRETS_BACKEND=secret-manager \
 LIVEPROBE_API_KEY="$fixture_api_key" \
 POSTGRES_PASSWORD="$cloud_sql_password" \
+CLERK_SECRET_KEY=sk_test_fixture_1234567890 \
+CLERK_AUTHORIZED_PARTIES=https://app.example.com \
 GCLOUD_BIN="$mock_gcloud" \
 MOCK_GCLOUD_LOG="$mock_log" \
 MOCK_SECRET_DATA_LOG="$mock_secret_data_log" \
@@ -416,8 +425,10 @@ for expected_call in \
   '<iam> <service-accounts> <create> <liveprobe-runtime>' \
   '<secrets> <create> <liveprobe-test-broker-api-keys>' \
   '<secrets> <create> <liveprobe-test-postgres-password>' \
+  '<secrets> <create> <liveprobe-test-clerk-secret-key>' \
   '<secrets> <add-iam-policy-binding> <liveprobe-test-broker-api-keys>' \
   '<secrets> <add-iam-policy-binding> <liveprobe-test-postgres-password>' \
+  '<secrets> <add-iam-policy-binding> <liveprobe-test-clerk-secret-key>' \
   '<--role=roles/secretmanager.secretAccessor>'; do
   grep -F "$expected_call" "$mock_log" >/dev/null ||
     fail "Secret Manager provisioner omitted command: ${expected_call}"
@@ -428,8 +439,12 @@ grep -F "liveprobe-test-broker-api-keys <${fixture_api_key}>" \
 grep -F "liveprobe-test-postgres-password <${cloud_sql_password}>" \
   "$mock_secret_data_log" >/dev/null ||
   fail "Postgres password secret was not initialized through stdin"
+grep -F 'liveprobe-test-clerk-secret-key <sk_test_fixture_1234567890>' \
+  "$mock_secret_data_log" >/dev/null ||
+  fail "Clerk secret key was not initialized through stdin"
 if grep -F "$fixture_api_key" "$mock_log" >/dev/null ||
-  grep -F "$cloud_sql_password" "$mock_log" >/dev/null; then
+  grep -F "$cloud_sql_password" "$mock_log" >/dev/null ||
+  grep -F 'sk_test_fixture_1234567890' "$mock_log" >/dev/null; then
   fail "secret payload leaked into gcloud arguments"
 fi
 
@@ -438,6 +453,7 @@ fi
 PROJECT_ID=lightprobe-test \
 VM_NAME=liveprobe-test \
 SECRETS_BACKEND=secret-manager \
+CLERK_AUTHORIZED_PARTIES=https://app.example.com \
 GCLOUD_BIN="$mock_gcloud" \
 MOCK_GCLOUD_LOG="$mock_log" \
 MOCK_SECRET_DATA_LOG="$mock_secret_data_log" \

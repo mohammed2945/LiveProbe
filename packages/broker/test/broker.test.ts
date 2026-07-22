@@ -13,6 +13,7 @@ import {
   DEFAULT_TENANT_ID,
   PostgresStore,
   buildBroker,
+  createClerkAuthenticator,
   createServiceCredentialMaterial,
   type BrokerPrincipal,
   type ProbeDefinition,
@@ -225,6 +226,40 @@ describe("broker validation and storage", () => {
       headers: { authorization: "Bearer alpha-token" },
     });
     expect(valid.statusCode).toBe(200);
+  });
+
+  it("returns structured Clerk account-state errors", async () => {
+    const broker = await buildBroker({
+      authenticateBearer: createClerkAuthenticator({
+        secretKey: "sk_test_fixture",
+        authorizedParties: ["https://app.example.com"],
+        verifier: async (token) =>
+          token === "pending-token"
+            ? { sub: "user_123", sts: "pending" }
+            : { sub: "user_123", sts: "active" },
+      }),
+    });
+    openBrokers.push(broker);
+
+    const pending = await broker.inject({
+      method: "GET",
+      url: "/v1/ping",
+      headers: { authorization: "Bearer pending-token" },
+    });
+    expect(pending.statusCode).toBe(403);
+    expect(pending.json()).toMatchObject({
+      error: { code: "clerk_session_pending" },
+    });
+
+    const organizationRequired = await broker.inject({
+      method: "GET",
+      url: "/v1/ping",
+      headers: { authorization: "Bearer personal-token" },
+    });
+    expect(organizationRequired.statusCode).toBe(403);
+    expect(organizationRequired.json()).toMatchObject({
+      error: { code: "organization_required" },
+    });
   });
 
   it("isolates broker resources between external user principals", async () => {
@@ -1559,22 +1594,6 @@ describe("Postgres persistence", () => {
     await bootstrap.restore(new BrokerState());
     await bootstrap.close();
 
-    const catalog = new Client({ connectionString: databaseUrl });
-    await catalog.connect();
-    try {
-      await catalog.query(`
-        insert into tenants (tenant_id, display_name)
-        values ('tenant-beta', 'Tenant beta');
-        insert into projects (tenant_id, project_id, display_name)
-        values ('tenant-beta', 'default', 'Default');
-        insert into environments (
-          tenant_id, project_id, environment_id, display_name
-        ) values ('tenant-beta', 'default', 'default', 'Default');
-      `);
-    } finally {
-      await catalog.end();
-    }
-
     const principals: Record<string, BrokerPrincipal> = {
       "alpha-token": {
         type: "user",
@@ -1589,6 +1608,7 @@ describe("Postgres persistence", () => {
         tenantId: "tenant-beta",
         projectId: "default",
         environmentId: "default",
+        tenantDisplayName: "Beta Platform",
       },
     };
     const authenticateBearer = async (
@@ -1690,6 +1710,32 @@ describe("Postgres persistence", () => {
       headers: alphaHeaders,
     });
     expect(hidden.statusCode).toBe(404);
+
+    const inspection = new Client({ connectionString: databaseUrl });
+    await inspection.connect();
+    try {
+      const betaScope = await inspection.query<{
+        tenant_display_name: string;
+        project_id: string;
+        environment_id: string;
+      }>(
+        `select tenant.display_name as tenant_display_name,
+           project.project_id, environment.environment_id
+         from tenants tenant
+         join projects project using (tenant_id)
+         join environments environment using (tenant_id, project_id)
+         where tenant.tenant_id = 'tenant-beta'`,
+      );
+      expect(betaScope.rows).toEqual([
+        {
+          tenant_display_name: "Beta Platform",
+          project_id: "default",
+          environment_id: "default",
+        },
+      ]);
+    } finally {
+      await inspection.end();
+    }
   });
 
   postgresIt("creates, scopes, and revokes hashed service credentials", async () => {

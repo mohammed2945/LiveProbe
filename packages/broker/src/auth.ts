@@ -14,6 +14,12 @@ export interface ResourceScope {
   environmentId: string;
 }
 
+export interface ResourceScopeLabels {
+  tenantDisplayName?: string | undefined;
+  projectDisplayName?: string | undefined;
+  environmentDisplayName?: string | undefined;
+}
+
 export const DEFAULT_RESOURCE_SCOPE: ResourceScope = {
   tenantId: DEFAULT_TENANT_ID,
   projectId: DEFAULT_PROJECT_ID,
@@ -44,6 +50,9 @@ export type BrokerPrincipal =
       type: "user";
       principalId: string;
       role: "operator";
+      organizationId?: string | undefined;
+      organizationRole?: string | undefined;
+      tenantDisplayName?: string | undefined;
     })
   | (ResourceScope & {
       type: "service";
@@ -60,6 +69,17 @@ export interface ServiceCredentialMaterial {
 export type BearerAuthenticator = (
   token: string,
 ) => Promise<BrokerPrincipal | undefined>;
+
+export class BearerAuthenticationError extends Error {
+  public constructor(
+    public readonly statusCode: 401 | 403,
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BearerAuthenticationError";
+  }
+}
 
 export function hashBearerToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");

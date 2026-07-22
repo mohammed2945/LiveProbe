@@ -2,6 +2,7 @@ import { Pool, type PoolClient, type QueryResultRow } from "pg";
 
 import type {
   ResourceScope,
+  ResourceScopeLabels,
   ServiceCredentialRecord,
   StoredServiceCredential,
 } from "../auth.js";
@@ -118,6 +119,7 @@ export class PostgresStore {
   private readonly pool: Pool;
   private migrationPromise: Promise<void> | undefined;
   private closePromise: Promise<void> | undefined;
+  private readonly provisionedScopes = new Map<string, Promise<void>>();
 
   public constructor(
     databaseUrl: string,
@@ -141,6 +143,61 @@ export class PostgresStore {
 
   public async healthCheck(): Promise<void> {
     await this.pool.query("select 1");
+  }
+
+  public async ensureResourceScope(
+    scope: ResourceScope,
+    labels: ResourceScopeLabels = {},
+  ): Promise<void> {
+    const key = JSON.stringify([
+      scope.tenantId,
+      scope.projectId,
+      scope.environmentId,
+    ]);
+    const existing = this.provisionedScopes.get(key);
+    if (existing !== undefined) {
+      await existing;
+      return;
+    }
+
+    const operation = this.withTransaction(async (client) => {
+      await client.query(
+        `insert into tenants (tenant_id, display_name)
+         values ($1, $2)
+         on conflict (tenant_id) do update
+           set display_name = excluded.display_name`,
+        [scope.tenantId, labels.tenantDisplayName ?? scope.tenantId],
+      );
+      await client.query(
+        `insert into projects (tenant_id, project_id, display_name)
+         values ($1, $2, $3)
+         on conflict (tenant_id, project_id) do update
+           set display_name = excluded.display_name`,
+        [
+          scope.tenantId,
+          scope.projectId,
+          labels.projectDisplayName ?? scope.projectId,
+        ],
+      );
+      await client.query(
+        `insert into environments (
+           tenant_id, project_id, environment_id, display_name
+         ) values ($1, $2, $3, $4)
+         on conflict (tenant_id, project_id, environment_id) do update
+           set display_name = excluded.display_name`,
+        [
+          scope.tenantId,
+          scope.projectId,
+          scope.environmentId,
+          labels.environmentDisplayName ?? scope.environmentId,
+        ],
+      );
+    }).catch((error: unknown) => {
+      this.provisionedScopes.delete(key);
+      throw error;
+    });
+    this.provisionedScopes.set(key, operation);
+    await operation;
   }
 
   public async restore(state: BrokerState): Promise<void> {

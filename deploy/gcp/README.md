@@ -7,11 +7,13 @@ least expensive demo or Cloud SQL for a durable pilot. The MCP server runs on
 the operator's computer. An optional global HTTPS load balancer provides a
 Google-managed certificate and redirects public HTTP to HTTPS.
 
-This remains a demo deployment. Every `/v1/*` request requires a bearer key.
-Operators share a rotatable key; Cloud SQL deployments can issue individually
-revocable keys restricted to one agent service. There is no human identity or
-tenant isolation. Cloud SQL and TLS improve durability and transport security,
-but the broker is still a single instance.
+This remains a pilot deployment. Every `/v1/*` request requires a bearer
+credential. Operators can authenticate through Clerk Organizations when Clerk
+is configured; the rotatable shared key remains a break-glass path. Cloud SQL
+deployments can issue individually revocable keys restricted to one agent
+service. Clerk organizations are isolated as broker tenants, but all members
+currently have operator rights inside their tenant. The broker remains a
+single instance.
 
 ## Topology
 
@@ -42,6 +44,7 @@ Application ports are bound to VM loopback. JDWP stays on a Docker
 - Published `@doomslayer2945/liveprobe-mcp@0.1.1`
 - A strong `LIVEPROBE_API_KEY` retained by the operator
 - A separate 64-character hex `POSTGRES_PASSWORD` retained by the operator
+- For Clerk auth: a Clerk backend secret key and the exact frontend origin
 - For HTTPS: a DNS hostname and permission to create its `A` record
 
 ```sh
@@ -65,6 +68,9 @@ plaintext value in the command environment.
 ```sh
 export LIVEPROBE_API_KEY="$(openssl rand -hex 32)"
 export POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+# Optional until the Clerk frontend exists:
+export CLERK_SECRET_KEY="<Clerk Dashboard backend secret key>"
+export CLERK_AUTHORIZED_PARTIES="https://app.tryastrea.tech"
 PROJECT_ID="<PROJECT_ID>" deploy/gcp/deploy.sh
 ```
 
@@ -78,7 +84,7 @@ By default the deployment uses:
 | Broker | external HTTP port `80` |
 | Firewall rules | `liveprobe-demo-broker`, `liveprobe-demo-ssh` |
 | Database | Postgres 16 in the `liveprobe-demo_postgres-data` volume |
-| Secrets | Secret Manager: `liveprobe-demo-broker-api-keys`, `liveprobe-demo-postgres-password` |
+| Secrets | Secret Manager: broker API keys, Postgres password, and Clerk secret key when Clerk is enabled |
 
 Set `CLIENT_IP` for a specific `/32`, or `CLIENT_CIDR` for a narrowly scoped
 NAT pool. They are mutually exclusive. Other supported resource overrides are
@@ -135,10 +141,14 @@ Supported overrides are `CLOUD_SQL_INSTANCE`, `CLOUD_SQL_DATABASE`,
 ### Secrets and API-key rotation
 
 GCP deployment defaults to `SECRETS_BACKEND=secret-manager`. The broker key
-ring and database password are stored in separate secrets. Secret payloads are
-still materialized in root-readable `/etc/liveprobe/deployment.env` because
-Docker Compose needs them, but Secret Manager is the source of truth and the
-runtime service account has no project-wide secret accessor role.
+ring, database password, and optional Clerk backend key are stored in separate
+secrets. Secret payloads are still materialized in root-readable
+`/etc/liveprobe/deployment.env` because Docker Compose needs them, but Secret
+Manager is the source of truth and the runtime service account has no
+project-wide secret accessor role. Set `CLERK_AUTHORIZED_PARTIES` on every
+Clerk-enabled deployment; the default Clerk secret ID is
+`liveprobe-demo-clerk-secret-key` and can be overridden with
+`CLERK_SECRET_KEY_SECRET`.
 
 To rotate the shared API key without disconnecting every client at once:
 

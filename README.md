@@ -191,9 +191,14 @@ cryptographic proof that the target bytecode exactly matches that revision.
 | --- | --- | --- |
 | `LIVEPROBE_API_KEY` | broker, MCP, agents | Broker/MCP operator key, or an agent's per-service key in that agent process. |
 | `LIVEPROBE_API_KEYS` | broker | One or two comma-separated shared operator keys during rotation; the first is primary. |
+| `CLERK_SECRET_KEY` | broker | Optional Clerk backend secret used to retrieve cached JWKS and verify human session tokens. |
+| `CLERK_JWT_KEY` | broker | Optional Clerk PEM public key for networkless session-token verification. Takes effect alongside or instead of `CLERK_SECRET_KEY`. |
+| `CLERK_AUTHORIZED_PARTIES` | broker | Required when Clerk is enabled. Comma-separated frontend origins allowed by the session token `azp` claim. |
+| `CLERK_AUDIENCE` | broker | Optional comma-separated JWT audience allowlist. |
 | `SECRETS_BACKEND` | GCP deploy | `secret-manager` by default; `environment` is the recovery fallback. |
 | `LIVEPROBE_API_KEYS_SECRET` | GCP deploy | Secret Manager ID containing the one- or two-key broker ring. |
 | `POSTGRES_PASSWORD_SECRET` | GCP deploy | Secret Manager ID containing the Postgres password. |
+| `CLERK_SECRET_KEY_SECRET` | GCP deploy | Secret Manager ID containing the Clerk backend key when Clerk auth is enabled. |
 | `DATABASE_URL` | broker | Enables Postgres durable state. If unset, `LIVEPROBE_STATE_FILE` JSON fallback is used. |
 | `LIVEPROBE_DB_POOL_SIZE` | broker | Maximum Postgres connections held by the broker. Defaults to `10`. |
 | `LIVEPROBE_STATE_FILE` | broker | Local/dev JSON fallback state file. |
@@ -208,13 +213,35 @@ embedded source content. The broker resolves source paths and lines to generated
 V8 locations. Python and JVM probes require a runtime-known path suffix; JVM
 targets must include debug line/local-variable metadata.
 
+### Clerk organization authentication
+
+Set either `CLERK_JWT_KEY` or `CLERK_SECRET_KEY`, plus
+`CLERK_AUTHORIZED_PARTIES`, to accept Clerk session JWTs on the same
+`Authorization: Bearer <token>` contract. `CLERK_JWT_KEY` avoids a JWKS network
+request and is preferred when deployment automation can safely inject the PEM
+public key. `CLERK_AUTHORIZED_PARTIES` must contain the exact frontend origins
+that obtain the tokens, for example `https://app.tryastrea.tech`.
+
+The session must have an active Clerk Organization. Its stable organization ID
+becomes the LiveProbe tenant ID; the organization slug is used only as the
+display name. On first use, PostgreSQL creates that tenant's `default` project
+and `default` environment. Users without an active organization receive
+`organization_required`; incomplete organization enrollment receives
+`clerk_session_pending`.
+
+All Clerk organization members currently receive LiveProbe operator access
+inside their own tenant. Fine-grained human RBAC is a separate production
+increment. Shared operator keys remain available as a migration and
+break-glass path and operate only in `internal/default/default`. Agents should
+use their tenant's individually revocable `lp_service_...` key.
+
 ## GCP single-VM demo
 
 > **Pilot topology:** this is a fake-data, single-broker deployment. Broker
-> calls require bearer authentication; operators share a key while agents may
-> use per-service credentials. The operator guide provides optional Cloud SQL
-> plus a global HTTPS load balancer. There is still no per-user authorization
-> or tenant isolation.
+> calls require bearer authentication; operators may use Clerk organization
+> sessions or the transitional shared key, while agents use per-service
+> credentials. The operator guide provides optional Cloud SQL plus a global
+> HTTPS load balancer. Human RBAC and MCP browser login are not included yet.
 
 The accepted GCE path places the broker, three intentionally buggy services,
 their traffic generators, and the JVM bridge on one VM. Only the broker and SSH
@@ -351,18 +378,18 @@ custom watch paths, and remove probes promptly.
 All `/v1/*` broker routes require a bearer key; `/healthz` and `/readyz` are
 unauthenticated liveness and database-readiness routes. Shared keys have
 operator access. PostgreSQL-backed `lp_service_...` keys are individually
-revocable and limited to one service's agent routes. There is still no human
-identity or tenant isolation. The GCP operator path supports an overlapping
-two-key operator rotation. The GCP path can terminate TLS at a managed load
-balancer; local and pre-activation HTTP must remain on a trusted network. The
-internal Compose network reduces JVM diagnostic exposure but is not a
-substitute for production network policy.
+revocable and limited to one service's agent routes. When Clerk is configured,
+verified users are isolated by their active Clerk organization. Shared keys
+remain scoped to `internal/default/default`. The GCP operator path supports an
+overlapping two-key operator rotation. The GCP path can terminate TLS at a
+managed load balancer; local and pre-activation HTTP must remain on a trusted
+network. The internal Compose network reduces JVM diagnostic exposure but is
+not a substitute for production network policy.
 
-Postgres schema version 3 includes tenants, projects, environments, and scope
-columns on durable runtime records. Existing records are assigned to the
-`internal/default/default` scope during migration. Until principal-aware
-authorization is enabled, this ownership metadata is preparatory and does not
-isolate requests at runtime.
+Postgres schema version 5 uses tenant/project/environment keys for durable
+runtime records. Existing records are assigned to the
+`internal/default/default` scope during migration. Clerk organization scopes
+are provisioned transactionally on first authenticated use.
 
 ## Benchmarks
 
@@ -384,10 +411,12 @@ the deployment hardware for current numbers.
 
 ## Known production limitations
 
-- Operator authentication still uses a shared key; service agents can use
-  individually revocable keys. There is no human RBAC, tenant isolation, or
-  immutable audit-log retention. Managed TLS is available only on the GCP
-  deployment path after explicit activation.
+- Clerk organization sessions provide human identity and tenant isolation when
+  configured, but all organization members currently have operator rights.
+  MCP browser login, fine-grained human RBAC, and immutable audit-log retention
+  are not implemented. Shared operator keys remain a transitional break-glass
+  path. Managed TLS is available only on the GCP deployment path after
+  explicit activation.
 - Postgres mutations are transactional and durable. Cloud SQL mode can provide
   regional database HA, but the broker remains single-instance. JSON snapshots
   are a local/dev fallback.

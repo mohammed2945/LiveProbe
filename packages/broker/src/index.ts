@@ -11,6 +11,7 @@ import Fastify, {
 import { z, ZodError } from "zod";
 
 import {
+  BearerAuthenticationError,
   SERVICE_API_KEY_PREFIX,
   DEFAULT_RESOURCE_SCOPE,
   createServiceCredentialMaterial,
@@ -20,9 +21,11 @@ import {
   type BrokerPrincipal,
   type BearerAuthenticator,
   type ResourceScope,
+  type ResourceScopeLabels,
   type ServiceCredentialRecord,
   type StoredServiceCredential,
 } from "./auth.js";
+import { clerkAuthenticatorFromEnv } from "./clerk-auth.js";
 import { PostgresStore } from "./store/postgres.js";
 import {
   resolveSourceLocation,
@@ -33,14 +36,25 @@ import {
 
 export { PostgresStore } from "./store/postgres.js";
 export {
+  BearerAuthenticationError,
   SERVICE_API_KEY_PREFIX,
   createServiceCredentialMaterial,
   hashBearerToken,
 } from "./auth.js";
+export {
+  clerkAuthenticatorFromEnv,
+  createClerkAuthenticator,
+} from "./clerk-auth.js";
+export type {
+  ClerkTokenVerifier,
+  ClerkVerificationOptions,
+  CreateClerkAuthenticatorOptions,
+} from "./clerk-auth.js";
 export type {
   BearerAuthenticator,
   BrokerPrincipal,
   ResourceScope,
+  ResourceScopeLabels,
   ServiceCredentialRecord,
   StoredServiceCredential,
 } from "./auth.js";
@@ -416,6 +430,10 @@ export interface BrokerStore {
   readonly incremental?: boolean;
   close?(): Promise<void>;
   healthCheck?(): Promise<void>;
+  ensureResourceScope?(
+    scope: ResourceScope,
+    labels?: ResourceScopeLabels,
+  ): Promise<void>;
   restore(state: BrokerState): Promise<void>;
   persist(state: BrokerState): Promise<void>;
   persistProbe?(
@@ -1757,8 +1775,31 @@ export async function buildBroker(
       }
     }
     if (token !== undefined && options.authenticateBearer !== undefined) {
-      const principal = await options.authenticateBearer(token);
+      let principal: BrokerPrincipal | undefined;
+      try {
+        principal = await options.authenticateBearer(token);
+      } catch (error: unknown) {
+        if (error instanceof BearerAuthenticationError) {
+          throw new BrokerHttpError(
+            error.statusCode,
+            error.code,
+            error.message,
+          );
+        }
+        throw error;
+      }
       if (principal !== undefined) {
+        if (
+          principal.type === "user" &&
+          store !== false &&
+          store.ensureResourceScope !== undefined
+        ) {
+          await store.ensureResourceScope(principal, {
+            ...(principal.tenantDisplayName === undefined
+              ? {}
+              : { tenantDisplayName: principal.tenantDisplayName }),
+          });
+        }
         request.liveprobePrincipal = principal;
         return;
       }
@@ -2213,13 +2254,15 @@ async function main(): Promise<void> {
     .filter((value) => value.length > 0);
   if (apiKey !== undefined && apiKey.length > 0) apiKeys.unshift(apiKey);
   const configuredApiKeys = Array.from(new Set(apiKeys));
+  const authenticateBearer = clerkAuthenticatorFromEnv();
   if (
     (process.env["NODE_ENV"] === "production" ||
       process.env["LIVEPROBE_REQUIRE_API_KEY"] === "true") &&
-    configuredApiKeys.length === 0
+    configuredApiKeys.length === 0 &&
+    authenticateBearer === undefined
   ) {
     throw new Error(
-      "LIVEPROBE_API_KEY or LIVEPROBE_API_KEYS is required in production",
+      "shared API keys or Clerk authentication are required in production",
     );
   }
   const persistence =
@@ -2236,6 +2279,7 @@ async function main(): Promise<void> {
     port,
     logger: true,
     ...(configuredApiKeys.length === 0 ? {} : { apiKeys: configuredApiKeys }),
+    ...(authenticateBearer === undefined ? {} : { authenticateBearer }),
     persistence,
   });
   app.log.info(

@@ -26,9 +26,13 @@ behavior from another implementation.
 - Probe IDs are broker-assigned ULIDs prefixed with `prb_`.
 - `serviceId` is a non-empty, deployment-stable identifier supplied by the
   user.
-- All `/v1/*` routes require `Authorization: Bearer <key>` when the broker is
-  configured with `LIVEPROBE_API_KEY`. Shared operator keys can access every
-  v1 route. Per-service keys begin with `lp_service_` and can access only
+- All `/v1/*` routes use `Authorization: Bearer <credential>`. Shared operator
+  keys can access every v1 route in the `internal/default/default` scope.
+  Verified Clerk session JWTs provide operator access only inside the active
+  Clerk Organization's tenant scope. Clerk sessions without an active
+  Organization return HTTP 403 `organization_required`; pending enrollment
+  returns HTTP 403 `clerk_session_pending`. Per-service keys begin with
+  `lp_service_` and can access only
   `GET /v1/ping` plus agent poll, ingest, and source-map routes for their exact
   `serviceId`. A service key receives HTTP 403 `forbidden` when it attempts an
   operator route or names another service. `GET /healthz` is unauthenticated
