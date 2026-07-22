@@ -13,7 +13,7 @@
     "fake-agent": "pnpm run build && node dist/scripts/fake-agent.js",
     "start": "node dist/src/index.js",
     "test": "vitest run --passWithNoTests",
-    "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.test.json"
+    "typecheck": "pnpm --filter @doomslayer2945/liveprobe-mcp run build && tsc --project tsconfig.json --noEmit && tsc --project tsconfig.test.json"
   },
   "dependencies": {
     "@clerk/backend": "^3.12.0",
