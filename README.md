@@ -349,11 +349,18 @@ custom watch paths, and remove probes promptly.
 
 All `/v1/*` broker routes require the shared `LIVEPROBE_API_KEY`; `/healthz`
 and `/readyz` are unauthenticated liveness and database-readiness routes. This
-is authentication without user-level
-authorization, key rotation, or tenant isolation. The GCP operator path can
+is authentication without user-level authorization or tenant isolation. The
+GCP operator path supports an overlapping two-key rotation, but rotation still
+affects every agent and operator using the shared credential. The GCP path can
 terminate TLS at a managed load balancer; local and pre-activation HTTP must
 remain on a trusted network. The internal Compose network reduces JVM
 diagnostic exposure but is not a substitute for production network policy.
+
+Postgres schema version 3 includes tenants, projects, environments, and scope
+columns on durable runtime records. Existing records are assigned to the
+`internal/default/default` scope during migration. Until principal-aware
+authorization is enabled, this ownership metadata is preparatory and does not
+isolate requests at runtime.
 
 ## Benchmarks
 
@@ -375,9 +382,10 @@ the deployment hardware for current numbers.
 
 ## Known production limitations
 
-- Shared-key authentication only; no RBAC, tenant isolation, key rotation, or
-  immutable audit-log retention. Managed TLS is available only on the GCP
-  deployment path after explicit activation.
+- Shared-key authentication only; no RBAC, tenant isolation, or immutable
+  audit-log retention. Shared-key rotation is coordinated across all clients.
+  Managed TLS is available only on the GCP deployment path after explicit
+  activation.
 - Postgres mutations are transactional and durable. Cloud SQL mode can provide
   regional database HA, but the broker remains single-instance. JSON snapshots
   are a local/dev fallback.

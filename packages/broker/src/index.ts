@@ -18,6 +18,11 @@ import {
 } from "./source-map-resolver.js";
 
 export { PostgresStore } from "./store/postgres.js";
+export {
+  DEFAULT_ENVIRONMENT_ID,
+  DEFAULT_PROJECT_ID,
+  DEFAULT_TENANT_ID,
+} from "./store/migrations.js";
 
 const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const DEFAULT_TTL_SECONDS = 1_800;

@@ -8,6 +8,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   BrokerState,
   CreateProbeSchema,
+  DEFAULT_ENVIRONMENT_ID,
+  DEFAULT_PROJECT_ID,
+  DEFAULT_TENANT_ID,
   PostgresStore,
   buildBroker,
   type ProbeDefinition,
@@ -791,6 +794,20 @@ describe("TTL and configurable persistence", () => {
 const postgresIt =
   process.env["TEST_DATABASE_URL"] === undefined ? it.skip : it;
 
+async function resetPostgresSchema(databaseUrl: string): Promise<void> {
+  const cleanup = new Client({ connectionString: databaseUrl });
+  await cleanup.connect();
+  try {
+    await cleanup.query(`
+      drop table if exists source_maps, source_map_sets, probe_events,
+        probe_statuses, probes, services, service_versions, environments,
+        projects, tenants, liveprobe_schema_migrations, broker_snapshots cascade
+    `);
+  } finally {
+    await cleanup.end();
+  }
+}
+
 describe("Postgres store lifecycle", () => {
   it("rejects invalid connection pool sizes", () => {
     expect(
@@ -813,14 +830,7 @@ describe("Postgres store lifecycle", () => {
 describe("Postgres persistence", () => {
   postgresIt("restores normalized broker state after restart", async () => {
     const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
-    const cleanup = new Client({ connectionString: databaseUrl });
-    await cleanup.connect();
-    await cleanup.query(`
-      drop table if exists source_maps, source_map_sets, probe_events,
-        probe_statuses, probes, services,
-        service_versions, liveprobe_schema_migrations, broker_snapshots cascade
-    `);
-    await cleanup.end();
+    await resetPostgresSchema(databaseUrl);
 
     const firstStore = new PostgresStore(databaseUrl);
     const first = await buildBroker({
@@ -941,26 +951,152 @@ describe("Postgres persistence", () => {
         "probe_events",
         "probe_statuses",
         "probes",
+        "environments",
+        "projects",
         "service_versions",
         "services",
         "source_map_sets",
         "source_maps",
+        "tenants",
       ]],
     );
     expect(tables.rows.map((row) => row.table_name)).toEqual([
+      "environments",
       "probe_events",
       "probe_statuses",
       "probes",
+      "projects",
       "service_versions",
       "services",
       "source_map_sets",
       "source_maps",
+      "tenants",
     ]);
+    const scope = await inspection.query<{
+      tenant_id: string;
+      project_id: string;
+      environment_id: string;
+    }>(
+      `select tenant_id, project_id, environment_id
+       from services where service_id = $1`,
+      ["orders"],
+    );
+    expect(scope.rows).toEqual([
+      {
+        tenant_id: DEFAULT_TENANT_ID,
+        project_id: DEFAULT_PROJECT_ID,
+        environment_id: DEFAULT_ENVIRONMENT_ID,
+      },
+    ]);
+    await expect(
+      inspection.query(
+        `insert into services (
+           tenant_id, project_id, environment_id, service_id, last_seen
+         ) values ('missing', 'default', 'default', 'invalid', now())`,
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
     const eventCount = await inspection.query<{ count: string }>(
       "select count(*) from probe_events where probe_id = $1",
       [probe.id],
     );
     expect(eventCount.rows[0]?.count).toBe("1");
     await inspection.end();
+  });
+
+  postgresIt("backfills ownership while upgrading an existing schema", async () => {
+    const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
+    await resetPostgresSchema(databaseUrl);
+
+    const initialStore = new PostgresStore(databaseUrl);
+    await initialStore.restore(new BrokerState());
+    await initialStore.close();
+
+    const legacy = new Client({ connectionString: databaseUrl });
+    await legacy.connect();
+    try {
+      await legacy.query(
+        `insert into services (service_id, last_seen, sdk)
+         values ('legacy-service', now(), 'node')`,
+      );
+      await legacy.query(`
+        drop table environments, projects, tenants cascade;
+        alter table services
+          drop column tenant_id,
+          drop column project_id,
+          drop column environment_id;
+        alter table probes
+          drop column tenant_id,
+          drop column project_id,
+          drop column environment_id;
+        alter table probe_events drop column tenant_id;
+        alter table probe_statuses drop column tenant_id;
+        alter table service_versions
+          drop column tenant_id,
+          drop column project_id,
+          drop column environment_id;
+        alter table source_map_sets
+          drop column tenant_id,
+          drop column project_id,
+          drop column environment_id;
+        alter table source_maps
+          drop column tenant_id,
+          drop column project_id,
+          drop column environment_id;
+        delete from liveprobe_schema_migrations;
+        insert into liveprobe_schema_migrations (version) values (2);
+      `);
+    } finally {
+      await legacy.end();
+    }
+
+    const migratedStore = new PostgresStore(databaseUrl);
+    await migratedStore.restore(new BrokerState());
+    await migratedStore.close();
+
+    const inspection = new Client({ connectionString: databaseUrl });
+    await inspection.connect();
+    try {
+      const catalog = await inspection.query<{
+        tenant_id: string;
+        project_id: string;
+        environment_id: string;
+      }>(
+        `select tenant.tenant_id, project.project_id,
+           environment.environment_id
+         from tenants tenant
+         join projects project using (tenant_id)
+         join environments environment using (tenant_id, project_id)`,
+      );
+      expect(catalog.rows).toEqual([
+        {
+          tenant_id: DEFAULT_TENANT_ID,
+          project_id: DEFAULT_PROJECT_ID,
+          environment_id: DEFAULT_ENVIRONMENT_ID,
+        },
+      ]);
+      const service = await inspection.query<{
+        service_id: string;
+        tenant_id: string;
+        project_id: string;
+        environment_id: string;
+      }>(
+        `select service_id, tenant_id, project_id, environment_id
+         from services where service_id = 'legacy-service'`,
+      );
+      expect(service.rows).toEqual([
+        {
+          service_id: "legacy-service",
+          tenant_id: DEFAULT_TENANT_ID,
+          project_id: DEFAULT_PROJECT_ID,
+          environment_id: DEFAULT_ENVIRONMENT_ID,
+        },
+      ]);
+      const versions = await inspection.query<{ version: number }>(
+        `select version from liveprobe_schema_migrations order by version`,
+      );
+      expect(versions.rows.map(({ version }) => version)).toEqual([2, 3]);
+    } finally {
+      await inspection.end();
+    }
   });
 });
