@@ -76,7 +76,31 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     };
     const authenticate = async (token: string) =>
       token === "oauth-token" ? principal : undefined;
-    const backend = await buildBroker({ authenticateBearer: authenticate });
+    const backend = await buildBroker({
+      authenticateBearer: authenticate,
+      store: {
+        async restore() {},
+        async persist() {},
+        async createServiceCredential(credential) {
+          return {
+            credentialId: credential.credentialId,
+            tenantId: credential.tenantId,
+            projectId: credential.projectId,
+            environmentId: credential.environmentId,
+            serviceId: credential.serviceId,
+            label: credential.label,
+            keyPrefix: credential.keyPrefix,
+            createdAt: credential.createdAt,
+          };
+        },
+        async listServiceCredentials() {
+          return [];
+        },
+        async revokeServiceCredential() {
+          return true;
+        },
+      },
+    });
     openBrokers.push(backend);
     await backend.listen({ host: "127.0.0.1", port: 0 });
     const backendAddress = backend.server.address();
@@ -118,7 +142,6 @@ describe("Phase 1 MCP and fake-agent integration", () => {
         "create_service_credential",
         "get_probe_data",
         "get_safety_overview",
-        "issue_service_credential",
         "list_audit_events",
         "list_probes",
         "list_service_credentials",
@@ -134,6 +157,20 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       const ping = await client.callTool({ name: "ping_broker", arguments: {} });
       expect(ping.isError).not.toBe(true);
       expect(ping.content).toEqual([{ type: "text", text: '{\n  "ok": true\n}' }]);
+      const issued = await client.callTool({
+        name: "create_service_credential",
+        arguments: {
+          service_id: "acquireiq",
+          label: "AcquireIQ KS",
+        },
+      });
+      expect(issued.isError, JSON.stringify(issued)).not.toBe(true);
+      expect(issued.content).toEqual([
+        expect.objectContaining({
+          type: "text",
+          text: expect.stringContaining('"apiKey": "lp_service_'),
+        }),
+      ]);
     } finally {
       await client.close();
     }
@@ -501,91 +538,7 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     }
   });
 
-  it("accepts and ignores approval-injected scope on credential tools", async () => {
-    const credentialId = `svc_${"a".repeat(32)}`;
-    const credential = {
-      credentialId,
-      serviceId: "acquireiq",
-      label: "AcquireIQ KS",
-      keyPrefix: "lp_service_abcd",
-      createdAt: "2026-07-23T05:00:00.000Z",
-    };
-    const requests: Array<{
-      method: string;
-      url: string;
-      body?: unknown;
-    }> = [];
-    const handlers = createToolHandlers(
-      new BrokerClient("https://probe.example.com", {
-        fetchImplementation: async (input, init) => {
-          const method = init?.method ?? "GET";
-          requests.push({
-            method,
-            url: String(input),
-            ...(init?.body === undefined
-              ? {}
-              : { body: JSON.parse(String(init.body)) }),
-          });
-          if (method === "POST") {
-            return new Response(
-              JSON.stringify({
-                credential,
-                apiKey: "lp_service_plaintext-once",
-              }),
-              { status: 201, headers: { "content-type": "application/json" } },
-            );
-          }
-          if (method === "DELETE") {
-            return new Response(null, { status: 204 });
-          }
-          return new Response(JSON.stringify({ credentials: [credential] }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        },
-      }),
-    );
-    const approvalScope = {
-      tenantId: "org_acquireiq",
-      projectId: "default",
-      environmentId: "default",
-    };
-
-    await expect(
-      handlers.create_service_credential({
-        service_id: "acquireiq",
-        label: "AcquireIQ KS",
-        ...approvalScope,
-      }),
-    ).resolves.toMatchObject({ apiKey: "lp_service_plaintext-once" });
-    await expect(
-      handlers.list_service_credentials(approvalScope),
-    ).resolves.toMatchObject({ credentials: [credential] });
-    await expect(
-      handlers.revoke_service_credential({
-        credential_id: credentialId,
-        ...approvalScope,
-      }),
-    ).resolves.toEqual({ revoked: true, credentialId });
-
-    expect(requests).toEqual([
-      {
-        method: "POST",
-        url: "https://probe.example.com/v1/service-credentials",
-        body: { serviceId: "acquireiq", label: "AcquireIQ KS" },
-      },
-      {
-        method: "GET",
-        url: "https://probe.example.com/v1/service-credentials",
-      },
-      {
-        method: "DELETE",
-        url: `https://probe.example.com/v1/service-credentials/${credentialId}`,
-      },
-    ]);
-  });
-
-  it("publishes exactly the fifteen official MCP tools", async () => {
+  it("publishes exactly the fourteen official MCP tools", async () => {
     const { brokerUrl } = await startBroker();
     const server = createMcpServer(new BrokerClient(brokerUrl));
     const client = new Client(
@@ -603,7 +556,6 @@ describe("Phase 1 MCP and fake-agent integration", () => {
         "create_service_credential",
         "get_probe_data",
         "get_safety_overview",
-        "issue_service_credential",
         "list_audit_events",
         "list_probes",
         "list_service_credentials",

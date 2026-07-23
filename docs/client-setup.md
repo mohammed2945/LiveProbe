@@ -284,7 +284,7 @@ automatically revoke existing agent keys; revoke those keys separately.
 
 ## 4. Use the MCP tools
 
-The server exposes fifteen tools:
+The server exposes fourteen tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -293,7 +293,6 @@ The server exposes fifteen tools:
 | `get_safety_overview` | Show per-service safety state and probe counts. |
 | `list_audit_events` | List control-plane changes in the selected organization. |
 | `create_service_credential` | Create a per-service agent key; the plaintext key is returned once. |
-| `issue_service_credential` | Approval-compatible alias for creating a per-service agent key. |
 | `list_service_credentials` | List credential metadata and revocation state without secrets. |
 | `revoke_service_credential` | Revoke an agent key in your organization. |
 | `set_snapshot_probe` | Capture bounded locals, watch paths, and stack data. |

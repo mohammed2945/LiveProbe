@@ -20,7 +20,6 @@ const toolNames = [
   "create_service_credential",
   "get_probe_data",
   "get_safety_overview",
-  "issue_service_credential",
   "list_audit_events",
   "list_probes",
   "list_service_credentials",

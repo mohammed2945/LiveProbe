@@ -118,30 +118,15 @@ export const ListAuditEventsInputSchema = z
       .describe("Return events strictly before this ISO-8601 timestamp"),
   })
   .strict();
-const approvalScopeMetadataShape = {
-  // Hosted MCP approval transports may attach these fields after user
-  // approval. Authorization still comes exclusively from the bearer token.
-  tenantId: z.string().min(1).optional(),
-  projectId: z.string().min(1).optional(),
-  environmentId: z.string().min(1).optional(),
-} as const;
 export const CreateServiceCredentialInputSchema = z
   .object({
     service_id: serviceIdSchema.describe("Service ID that will use this key"),
     label: z.string().trim().min(1).max(200).describe("Human-readable key label"),
-    ...approvalScopeMetadataShape,
   })
-  // Approval gateways may attach additional context after tool discovery.
-  // The handler intentionally forwards only service_id and label.
-  .passthrough();
-export const ListServiceCredentialsInputSchema = z
-  .object(approvalScopeMetadataShape)
   .strict();
+export const ListServiceCredentialsInputSchema = z.object({}).strict();
 export const RevokeServiceCredentialInputSchema = z
-  .object({
-    credential_id: z.string().regex(/^svc_[0-9a-f]{32}$/),
-    ...approvalScopeMetadataShape,
-  })
+  .object({ credential_id: z.string().regex(/^svc_[0-9a-f]{32}$/) })
   .strict();
 export const ListProbesInputSchema = z
   .object({
@@ -328,6 +313,9 @@ const listAuditEventsResponseSchema = z
 const serviceCredentialSchema = z
   .object({
     credentialId: z.string().regex(/^svc_[0-9a-f]{32}$/),
+    tenantId: z.string().min(1),
+    projectId: z.string().min(1),
+    environmentId: z.string().min(1),
     serviceId: serviceIdSchema,
     label: z.string().min(1),
     keyPrefix: z.string().startsWith("lp_service_"),
@@ -586,7 +574,19 @@ export class BrokerClient {
     if (!response.ok) {
       throw await this.toClientError(response);
     }
-    return schema.parse(await response.json());
+    try {
+      const result = schema.safeParse(await response.json());
+      if (result.success) {
+        return result.data;
+      }
+    } catch {
+      // Normalize malformed JSON and schema drift to one protocol error.
+    }
+    throw new BrokerClientError(
+      "broker response does not match the LiveProbe protocol",
+      502,
+      "invalid_broker_response",
+    );
   }
 
   private async requestNoContent(
@@ -1105,17 +1105,6 @@ export function createMcpServer(
       title: "Create service credential",
       description:
         "Create a service-scoped API key for your organization. The plaintext key is returned once and cannot be recovered. Store it in the target service's secret manager.",
-      inputSchema: CreateServiceCredentialInputSchema,
-      annotations: { destructiveHint: false },
-    },
-    async (input) => executeTool(() => handlers.create_service_credential(input)),
-  );
-  server.registerTool(
-    "issue_service_credential",
-    {
-      title: "Issue service credential",
-      description:
-        "Issue a service-scoped API key for your organization. Use this transport-compatible alias when an MCP approval gateway enriches tool arguments. The plaintext key is returned once and cannot be recovered.",
       inputSchema: CreateServiceCredentialInputSchema,
       annotations: { destructiveHint: false },
     },
