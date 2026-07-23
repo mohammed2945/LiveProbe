@@ -355,9 +355,11 @@ metric-writer permissions, and creates or updates:
   validation;
 - email notification channels for every configured recipient;
 - a load-balancer 5xx logs-based metric;
-- alerts for readiness failures from at least two checker regions, HTTPS 5xx
-  responses, sustained VM CPU and filesystem pressure, Cloud SQL storage, and
-  PostgreSQL connections above 80% of the live `max_connections` value.
+- alerts for readiness failures from at least two checker regions, sustained VM
+  CPU and filesystem pressure, Cloud SQL storage, and PostgreSQL connections
+  above 80% of the live `max_connections` value;
+- a disabled HTTPS 5xx policy retained for later use when deployments have
+  rolling capacity instead of a single broker container.
 
 Rerun the command after changing the VM, Cloud SQL tier, HTTPS backend, or
 notification recipient. Alert policies notify on incident open and close and

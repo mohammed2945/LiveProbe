@@ -725,6 +725,10 @@ grep -F 'resource.type = \"l7_lb_rule\" AND metric.type = \"logging.googleapis.c
   fail "HTTPS 5xx policy does not use the logs-based metric resource type"
 grep -F 'notificationChannels' "$mock_curl_log" >/dev/null ||
   fail "monitoring provisioner did not create an email notification channel"
+grep -F 'HTTPS 5xx disabled' <<<"$monitoring_output" >/dev/null ||
+  fail "monitoring provisioner did not report the disabled HTTPS 5xx policy"
+grep -F '  false' "${SCRIPT_DIR}/provision-monitoring.sh" >/dev/null ||
+  fail "monitoring provisioner does not keep the HTTPS 5xx policy disabled"
 [[ "$(grep -F -c '<-X> <POST>' "$mock_curl_log")" -eq 2 ]] ||
   fail "monitoring provisioner did not create both email notification channels"
 

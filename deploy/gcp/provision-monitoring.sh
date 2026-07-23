@@ -224,18 +224,19 @@ write_policy() {
   local aligner="$8"
   local trigger_count="$9"
   local documentation="${10}"
+  local enabled="${11:-true}"
 
   # The JavaScript template literal is evaluated by Node, not the shell.
   # shellcheck disable=SC2016
   node -e '
     const fs = require("node:fs");
     const [file, displayName, conditionName, filter, comparison, threshold,
-      duration, aligner, triggerCount, documentation, channelsCsv] =
+      duration, aligner, triggerCount, documentation, enabled, channelsCsv] =
       process.argv.slice(1);
     const policy = {
       displayName,
       combiner: "OR",
-      enabled: true,
+      enabled: enabled === "true",
       notificationChannels: channelsCsv.split(","),
       documentation: { content: documentation, mimeType: "text/markdown" },
       userLabels: { managed_by: "liveprobe" },
@@ -258,7 +259,7 @@ write_policy() {
     fs.writeFileSync(file, `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
   ' "$file" "$display_name" "$condition_name" "$filter" "$comparison" \
     "$threshold" "$duration" "$aligner" "$trigger_count" \
-    "$documentation" "$channel_names_csv"
+    "$documentation" "$enabled" "$channel_names_csv"
 }
 
 apply_policy() {
@@ -339,7 +340,8 @@ write_policy \
   "The load balancer observed a broker 5xx response" \
   "resource.type = \"l7_lb_rule\" AND metric.type = \"logging.googleapis.com/user/${LB_ERROR_METRIC}\"" \
   COMPARISON_GT 0 0s ALIGN_SUM 1 \
-  "The public load balancer observed one or more broker 5xx responses. Inspect request logs, broker health, and Cloud SQL availability."
+  "The public load balancer observed one or more broker 5xx responses. Inspect request logs, broker health, and Cloud SQL availability." \
+  false
 
 apply_policy "LiveProbe readiness unavailable" "$uptime_policy"
 apply_policy "LiveProbe VM CPU high" "$vm_cpu_policy"
@@ -351,4 +353,4 @@ apply_policy "LiveProbe HTTPS 5xx responses" "$lb_errors_policy"
 printf 'Ops Agent: active on %s\n' "$VM_NAME"
 printf 'Uptime check: https://%s/readyz\n' "$HTTPS_DOMAIN"
 printf 'Notification emails: %s\n' "$(IFS=', '; printf '%s' "${alert_emails[*]}")"
-printf 'Alert policies: readiness, HTTPS 5xx, VM CPU/disk, Cloud SQL storage/connections\n'
+printf 'Alert policies: readiness, VM CPU/disk, Cloud SQL storage/connections (HTTPS 5xx disabled)\n'
