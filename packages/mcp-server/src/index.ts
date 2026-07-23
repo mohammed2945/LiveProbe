@@ -118,15 +118,28 @@ export const ListAuditEventsInputSchema = z
       .describe("Return events strictly before this ISO-8601 timestamp"),
   })
   .strict();
+const approvalScopeMetadataShape = {
+  // Hosted MCP approval transports may attach these fields after user
+  // approval. Authorization still comes exclusively from the bearer token.
+  tenantId: z.string().min(1).optional(),
+  projectId: z.string().min(1).optional(),
+  environmentId: z.string().min(1).optional(),
+} as const;
 export const CreateServiceCredentialInputSchema = z
   .object({
     service_id: serviceIdSchema.describe("Service ID that will use this key"),
     label: z.string().trim().min(1).max(200).describe("Human-readable key label"),
+    ...approvalScopeMetadataShape,
   })
   .strict();
-export const ListServiceCredentialsInputSchema = z.object({}).strict();
+export const ListServiceCredentialsInputSchema = z
+  .object(approvalScopeMetadataShape)
+  .strict();
 export const RevokeServiceCredentialInputSchema = z
-  .object({ credential_id: z.string().regex(/^svc_[0-9a-f]{32}$/) })
+  .object({
+    credential_id: z.string().regex(/^svc_[0-9a-f]{32}$/),
+    ...approvalScopeMetadataShape,
+  })
   .strict();
 export const ListProbesInputSchema = z
   .object({
