@@ -34,7 +34,7 @@ describe("Clerk authentication", () => {
 
     await expect(authenticate("session-token")).resolves.toEqual({
       type: "user",
-      role: "admin",
+      role: "operator",
       principalId: "user_123",
       tenantId: "org_123",
       projectId: "default",
@@ -186,7 +186,7 @@ describe("Clerk authentication", () => {
     });
 
     await expect(authenticate("session-token")).resolves.toMatchObject({
-      role: "viewer",
+      role: "operator",
       organizationRole: "org:liveprobe_viewer",
     });
   });

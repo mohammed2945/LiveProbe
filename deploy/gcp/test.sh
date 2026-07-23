@@ -286,6 +286,44 @@ if [[ "${1:-} ${2:-} ${3:-}" == "compute instances describe" &&
   done
 fi
 
+if [[ "${MOCK_RECOVERY_DRILL:-false}" == true ]]; then
+  case "${1:-} ${2:-} ${3:-}" in
+    "sql instances describe")
+      if [[ "${4:-}" == "lp-test-postgres" ]]; then
+        for argument in "$@"; do
+          if [[ "$argument" == "--format=value(state)" ]]; then
+            printf 'RUNNABLE\n'
+            exit 0
+          fi
+        done
+        exit 0
+      fi
+      if [[ "${4:-}" == "lp-test-postgres-recovery-test" ]] &&
+        grep -F '<sql> <instances> <clone>' "${MOCK_GCLOUD_LOG:?}" >/dev/null; then
+        for argument in "$@"; do
+          if [[ "$argument" == "--format=value(connectionName)" ]]; then
+            printf 'lightprobe-test:us-central1:lp-test-postgres-recovery-test\n'
+          fi
+        done
+        exit 0
+      fi
+      exit 1
+      ;;
+    "sql backups list")
+      printf '1784689200000,SUCCESSFUL,AUTOMATED,2026-07-22T04:27:46.719Z\n'
+      exit 0
+      ;;
+    "sql instances clone"|"sql instances patch"|"sql instances delete")
+      exit 0
+      ;;
+    "compute ssh lp-test")
+      printf '%s\n' \
+        '{"schemaVersion":6,"tenantCount":1,"projectCount":1,"environmentCount":1,"serviceCount":19,"auditEventCount":42,"immutableTriggerCount":1,"hasDefaultTenant":true,"hasDefaultProject":true,"hasDefaultEnvironment":true}'
+      exit 0
+      ;;
+  esac
+fi
+
 if [[ "${MOCK_PROVISION_MONITORING:-false}" == true ]]; then
   case "${1:-} ${2:-} ${3:-}" in
     "auth print-access-token")
@@ -864,6 +902,58 @@ MOCK_DATABASE_CONFIG=$'DATABASE_BACKEND=cloud-sql\nCLOUD_SQL_INSTANCE_CONNECTION
 grep -F '<sql> <backups> <create> <--instance=lp-test-postgres>' \
   "$mock_log" >/dev/null ||
   fail "Cloud SQL backup did not create a managed on-demand backup"
+
+: >"$mock_log"
+recovery_output="$(
+  PROJECT_ID=lightprobe-test \
+  REGION=us-central1 \
+  ZONE=us-central1-a \
+  VM_NAME=lp-test \
+  DATABASE_BACKEND=cloud-sql \
+  CLOUD_SQL_INSTANCE=lp-test-postgres \
+  RECOVERY_INSTANCE=lp-test-postgres-recovery-test \
+  GCLOUD_BIN="$mock_gcloud" \
+  MOCK_GCLOUD_LOG="$mock_log" \
+  MOCK_RECOVERY_DRILL=true \
+    "${SCRIPT_DIR}/recovery-drill.sh"
+)"
+grep -F 'Recovery drill passed' <<<"$recovery_output" >/dev/null ||
+  fail "recovery drill did not report success"
+grep -F 'Temporary instance deleted: lp-test-postgres-recovery-test' \
+  <<<"$recovery_output" >/dev/null ||
+  fail "recovery drill did not report temporary instance cleanup"
+for expected_call in \
+  '<sql> <backups> <list> <--instance=lp-test-postgres>' \
+  '<sql> <instances> <clone> <lp-test-postgres> <lp-test-postgres-recovery-test>' \
+  '<--point-in-time=' \
+  'docker compose --env-file /etc/liveprobe/deployment.env' \
+  '<sql> <instances> <patch> <lp-test-postgres-recovery-test>' \
+  '<--no-deletion-protection>' \
+  '<sql> <instances> <delete> <lp-test-postgres-recovery-test>'; do
+  grep -F "$expected_call" "$mock_log" >/dev/null ||
+    fail "recovery drill omitted command: ${expected_call}"
+done
+if grep -F '<sql> <instances> <delete> <lp-test-postgres>' \
+  "$mock_log" >/dev/null; then
+  fail "recovery drill attempted to delete the production instance"
+fi
+
+: >"$mock_log"
+if PROJECT_ID=lightprobe-test \
+  REGION=us-central1 \
+  ZONE=us-central1-a \
+  VM_NAME=lp-test \
+  DATABASE_BACKEND=cloud-sql \
+  CLOUD_SQL_INSTANCE=lp-test-postgres \
+  RECOVERY_INSTANCE=lp-test-postgres \
+  GCLOUD_BIN="$mock_gcloud" \
+  MOCK_GCLOUD_LOG="$mock_log" \
+  MOCK_RECOVERY_DRILL=true \
+    "${SCRIPT_DIR}/recovery-drill.sh" >/dev/null 2>&1; then
+  fail "recovery drill accepted the production instance as its target"
+fi
+[[ ! -s "$mock_log" ]] ||
+  fail "unsafe recovery target mutated GCP resources"
 
 PROJECT_ID=lightprobe-test \
 REGION=us-central1 \

@@ -17,13 +17,16 @@ import {
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const compiledCli = join(packageRoot, "dist", "cli.js");
 const toolNames = [
+  "create_service_credential",
   "get_probe_data",
   "get_safety_overview",
   "list_audit_events",
   "list_probes",
+  "list_service_credentials",
   "list_services",
   "ping_broker",
   "remove_probe",
+  "revoke_service_credential",
   "set_counter_probe",
   "set_log_probe",
   "set_metric_probe",

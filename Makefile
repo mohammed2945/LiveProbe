@@ -22,7 +22,7 @@ GCP_LOGS_ARGS ?= --tail=200
 	e2e-node e2e-python e2e-jvm \
 	demo-prerequisites demo demo-down \
 	gcp-demo-prerequisites gcp-demo-up gcp-demo-status gcp-demo-logs gcp-demo-down \
-	gcp-monitoring
+	gcp-monitoring gcp-recovery-drill
 
 test: fixtures-test typescript-test python-test java-test demo-unit-test
 
@@ -68,6 +68,9 @@ gcp-deploy-test:
 
 gcp-monitoring:
 	deploy/gcp/provision-monitoring.sh
+
+gcp-recovery-drill:
+	deploy/gcp/recovery-drill.sh
 
 typescript-build:
 	pnpm run build

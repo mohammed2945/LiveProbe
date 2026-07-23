@@ -263,16 +263,38 @@ A useful first prompt is:
 > Ping the LiveProbe broker, list online services, and show the safety
 > overview. Do not create a probe yet.
 
+### Create an agent credential
+
+For the pilot, every member of a Clerk organization has the same LiveProbe
+permissions within that organization. Use `create_service_credential` to issue
+a key for the service you want to instrument:
+
+1. Call `create_service_credential` with the exact `service_id` from
+   `list_services` and a descriptive `label`.
+2. Store the returned `apiKey` in the service's secret manager or deployment
+   environment. The plaintext key is shown only in the create response.
+3. Configure the agent with `LIVEPROBE_API_KEY`, `LIVEPROBE_BROKER_URL`, and
+   the required `LIVEPROBE_COMMIT_SHA`.
+4. Use `list_service_credentials` later to review key prefixes and status.
+5. Use `revoke_service_credential` to disable a key that is no longer needed.
+
+Credential creation and revocation are organization-scoped. Removing a
+person from the Clerk organization removes their human access, but it does not
+automatically revoke existing agent keys; revoke those keys separately.
+
 ## 4. Use the MCP tools
 
-The server exposes eleven tools:
+The server exposes fourteen tools:
 
 | Tool | Purpose |
 | --- | --- |
 | `ping_broker` | Check authenticated broker connectivity. |
 | `list_services` | List agents, commits, heartbeat state, and caveats. |
 | `get_safety_overview` | Show per-service safety state and probe counts. |
-| `list_audit_events` | List control-plane changes; requires workspace admin. |
+| `list_audit_events` | List control-plane changes in the selected organization. |
+| `create_service_credential` | Create a per-service agent key; the plaintext key is returned once. |
+| `list_service_credentials` | List credential metadata and revocation state without secrets. |
+| `revoke_service_credential` | Revoke an agent key in your organization. |
 | `set_snapshot_probe` | Capture bounded locals, watch paths, and stack data. |
 | `set_log_probe` | Add a temporary log with `${dot.path}` placeholders. |
 | `set_counter_probe` | Count executions of a source line. |

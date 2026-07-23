@@ -118,6 +118,16 @@ export const ListAuditEventsInputSchema = z
       .describe("Return events strictly before this ISO-8601 timestamp"),
   })
   .strict();
+export const CreateServiceCredentialInputSchema = z
+  .object({
+    service_id: serviceIdSchema.describe("Service ID that will use this key"),
+    label: z.string().trim().min(1).max(200).describe("Human-readable key label"),
+  })
+  .strict();
+export const ListServiceCredentialsInputSchema = z.object({}).strict();
+export const RevokeServiceCredentialInputSchema = z
+  .object({ credential_id: z.string().regex(/^svc_[0-9a-f]{32}$/) })
+  .strict();
 export const ListProbesInputSchema = z
   .object({
     service_id: serviceIdSchema.optional(),
@@ -300,6 +310,26 @@ const auditEventSchema = z
 const listAuditEventsResponseSchema = z
   .object({ events: z.array(auditEventSchema) })
   .strict();
+const serviceCredentialSchema = z
+  .object({
+    credentialId: z.string().regex(/^svc_[0-9a-f]{32}$/),
+    serviceId: serviceIdSchema,
+    label: z.string().min(1),
+    keyPrefix: z.string().startsWith("lp_service_"),
+    createdAt: z.string().datetime({ offset: true }),
+    lastUsedAt: z.string().datetime({ offset: true }).optional(),
+    revokedAt: z.string().datetime({ offset: true }).optional(),
+  })
+  .strict();
+const createServiceCredentialResponseSchema = z
+  .object({
+    credential: serviceCredentialSchema,
+    apiKey: z.string().startsWith("lp_service_"),
+  })
+  .strict();
+const listServiceCredentialsResponseSchema = z
+  .object({ credentials: z.array(serviceCredentialSchema) })
+  .strict();
 
 export type BrokerProbeDefinition = z.infer<
   typeof BrokerProbeDefinitionSchema
@@ -308,6 +338,7 @@ export type BrokerService = z.infer<typeof serviceSchema>;
 export type BrokerProbeStatus = z.infer<typeof probeStatusSchema>;
 export type BrokerProbeData = z.infer<typeof probeDataResponseSchema>;
 export type BrokerAuditEvent = z.infer<typeof auditEventSchema>;
+export type BrokerServiceCredential = z.infer<typeof serviceCredentialSchema>;
 
 type BrokerCondition = z.infer<typeof McpConditionSchema>;
 
@@ -482,6 +513,35 @@ export class BrokerClient {
     );
   }
 
+  public async createServiceCredential(input: {
+    serviceId: string;
+    label: string;
+  }): Promise<z.infer<typeof createServiceCredentialResponseSchema>> {
+    return this.request(
+      "POST",
+      "/v1/service-credentials",
+      createServiceCredentialResponseSchema,
+      input,
+    );
+  }
+
+  public async listServiceCredentials(): Promise<
+    z.infer<typeof listServiceCredentialsResponseSchema>
+  > {
+    return this.request(
+      "GET",
+      "/v1/service-credentials",
+      listServiceCredentialsResponseSchema,
+    );
+  }
+
+  public async revokeServiceCredential(credentialId: string): Promise<void> {
+    await this.requestNoContent(
+      "DELETE",
+      `/v1/service-credentials/${encodeURIComponent(credentialId)}`,
+    );
+  }
+
   public async removeProbe(probeId: string): Promise<void> {
     await this.requestNoContent(
       "DELETE",
@@ -598,6 +658,15 @@ export interface ToolHandlers {
   list_audit_events(
     input?: z.input<typeof ListAuditEventsInputSchema>,
   ): Promise<z.infer<typeof listAuditEventsResponseSchema>>;
+  create_service_credential(
+    input: z.input<typeof CreateServiceCredentialInputSchema>,
+  ): Promise<z.infer<typeof createServiceCredentialResponseSchema>>;
+  list_service_credentials(
+    input?: unknown,
+  ): Promise<z.infer<typeof listServiceCredentialsResponseSchema>>;
+  revoke_service_credential(
+    input: z.input<typeof RevokeServiceCredentialInputSchema>,
+  ): Promise<{ revoked: true; credentialId: string }>;
   list_services(input?: unknown): Promise<{ services: EnrichedService[] }>;
   list_probes(
     input: z.input<typeof ListProbesInputSchema>,
@@ -762,6 +831,22 @@ export function createToolHandlers(client: BrokerClient): ToolHandlers {
       const input = ListAuditEventsInputSchema.parse(rawInput);
       return client.listAuditEvents(input);
     },
+    async create_service_credential(rawInput) {
+      const input = CreateServiceCredentialInputSchema.parse(rawInput);
+      return client.createServiceCredential({
+        serviceId: input.service_id,
+        label: input.label,
+      });
+    },
+    async list_service_credentials(rawInput = {}) {
+      ListServiceCredentialsInputSchema.parse(rawInput);
+      return client.listServiceCredentials();
+    },
+    async revoke_service_credential(rawInput) {
+      const input = RevokeServiceCredentialInputSchema.parse(rawInput);
+      await client.revokeServiceCredential(input.credential_id);
+      return { revoked: true, credentialId: input.credential_id };
+    },
     async list_probes(rawInput) {
       const input = ListProbesInputSchema.parse(rawInput);
       return client.listProbes(input.service_id);
@@ -812,8 +897,8 @@ function toolErrorResult(error: unknown): {
     } else if (error.status === 403 || code === "forbidden") {
       code = "forbidden";
       checks = [
-        "Use a Clerk organization account with the role required by this tool.",
-        "Ask an organization admin to update your role if access is expected.",
+        "Use a Clerk account that is a member of the intended organization.",
+        "Confirm the correct Clerk organization is selected if access is expected.",
       ];
     } else if (error.status === 404) {
       checks = [
@@ -998,6 +1083,39 @@ export function createMcpServer(
       annotations: { readOnlyHint: true },
     },
     async (input) => executeTool(() => handlers.list_audit_events(input)),
+  );
+  server.registerTool(
+    "create_service_credential",
+    {
+      title: "Create service credential",
+      description:
+        "Create a service-scoped API key for your organization. The plaintext key is returned once and cannot be recovered. Store it in the target service's secret manager.",
+      inputSchema: CreateServiceCredentialInputSchema,
+      annotations: { destructiveHint: false },
+    },
+    async (input) => executeTool(() => handlers.create_service_credential(input)),
+  );
+  server.registerTool(
+    "list_service_credentials",
+    {
+      title: "List service credentials",
+      description:
+        "List non-secret service credential metadata for the current organization. Plaintext keys are never returned.",
+      inputSchema: ListServiceCredentialsInputSchema,
+      annotations: { readOnlyHint: true },
+    },
+    async (input) => executeTool(() => handlers.list_service_credentials(input)),
+  );
+  server.registerTool(
+    "revoke_service_credential",
+    {
+      title: "Revoke service credential",
+      description:
+        "Revoke a service credential in the current organization. Revocation is idempotent only until the credential is revoked.",
+      inputSchema: RevokeServiceCredentialInputSchema,
+      annotations: { destructiveHint: true },
+    },
+    async (input) => executeTool(() => handlers.revoke_service_credential(input)),
   );
   server.registerTool(
     "list_probes",

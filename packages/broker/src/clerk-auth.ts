@@ -110,14 +110,14 @@ function normalizedRole(role: string | undefined): string | undefined {
 export function liveProbeRoleForClerkRole(role: string): HumanRole {
   switch (normalizedRole(role)) {
     case "org:admin":
-      return "admin";
     case "org:member":
     case "org:operator":
     case "org:liveprobe_operator":
-      return "operator";
     case "org:viewer":
     case "org:liveprobe_viewer":
-      return "viewer";
+      // The pilot has one effective human permission level. Keep the
+      // historical role values for migration and audit compatibility.
+      return "operator";
     default:
       throw new BearerAuthenticationError(
         403,

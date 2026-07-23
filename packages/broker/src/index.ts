@@ -587,27 +587,12 @@ function requireHumanRead(request: FastifyRequest): BrokerPrincipal {
 }
 
 function requireProbeManager(request: FastifyRequest): BrokerPrincipal {
-  const principal = requireHumanRead(request);
-  if (principal.role === "viewer") {
-    throw new BrokerHttpError(
-      403,
-      "forbidden",
-      "viewer credentials cannot create or remove probes",
-    );
-  }
-  return principal;
+  return requireHumanRead(request);
 }
 
 function requireAdmin(request: FastifyRequest): BrokerPrincipal {
-  const principal = requireHumanRead(request);
-  if (principal.role !== "admin") {
-    throw new BrokerHttpError(
-      403,
-      "forbidden",
-      "admin access is required for this broker resource",
-    );
-  }
-  return principal;
+  // The pilot has no separate human admin/operator/viewer boundary.
+  return requireHumanRead(request);
 }
 
 function requireServiceAccess(

@@ -631,7 +631,7 @@ describe("broker validation and storage", () => {
     expect(sharedOperator.statusCode).toBe(200);
   });
 
-  it("enforces admin, operator, viewer, and agent route boundaries", async () => {
+  it("allows all human roles while keeping agent route boundaries", async () => {
     const auditEvents: AuditEventRecord[] = [];
     const principals: Record<string, BrokerPrincipal> = {
       admin: {
@@ -724,7 +724,7 @@ describe("broker validation and storage", () => {
       headers: headers("viewer"),
       payload: probePayload,
     });
-    expect(viewerCreate.statusCode).toBe(403);
+    expect(viewerCreate.statusCode).toBe(201);
 
     const operatorCredential = await broker.inject({
       method: "POST",
@@ -732,7 +732,7 @@ describe("broker validation and storage", () => {
       headers: headers("operator"),
       payload: { serviceId: "orders", label: "Orders production" },
     });
-    expect(operatorCredential.statusCode).toBe(403);
+    expect(operatorCredential.statusCode).toBe(201);
     const adminCredential = await broker.inject({
       method: "POST",
       url: "/v1/service-credentials",
@@ -776,7 +776,7 @@ describe("broker validation and storage", () => {
     });
     expect(agentControlPlane.statusCode).toBe(403);
 
-    for (const token of ["operator", "viewer", "agent"]) {
+    for (const token of ["agent"]) {
       const denied = await broker.inject({
         method: "GET",
         url: "/v1/audit-events",
@@ -792,14 +792,6 @@ describe("broker validation and storage", () => {
     expect(audit.statusCode).toBe(200);
     expect(audit.json<{ events: AuditEventRecord[] }>().events).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          actorId: "user_viewer",
-          actorRole: "viewer",
-          action: "probe.create",
-          outcome: "denied",
-          statusCode: 403,
-          errorCode: "forbidden",
-        }),
         expect.objectContaining({
           actorId: "user_admin",
           actorRole: "admin",

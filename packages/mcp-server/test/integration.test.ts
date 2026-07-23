@@ -115,13 +115,16 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
+        "create_service_credential",
         "get_probe_data",
         "get_safety_overview",
         "list_audit_events",
         "list_probes",
+        "list_service_credentials",
         "list_services",
         "ping_broker",
         "remove_probe",
+        "revoke_service_credential",
         "set_counter_probe",
         "set_log_probe",
         "set_metric_probe",
@@ -497,7 +500,7 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     }
   });
 
-  it("publishes exactly the eleven official MCP tools", async () => {
+  it("publishes exactly the fourteen official MCP tools", async () => {
     const { brokerUrl } = await startBroker();
     const server = createMcpServer(new BrokerClient(brokerUrl));
     const client = new Client(
@@ -512,13 +515,16 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       await client.connect(clientTransport);
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
+        "create_service_credential",
         "get_probe_data",
         "get_safety_overview",
         "list_audit_events",
         "list_probes",
+        "list_service_credentials",
         "list_services",
         "ping_broker",
         "remove_probe",
+        "revoke_service_credential",
         "set_counter_probe",
         "set_log_probe",
         "set_metric_probe",

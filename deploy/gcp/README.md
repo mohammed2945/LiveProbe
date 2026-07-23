@@ -308,6 +308,23 @@ PROJECT_ID="<PROJECT_ID>" deploy/gcp/backup.sh
 pg_restore --list backups/liveprobe-YYYYMMDDTHHMMSSZ.dump
 ```
 
+For Cloud SQL, run a non-destructive point-in-time recovery drill before
+storing important client data:
+
+```sh
+PROJECT_ID="<PROJECT_ID>" \
+DATABASE_BACKEND=cloud-sql \
+  deploy/gcp/recovery-drill.sh
+```
+
+The drill first verifies that a successful managed backup exists. It then
+clones the production instance from five minutes earlier into a uniquely named
+temporary instance, validates the complete LiveProbe schema, default tenant
+scope, representative service and audit data, and the immutable audit trigger,
+then deletes the temporary instance. Production traffic and the source database
+are never redirected or modified. The temporary instance incurs Cloud SQL
+charges only while the drill is running.
+
 To refresh SSH access after changing networks without redeploying:
 
 ```sh
@@ -394,8 +411,9 @@ The single-VM topology is suitable for controlled internal testing after
 regular off-VM backups are scheduled. Before storing important evidence or
 opening access beyond a narrow operator network, complete these items in order:
 
-1. Use `DATABASE_BACKEND=cloud-sql`, verify a managed backup and a point-in-time
-   recovery drill, and migrate any retained local data before cutover.
+1. Use `DATABASE_BACKEND=cloud-sql`, run `recovery-drill.sh` to verify a managed
+   backup and point-in-time recovery, and migrate any retained local data before
+   cutover.
 2. Activate the provided HTTPS load-balancer path with a domain and verify that
    direct broker ingress has been removed.
 3. Rotate the initial shared key, distribute it outside source control, and
