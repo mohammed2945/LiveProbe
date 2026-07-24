@@ -4,5 +4,6 @@ node_modules/
 out/
 playwright-report/
 test-results/
+.wrangler/
 *.log
 *.tsbuildinfo
