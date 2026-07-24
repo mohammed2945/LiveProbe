@@ -139,7 +139,7 @@ demo's diagnostic port.
 ## MCP configuration
 
 For a host-run broker and built MCP package, configure a stdio server in your
-MCP client (replace `/absolute/path/to/LightProbe`):
+MCP client (replace `/absolute/path/to/LiveProbe`):
 
 ```json
 {
@@ -147,7 +147,7 @@ MCP client (replace `/absolute/path/to/LightProbe`):
     "liveprobe": {
       "command": "node",
       "args": [
-        "/absolute/path/to/LightProbe/packages/mcp-server/dist/index.js"
+        "/absolute/path/to/LiveProbe/packages/mcp-server/dist/index.js"
       ],
       "env": {
         "BROKER_URL": "http://127.0.0.1:7070",

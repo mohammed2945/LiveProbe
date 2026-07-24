@@ -4,7 +4,7 @@
   "description": "Node.js runtime agent for LiveProbe",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mohammed2945/LightProbe.git",
+    "url": "https://github.com/mohammed2945/LiveProbe.git",
     "directory": "packages/sdk-node"
   },
   "type": "module",

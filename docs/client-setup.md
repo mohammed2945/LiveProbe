@@ -171,7 +171,7 @@ Download the bridge into the local Maven repository:
 ```sh
 mvn dependency:get \
   -Dartifact=io.liveprobe:liveprobe-bridge:0.2.0 \
-  -DremoteRepositories=github::default::https://maven.pkg.github.com/mohammed2945/LightProbe
+  -DremoteRepositories=github::default::https://maven.pkg.github.com/mohammed2945/LiveProbe
 ```
 
 Compile the target with line-number and local-variable metadata (`javac -g`).
