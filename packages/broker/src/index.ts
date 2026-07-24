@@ -2431,12 +2431,17 @@ export class BrokerState {
     const defined = statuses.filter(
       (status): status is ProbeStatus => status !== undefined,
     );
-    if (statuses.some((status) => status === undefined) ||
-      defined.some((status) => status.status === "armed")) {
-      this.statuses.set(probeId, {
-        status: "armed",
-        updatedAt: this.timestamp(),
-      });
+    if (
+      statuses.some((status) => status === undefined) ||
+      defined.some((status) => status.status === "armed")
+    ) {
+      const armed = defined
+        .filter((status) => status.status === "armed")
+        .sort(
+          (left, right) =>
+            Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+        )[0];
+      if (armed !== undefined) this.statuses.set(probeId, armed);
       return;
     }
     const latest = defined.sort(

@@ -24,6 +24,13 @@ The public HTTPS endpoint is suitable for internal integration testing. The
 broker uses Clerk organizations for human tenant isolation and browser login.
 Shared admin keys are reserved for local fallback and break-glass use.
 
+Native host agents use a separate credential class. An administrator creates
+one through `POST /v1/native-credentials`, binding the exact `agentId`, tenant,
+project, environment, and explicit service allowlist. Store the one-time
+`lp_native_...` value in the host secret manager and expose it only as
+`LIVEPROBE_NATIVE_CREDENTIAL`. It cannot access MCP, human control-plane, or
+managed-runtime routes.
+
 ```sh
 export BROKER_URL="https://liveprobe.tryastrea.tech"
 export LIVEPROBE_API_KEY="<service-key-provided-separately>"

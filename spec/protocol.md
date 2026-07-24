@@ -67,6 +67,18 @@ behavior from another implementation.
 }
 ```
 
+Native host-agent keys begin with `lp_native_` and bind an exact `agentId`, an
+explicit service allowlist, and one tenant/project/environment scope. They can
+call only `/v1/native/*`. Every route agent ID and reconciled or ingested
+service must match that credential. Human and managed-service credentials
+cannot call native runtime routes, and native credentials cannot call the
+human control plane, MCP, or managed-runtime routes.
+
+The canonical machine-readable schemas are in `packages/protocol`. Requests
+are strict. Responses may add fields only where forward compatibility is
+documented. Rust serde structures are checked against the shared JSON fixtures
+in `packages/protocol/test/fixtures`.
+
 Human permissions are:
 
 | Role | Read diagnostics | Create/delete probes | Manage service credentials | Read audit events |
@@ -476,6 +488,41 @@ Status event:
 `detail` is optional. Specific failures such as `line-not-found` are carried in
 `detail`.
 
+### 4.4 Native Linux agent reconciliation
+
+Native Linux agents use the same logical probes and sanitized evidence model.
+Raw ring-buffer records and target bytes never leave the host.
+
+- `POST /v1/native/agents/register` verifies the native credential and exact
+  agent ID, persists the heartbeat, and returns its bounded service allowlist.
+- `PUT /v1/native/agents/{agentId}/instances` replaces only that scoped
+  agent's complete instance set. Each instance includes language, PID and
+  process start identity, executable identity, architecture, exact GNU build
+  ID, capabilities, and last-seen time.
+- `GET /v1/native/agents/{agentId}/assignments?since=N` returns complete
+  desired state bound to exact instance and build IDs. When `N` equals the
+  current durable version, `assignments` is empty.
+- `POST /v1/native/ingest` validates the complete batch before mutation and
+  verifies scope, agent, service, instance, build, probe ID, probe version, and
+  event type.
+
+Assignment versions are monotonically increasing and persisted independently
+of managed service versions. Terminal state is keyed by tenant, project,
+environment, probe ID/version, agent, instance, and build ID; one instance
+cannot terminate another.
+
+Native capability validation is broker-authoritative. The supported bounded
+contract is source file/line, dot-path scalar/C-string/fixed-field watches,
+simple path conditions, path-based log templates, counters, simple metric
+paths, TTL/hit limits, and raw-hit protection. Arbitrary expressions,
+stack-local expansion, unsupported log levels, deep or container traversal,
+floating-register capture, STL traversal, and suspended Rust future inspection
+return `unsupported_by_backend` before storage.
+
+`sourceCommit` is user-supplied source/audit metadata. `buildId` is the
+agent-reported identity of the executable actually attached by the loader.
+They are never interchangeable.
+
 ## 5. Client-facing broker API
 
 Every route in this section requires a human credential or the shared
@@ -643,6 +690,13 @@ returns metadata only. It never returns a secret or secret hash.
 revokes an active credential and returns HTTP 204. A revoked credential
 immediately receives HTTP 401. Credential management returns HTTP 503
 `credential_store_unavailable` when PostgreSQL is not configured.
+
+Native host credentials use `POST`, `GET`, and `DELETE
+/v1/native-credentials[/{credentialId}]`. Creation accepts `agentId`,
+`allowedServiceIds`, and `label`. The returned secret has prefix `lp_native_`
+and is shown once. Stored/listed records contain only the credential ID, scope,
+exact agent ID, service allowlist, label, safe key prefix, creation/last-use
+timestamps, and optional revocation timestamp.
 
 ### 5.8 Audit events
 

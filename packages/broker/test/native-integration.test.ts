@@ -270,6 +270,44 @@ describe("scoped native integration", () => {
         url: `/v1/native/agents/host-a/assignments?since=${version}`,
       })).json()).toEqual({ version, assignments: [] });
 
+      const armed = await broker.inject({
+        method: "POST",
+        url: "/v1/native/ingest",
+        payload: {
+          agentId: "host-a",
+          serviceId: "orders-native",
+          instanceId: instance.instanceId,
+          buildId: instance.buildId,
+          backend: "native-ebpf",
+          agentStatus: { state: "green" },
+          events: [{
+            probeId: probe.id,
+            probeVersion: probe.version,
+            type: "status",
+            ts: new Date().toISOString(),
+            status: "armed",
+            agentId: "host-a",
+            instanceId: instance.instanceId,
+            buildId: instance.buildId,
+            physicalSiteCount: 1,
+          }],
+        },
+      });
+      expect(armed.statusCode).toBe(202);
+      expect((await broker.inject({
+        method: "GET",
+        url: `/v1/probes/${probe.id}/data`,
+      })).json()).toMatchObject({
+        status: {
+          status: "armed",
+          agentId: "host-a",
+          instanceId: instance.instanceId,
+          buildId: instance.buildId,
+          probeVersion: probe.version,
+          physicalSiteCount: 1,
+        },
+      });
+
       const rejected = await broker.inject({
         method: "POST",
         url: "/v1/native/ingest",
@@ -299,7 +337,9 @@ describe("scoped native integration", () => {
       expect((await broker.inject({
         method: "GET",
         url: `/v1/probes/${probe.id}/data`,
-      })).json<{ events: unknown[] }>().events).toEqual([]);
+      })).json<{ events: unknown[] }>().events).toEqual([
+        expect.objectContaining({ type: "status", status: "armed" }),
+      ]);
 
       const stale = await broker.inject({
         method: "POST",

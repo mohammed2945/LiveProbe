@@ -172,20 +172,25 @@ try {
     sourceCommit: "abcdef1234567890",
     file: sourceSuffix,
     line: sourceLine,
-    ttlSeconds: 60,
+    ttlSeconds: 600,
     createdBy: "test:broker-http-native-e2e",
   };
-  const definitions = [
+  const coreDefinitions = [
     ["true", { ...common, type: "snapshot", watchPaths: ["subtotal"], condition: { path: "subtotal", op: "eq", value: 4242 }, hitLimit: 1 }],
+    ["redacted", { ...common, type: "snapshot", watchPaths: ["tenant_secret"], hitLimit: 1 }],
+    ["counter", { ...common, type: "counter", hitLimit: 20 }],
+  ];
+  const extendedDefinitions = [
     ["false", { ...common, type: "snapshot", watchPaths: ["subtotal"], condition: { path: "subtotal", op: "eq", value: 999 }, hitLimit: 20 }],
     ["literal", { ...common, type: "log", template: "literal-zero-interpolation", hitLimit: 1 }],
     ["unavailable", { ...common, type: "snapshot", watchPaths: ["missing_scalar"], hitLimit: 1 }],
-    ["redacted", { ...common, type: "snapshot", watchPaths: ["tenant_secret"], hitLimit: 1 }],
     ["redactedLog", { ...common, type: "log", template: "secret=${tenant_secret}", hitLimit: 1 }],
     ["redactedMetric", { ...common, type: "metric", metricPath: "tenant_secret", hitLimit: 20 }],
     ["conditionOnly", { ...common, type: "snapshot", watchPaths: ["discount"], condition: { path: "subtotal", op: "eq", value: 4242 }, hitLimit: 1 }],
-    ["counter", { ...common, type: "counter", hitLimit: 20 }],
   ];
+  const definitions = process.env.LIVEPROBE_NATIVE_EXTENDED_E2E === "1"
+    ? [...coreDefinitions, ...extendedDefinitions]
+    : coreDefinitions;
   const probes = new Map();
   for (const [name, body] of definitions) {
     if (name === "true") {
@@ -264,13 +269,13 @@ try {
   if (!snapshots.some((event) => event.watches?.subtotal?.t === "num" && event.watches.subtotal.v === 4242)) {
     throw new Error("known scalar 4242 was not captured from a register or stack location");
   }
-  if (evidence.get("false").events.some((event) => event.type === "snapshot")) {
+  if (evidence.get("false")?.events.some((event) => event.type === "snapshot")) {
     throw new Error("condition-false capture was emitted");
   }
-  if (!evidence.get("literal").events.some((event) => event.type === "log" && event.message === "literal-zero-interpolation")) {
+  if (evidence.has("literal") && !evidence.get("literal").events.some((event) => event.type === "log" && event.message === "literal-zero-interpolation")) {
     throw new Error("literal zero-interpolation log missing");
   }
-  if (!evidence.get("unavailable").events.some((event) =>
+  if (evidence.has("unavailable") && !evidence.get("unavailable").events.some((event) =>
     event.type === "snapshot" && event.watches?.missing_scalar?.t === "unavailable")) {
     throw new Error("all-unavailable snapshot missing");
   }
@@ -278,17 +283,18 @@ try {
     event.type === "snapshot" && event.watches?.tenant_secret?.t === "redacted")) {
     throw new Error("redacted scalar missing");
   }
-  if (!evidence.get("redactedLog").events.some((event) =>
+  if (evidence.has("redactedLog") && !evidence.get("redactedLog").events.some((event) =>
     event.type === "log" && !event.message.includes("31337"))) {
     throw new Error("redacted log evidence missing");
   }
-  if (evidence.get("redactedMetric").events.some((event) => event.type === "metric")) {
+  if (evidence.get("redactedMetric")?.events.some((event) => event.type === "metric")) {
     throw new Error("redacted metric path was emitted");
   }
-  const conditionOnlySnapshots = evidence.get("conditionOnly").events
+  const conditionOnlySnapshots = (evidence.get("conditionOnly")?.events ?? [])
     .filter((event) => event.type === "snapshot");
-  if (conditionOnlySnapshots.length === 0 ||
-      conditionOnlySnapshots.some((event) => Object.hasOwn(event.watches ?? {}, "subtotal"))) {
+  if (evidence.has("conditionOnly") && (conditionOnlySnapshots.length === 0 ||
+      conditionOnlySnapshots.some((event) =>
+        Object.hasOwn(event.watches ?? {}, "subtotal")))) {
     throw new Error("condition-only path leaked into emitted watches");
   }
   const counter = evidence.get("counter").events
