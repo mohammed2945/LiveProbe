@@ -27,19 +27,19 @@ scope.
 ## Repository and version state
 
 - Branch: `native-main-integration`.
-- Base: `origin/main` at `ba534cc6a06cc122833a87d60bffdcbc495ccc81`.
+- Base: `origin/main` at `36b722f319c1617aaca89e60a6c90296dc66cf4e`.
 - Native source reference: `adding-unmanaged-languages` at
   `17c38f497362533fb929b924633b1608e9041bb5` (left unchanged).
 - The implementation and this handoff are committed together as one local
   checkpoint. No package was published and no branch or release was pushed.
-- Native-capable source components use unreleased `0.2.0` versions:
-  - `@liveprobe/broker` (private);
-  - `@doomslayer2945/liveprobe-mcp`;
-  - `@liveprobe/protocol`;
+- Native-capable source components are unreleased on this branch:
+  - `@liveprobe/broker` remains private at `0.0.0`;
+  - `@doomslayer2945/liveprobe-mcp` is prepared as `0.3.0`;
+  - `@liveprobe/protocol` is `0.2.0`;
   - `liveprobe-native-agent`;
   - `liveprobe-bpf-loader`; and
   - `liveprobe-native-protocol`.
-- Already-published `0.1.1` MCP, Node, Python, and Java artifacts must not be
+- Already-published MCP, Node, Python, and Java artifacts must not be
   described as containing this native implementation.
 - BPF/userspace binary ABI: `2`.
 - Loader IPC protocol: `2`.
@@ -64,7 +64,7 @@ scope.
   main's authoritative store is tenant-scoped PostgreSQL. Schema version 9
   adds scoped agents, instances, statuses, assignment versions, build identity,
   and native credential authorization records.
-- MCP conflicts: main publishes fourteen logical control-plane tools and richer
+- MCP conflicts: main publishes twenty-three logical control-plane tools and richer
   managed schemas. No native-only placement tool was added; service and safety
   responses now describe either backend.
 - Capability conflicts: managed expression, stack-local, metric-expression,

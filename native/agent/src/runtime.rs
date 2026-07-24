@@ -166,6 +166,14 @@ impl PlannedSite {
     ) -> AttachRequest {
         let capture_ceiling = if self.probe.kind == "counter" {
             self.probe.hit_limit
+        } else if self.probe.condition.is_some() {
+            // Conditions are evaluated after bounded capture in userspace.
+            // Non-matching records must not consume a permanent kernel-side
+            // ceiling or a selective probe could become silently unable to
+            // observe a later matching hit. Sampling, the token bucket, raw-hit
+            // supervision, TTL, and userspace logical hit accounting remain
+            // responsible for bounding this path.
+            u64::MAX
         } else {
             self.probe.hit_limit.saturating_mul(100).max(100)
         };
@@ -717,6 +725,30 @@ mod tests {
         let mut stale = current;
         stale[4..8].copy_from_slice(&every_one.generation.to_ne_bytes());
         assert!(decode_event(&planned, &stale, &SerializerConfig::default()).is_err());
+    }
+
+    #[test]
+    fn conditional_probe_does_not_exhaust_on_non_matching_captures() {
+        let target = instance("svc-1-10", 1, "10");
+        let mut snapshot = probe("snapshot");
+        snapshot.watch_paths = Some(vec!["value".into()]);
+        snapshot.condition = Some(Condition {
+            path: "guard".into(),
+            op: "eq".into(),
+            value: serde_json::json!(1),
+        });
+        let planned = site(
+            snapshot,
+            &[
+                ("guard", ValueKind::Unsigned),
+                ("value", ValueKind::Unsigned),
+            ],
+            BTreeMap::new(),
+        );
+        let request = planned.attach_request(&target, false, 1);
+        assert_eq!(request.hit_limit, u64::MAX);
+        assert_eq!(request.refill_per_second, 10);
+        assert_eq!(request.burst, 10);
     }
 
     #[test]

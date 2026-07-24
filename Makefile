@@ -105,7 +105,7 @@ native-build:
 	cargo build --manifest-path native/Cargo.toml --workspace
 
 native-test:
-	cargo fmt --manifest-path native/Cargo.toml --check
+	cargo fmt --manifest-path native/Cargo.toml --all --check
 	cargo test --manifest-path native/Cargo.toml --workspace
 
 native-ebpf-test:
