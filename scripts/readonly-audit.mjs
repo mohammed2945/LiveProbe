@@ -33,6 +33,38 @@ const rules = [
     forbiddenSample: "frame.setValue(variable, replacement);",
     allowedSample: "hostname.setValue(address.host());",
   },
+  {
+    name: "BPF target-memory write helper",
+    directory: "native/bpf",
+    extensions: new Set([".c", ".h"]),
+    pattern: /\bbpf_probe_write_user\b/u,
+    forbiddenSample: "bpf_probe_write_user(target, value, size);",
+    allowedSample: "bpf_probe_read_user(value, size, target);",
+  },
+  {
+    name: "Native target-memory write API",
+    directory: "native",
+    extensions: new Set([".rs"]),
+    pattern: /\b(?:process_vm_writev|PTRACE_POKE(?:DATA|TEXT|USER)|ptrace_write)\b/u,
+    forbiddenSample: "process_vm_writev(pid, local, 1, remote, 1, 0);",
+    allowedSample: "decode_bounded_c_string(bytes, max);",
+  },
+  {
+    name: "Loader command execution IPC",
+    directory: "native/loader",
+    extensions: new Set([".rs"]),
+    pattern: /(?:std::process::Command|Command::new|\bsystem\s*\()/u,
+    forbiddenSample: 'Command::new("sh").arg("-c").arg(request.command);',
+    allowedSample: "write_response(stream, &response)",
+  },
+  {
+    name: "Loader arbitrary BPF object argument",
+    directory: "native/loader/src",
+    extensions: new Set([".rs"]),
+    pattern: /(?:BPF_OBJECT|bpf_object_path|bpf_path\s*=\s*env::args)/u,
+    forbiddenSample: "let bpf_path = env::args().nth(2).unwrap();",
+    allowedSample: "let path = Self::approved_object_path();",
+  },
 ];
 
 async function sourceFiles(directory, extensions) {

@@ -1,0 +1,30 @@
+{
+  "registration": {
+    "agentId": "fixture-host",
+    "hostname": "fixture-linux",
+    "backend": "native-ebpf",
+    "architecture": "x86_64",
+    "capabilities": ["uprobe", "count", "counter"],
+    "agentVersion": "0.2.0"
+  },
+  "assignments": {
+    "version": 9,
+    "assignments": [{
+      "instanceId": "fixture-100-10",
+      "serviceId": "fixture-native",
+      "buildId": "abcdef1234567890",
+      "probes": [{
+        "id": "prb_00000000000000000000000000",
+        "serviceId": "fixture-native",
+        "sourceCommit": "abcdef1",
+        "type": "counter",
+        "file": "src/main.rs",
+        "line": 10,
+        "ttlSeconds": 300,
+        "hitLimit": 100,
+        "version": 3,
+        "createdBy": "fixture"
+      }]
+    }]
+  }
+}

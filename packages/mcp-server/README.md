@@ -77,4 +77,12 @@ project/environment pair as the target runtime agent. This allows the same
 `production`; probes, events, service status, and safety data never cross that
 routing boundary.
 
+`list_services` and `get_safety_overview` distinguish `managed-runtime` from
+`native-ebpf` services. Native entries include agent-reported executable
+`buildIds`, instance counts, safe capability intersections, and native-specific
+limitations. `sourceCommit`/MCP `commit_hash` remains user-supplied source and
+audit metadata; a native `buildId` identifies the executable actually observed
+by the host agent. MCP creates only logical probes and never registers agents,
+constructs physical sites, or communicates with the BPF loader.
+
 Run `npx -y @doomslayer2945/liveprobe-mcp@0.3.0 --help` for CLI options.

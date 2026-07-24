@@ -5,6 +5,12 @@ import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import {
+  NativeProbeStatusSchema,
+  ProbeDefinitionSchema,
+  RuntimeBackendSchema,
+  RuntimeLanguageSchema,
+} from "@liveprobe/protocol";
 import { z } from "zod";
 
 const serviceIdSchema = z.string().trim().min(1).max(200);
@@ -379,77 +385,9 @@ export const RemoveProbeInputSchema = z
   })
   .strict();
 
-const conditionResponseSchema = z
-  .object({
-    path: z.string(),
-    op: z.enum(["eq", "ne", "gt", "gte", "lt", "lte"]),
-    value: scalarSchema,
-  })
-  .strict();
+export const BrokerProbeDefinitionSchema = ProbeDefinitionSchema;
 
-const definitionCommonShape = {
-  id: probeIdSchema,
-  serviceId: serviceIdSchema,
-  sourceCommit: commitHashSchema.optional(),
-  file: sourceFileSchema,
-  line: z.number().int().positive(),
-  condition: conditionResponseSchema.optional(),
-  conditionExpression: compiledExpressionSchema.optional(),
-  hitLimit: z.number().int().positive(),
-  ttlSeconds: z.number().int().positive(),
-  version: z.number().int().positive(),
-  createdBy: z.string().min(1),
-} as const;
-
-export const BrokerProbeDefinitionSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      ...definitionCommonShape,
-      type: z.literal("snapshot"),
-      watchPaths: z.array(z.string()).optional(),
-      watchExpressions: z.array(compiledExpressionSchema).optional(),
-      includeStackLocals: z.boolean().default(false),
-      stackFrameLimit: z.number().int().min(1).max(8).default(3),
-    })
-    .strict(),
-  z
-    .object({
-      ...definitionCommonShape,
-      type: z.literal("log"),
-      template: z.string(),
-      logLevel: logLevelSchema.default("info"),
-      templateSegments: z.array(templateSegmentSchema).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      ...definitionCommonShape,
-      type: z.literal("counter"),
-    })
-    .strict(),
-  z
-    .object({
-      ...definitionCommonShape,
-      type: z.literal("metric"),
-      metricPath: z.string().optional(),
-      metricExpression: compiledExpressionSchema.optional(),
-    })
-    .strict(),
-]);
-
-const probeStatusSchema = z
-  .object({
-    status: z.enum([
-      "armed",
-      "error",
-      "hit-limit-reached",
-      "suspended",
-      "expired",
-    ]),
-    updatedAt: z.string().datetime({ offset: true }),
-    detail: z.string().optional(),
-  })
-  .strict();
+const probeStatusSchema = NativeProbeStatusSchema;
 
 const safetyReasonCodeSchema = z.enum([
   "event_loop_lag",
@@ -473,10 +411,15 @@ const safetyLimitsSchema = z
 const serviceSchema = z
   .object({
     serviceId: serviceIdSchema,
+    backend: RuntimeBackendSchema.optional(),
+    language: RuntimeLanguageSchema.optional(),
     sdk: z.enum(["node", "python", "jvm"]).optional(),
     commitSha: commitHashSchema.optional(),
     commitSource: z.enum(["env", "config"]).optional(),
     capabilities: z.array(agentCapabilitySchema).optional(),
+    instanceCount: z.number().int().nonnegative().optional(),
+    buildIds: z.array(z.string()).optional(),
+    nativeLimitations: z.array(z.string()).optional(),
     lastSeen: z.string().datetime({ offset: true }),
     agentStatus: z
       .object({
@@ -505,8 +448,12 @@ const safetyResponseSchema = z
       z
         .object({
           serviceId: serviceIdSchema,
+          backend: RuntimeBackendSchema.optional(),
+          language: RuntimeLanguageSchema.optional(),
           sdk: z.enum(["node", "python", "jvm"]).optional(),
           commitSha: commitHashSchema.optional(),
+          instanceCount: z.number().int().nonnegative().optional(),
+          buildIds: z.array(z.string()).optional(),
           lastSeen: z.string().datetime({ offset: true }),
           online: z.boolean(),
           agent: z
@@ -551,9 +498,9 @@ const auditEventSchema = z
     environmentId: z.string().min(1),
     occurredAt: z.string().datetime({ offset: true }),
     requestId: z.string().min(1),
-    actorType: z.enum(["shared", "user", "service"]),
+    actorType: z.enum(["shared", "user", "service", "native"]),
     actorId: z.string().min(1),
-    actorRole: z.enum(["admin", "operator", "viewer", "agent"]),
+    actorRole: z.enum(["admin", "operator", "viewer", "agent", "native-agent"]),
     action: z.string().min(1),
     resourceType: z.string().min(1),
     resourceId: z.string().min(1).optional(),

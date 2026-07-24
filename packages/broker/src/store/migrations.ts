@@ -1,4 +1,4 @@
-export const POSTGRES_SCHEMA_VERSION = 8;
+export const POSTGRES_SCHEMA_VERSION = 9;
 
 export const DEFAULT_TENANT_ID = "internal";
 export const DEFAULT_PROJECT_ID = "default";
@@ -78,6 +78,11 @@ export const POSTGRES_MIGRATION_SQL = `
     commit_source text,
     capabilities jsonb not null default '[]'::jsonb,
     agent_status jsonb,
+    backend text,
+    language text,
+    instance_count integer,
+    build_ids jsonb,
+    native_limitations jsonb,
     primary key (tenant_id, project_id, environment_id, service_id)
   );
 
@@ -192,6 +197,96 @@ export const POSTGRES_MIGRATION_SQL = `
       references environments(tenant_id, project_id, environment_id)
   );
 
+  create table if not exists native_credentials (
+    tenant_id text not null,
+    project_id text not null,
+    environment_id text not null,
+    credential_id text not null,
+    agent_id text not null,
+    allowed_service_ids jsonb not null,
+    label text not null,
+    key_prefix text not null,
+    secret_hash text not null unique,
+    created_at timestamptz not null,
+    last_used_at timestamptz,
+    revoked_at timestamptz,
+    primary key (
+      tenant_id, project_id, environment_id, credential_id
+    ),
+    foreign key (tenant_id, project_id, environment_id)
+      references environments(tenant_id, project_id, environment_id)
+  );
+
+  create table if not exists native_assignment_versions (
+    tenant_id text not null,
+    project_id text not null,
+    environment_id text not null,
+    agent_id text not null,
+    version bigint not null default 0 check (version >= 0),
+    primary key (tenant_id, project_id, environment_id, agent_id),
+    foreign key (tenant_id, project_id, environment_id)
+      references environments(tenant_id, project_id, environment_id)
+  );
+
+  create table if not exists native_agents (
+    tenant_id text not null,
+    project_id text not null,
+    environment_id text not null,
+    agent_id text not null,
+    hostname text not null,
+    architecture text not null,
+    capabilities jsonb not null,
+    agent_version text not null,
+    last_seen timestamptz not null,
+    primary key (tenant_id, project_id, environment_id, agent_id),
+    foreign key (tenant_id, project_id, environment_id)
+      references environments(tenant_id, project_id, environment_id)
+  );
+
+  create table if not exists native_instances (
+    tenant_id text not null,
+    project_id text not null,
+    environment_id text not null,
+    agent_id text not null,
+    instance_id text not null,
+    service_id text not null,
+    language text not null,
+    pid bigint not null,
+    process_start_time text not null,
+    executable_path text not null,
+    executable_device text,
+    executable_inode text,
+    build_id text not null,
+    architecture text not null,
+    capabilities jsonb not null,
+    cgroup text,
+    container_id text,
+    last_seen timestamptz not null,
+    primary key (
+      tenant_id, project_id, environment_id, agent_id, instance_id
+    ),
+    foreign key (tenant_id, project_id, environment_id, agent_id)
+      references native_agents(
+        tenant_id, project_id, environment_id, agent_id
+      ) on delete cascade
+  );
+
+  create table if not exists native_probe_statuses (
+    tenant_id text not null,
+    project_id text not null,
+    environment_id text not null,
+    probe_id text not null,
+    probe_version integer not null,
+    agent_id text not null,
+    instance_id text not null,
+    build_id text not null,
+    status jsonb not null,
+    primary key (
+      tenant_id, project_id, environment_id, probe_id, probe_version,
+      agent_id, instance_id, build_id
+    )
+  );
+
   create or replace function liveprobe_reject_audit_mutation()
   returns trigger language plpgsql as $audit_immutable$
   begin
@@ -217,7 +312,12 @@ export const POSTGRES_MIGRATION_SQL = `
     add column if not exists tenant_id text not null default '${DEFAULT_TENANT_ID}',
     add column if not exists project_id text not null default '${DEFAULT_PROJECT_ID}',
     add column if not exists environment_id text not null default '${DEFAULT_ENVIRONMENT_ID}',
-    add column if not exists capabilities jsonb not null default '[]'::jsonb;
+    add column if not exists capabilities jsonb not null default '[]'::jsonb,
+    add column if not exists backend text,
+    add column if not exists language text,
+    add column if not exists instance_count integer,
+    add column if not exists build_ids jsonb,
+    add column if not exists native_limitations jsonb;
   alter table probes
     add column if not exists tenant_id text not null default '${DEFAULT_TENANT_ID}',
     add column if not exists project_id text not null default '${DEFAULT_PROJECT_ID}',
@@ -415,4 +515,21 @@ export const POSTGRES_MIGRATION_SQL = `
   ) discovered
   group by discovered.tenant_id, discovered.project_id, discovered.service_id
   on conflict (tenant_id, project_id, service_id) do nothing;
+
+  create index if not exists native_credentials_scope_idx
+    on native_credentials (
+      tenant_id, project_id, environment_id, agent_id, created_at
+    );
+  create index if not exists native_instances_service_idx
+    on native_instances (
+      tenant_id, project_id, environment_id, service_id, build_id
+    );
+  create unique index if not exists native_instances_scope_instance_uidx
+    on native_instances (
+      tenant_id, project_id, environment_id, instance_id
+    );
+  create index if not exists native_status_instance_idx
+    on native_probe_statuses (
+      tenant_id, project_id, environment_id, agent_id, instance_id, build_id
+    );
 `;

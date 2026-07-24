@@ -1876,6 +1876,8 @@ async function resetPostgresSchema(databaseUrl: string): Promise<void> {
   try {
     await cleanup.query(`
       drop table if exists audit_events, service_credentials, registered_services,
+        native_probe_statuses, native_instances,
+        native_assignment_versions, native_agents, native_credentials,
         source_maps, source_map_sets, probe_events, probe_statuses, probes,
         services, service_versions,
         environments, projects, tenants, liveprobe_schema_migrations,
@@ -2235,7 +2237,7 @@ describe("Postgres persistence", () => {
       const versions = await inspection.query<{ version: number }>(
         `select version from liveprobe_schema_migrations order by version`,
       );
-      expect(versions.rows.map(({ version }) => version)).toEqual([4, 8]);
+      expect(versions.rows.map(({ version }) => version)).toEqual([4, 9]);
 
       await inspection.query(`
         insert into tenants (tenant_id, display_name)
@@ -2284,6 +2286,99 @@ describe("Postgres persistence", () => {
     } finally {
       await inspection.end();
     }
+  });
+
+  postgresIt("restores scoped native agents, instances, statuses, and monotonic versions", async () => {
+    const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
+    await resetPostgresSchema(databaseUrl);
+    const state = new BrokerState();
+    state.registerNativeAgent({
+      agentId: "restore-host",
+      hostname: "restore-host",
+      backend: "native-ebpf",
+      architecture: "x86_64",
+      capabilities: ["uprobe", "count", "counter"],
+      agentVersion: "0.2.0",
+    }, DEFAULT_SCOPE);
+    state.replaceNativeInstances("restore-host", [{
+      instanceId: "restore-100-10",
+      serviceId: "restore-native",
+      language: "rust",
+      pid: 100,
+      processStartTime: "10",
+      executablePath: "/opt/restore",
+      buildId: "abcdef1234567890",
+      architecture: "x86_64",
+      capabilities: ["uprobe", "count", "counter"],
+      lastSeen: new Date().toISOString(),
+    }], DEFAULT_SCOPE, ["restore-native"]);
+    const probe = state.createProbe({
+      serviceId: "restore-native",
+      sourceCommit: "abcdef1",
+      type: "counter",
+      file: "src/main.rs",
+      line: 10,
+      ttlSeconds: 300,
+      hitLimit: 100,
+      createdBy: "postgres-native-test",
+    }, DEFAULT_SCOPE);
+    state.ingestNative({
+      agentId: "restore-host",
+      serviceId: "restore-native",
+      instanceId: "restore-100-10",
+      buildId: "abcdef1234567890",
+      agentStatus: { state: "green" },
+      events: [{
+        probeId: probe.id,
+        type: "status",
+        ts: new Date().toISOString(),
+        status: "hit-limit-reached",
+        agentId: "restore-host",
+        instanceId: "restore-100-10",
+        buildId: "abcdef1234567890",
+        probeVersion: probe.version,
+      }],
+    }, DEFAULT_SCOPE);
+    const issuedVersion = state.snapshot().nativeAssignmentVersions[0]!.version;
+
+    const firstStore = new PostgresStore(databaseUrl);
+    await firstStore.persist(state);
+    await firstStore.close();
+    const restored = new BrokerState();
+    const secondStore = new PostgresStore(databaseUrl);
+    await secondStore.restore(restored);
+    expect(restored.listServices(DEFAULT_SCOPE)).toEqual([
+      expect.objectContaining({
+        serviceId: "restore-native",
+        backend: "native-ebpf",
+        instanceCount: 1,
+        buildIds: ["abcdef1234567890"],
+      }),
+    ]);
+    expect(
+      restored.nativeAssignments(
+        "restore-host", 0, DEFAULT_SCOPE, ["restore-native"],
+      ).assignments[0]?.probes,
+    ).toEqual([]);
+    expect(
+      restored.snapshot().nativeAssignmentVersions[0]?.version,
+    ).toBe(issuedVersion);
+    restored.replaceNativeInstances("restore-host", [{
+      instanceId: "restore-100-20",
+      serviceId: "restore-native",
+      language: "rust",
+      pid: 100,
+      processStartTime: "20",
+      executablePath: "/opt/restore",
+      buildId: "1234567890abcdef",
+      architecture: "x86_64",
+      capabilities: ["uprobe", "count", "counter"],
+      lastSeen: new Date().toISOString(),
+    }], DEFAULT_SCOPE, ["restore-native"]);
+    expect(
+      restored.snapshot().nativeAssignmentVersions[0]!.version,
+    ).toBeGreaterThan(issuedVersion);
+    await secondStore.close();
   });
 
   postgresIt("persists and restores isolated tenant resources", async () => {
