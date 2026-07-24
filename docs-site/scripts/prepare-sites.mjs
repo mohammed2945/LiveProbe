@@ -1,4 +1,10 @@
-import { access, copyFile, mkdir, writeFile } from "node:fs/promises";
+import {
+  access,
+  copyFile,
+  mkdir,
+  readFile,
+  writeFile,
+} from "node:fs/promises";
 
 await mkdir("dist/.openai", { recursive: true });
 await copyFile(".openai/hosting.json", "dist/.openai/hosting.json");
@@ -12,3 +18,10 @@ try {
     'export { default } from "./index.mjs";\nexport * from "./index.mjs";\n',
   );
 }
+
+const nextEnvPath = "next-env.d.ts";
+const nextEnv = await readFile(nextEnvPath, "utf8");
+await writeFile(
+  nextEnvPath,
+  nextEnv.replace('import "./.next/types/routes.d.ts";\n', ""),
+);
