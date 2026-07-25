@@ -18,8 +18,13 @@ pub fn normalize(
             "capture slot limit exceeded".into(),
         ));
     }
+    if operations.len() > MAX_CAPTURE_OPS {
+        return Err(LocationError::Unsupported(
+            "operation limit exceeded".into(),
+        ));
+    }
     let mut normalized = Vec::with_capacity(operations.len());
-    for operation in operations.iter().take(MAX_CAPTURE_OPS) {
+    for operation in operations {
         let (code, register, width, offset) = match operation {
             LocationOperation::Register(value) => (
                 OpCode::ReadRegister,
@@ -100,5 +105,14 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unsupported-register-piece"));
+    }
+
+    #[test]
+    fn rejects_single_path_over_operation_limit_instead_of_truncating() {
+        let operations = vec![LocationOperation::AddConstant(1); MAX_CAPTURE_OPS + 1];
+        let error = normalize("too.deep", &operations, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("operation limit exceeded"));
     }
 }

@@ -322,6 +322,80 @@ describe("scoped native integration", () => {
         error: { code: "unsupported_by_backend" },
       });
 
+      const tooManyCapturePaths = await broker.inject({
+        method: "POST",
+        url: "/v1/probes",
+        payload: {
+          serviceId: "orders-native",
+          sourceCommit: "abcdef1",
+          type: "snapshot",
+          file: "src/main.rs",
+          line: 10,
+          watchPaths: Array.from(
+            { length: 8 },
+            (_, index) => `request.value_${index}`,
+          ),
+          condition: {
+            path: "request.condition_only",
+            op: "eq",
+            value: 1,
+          },
+          createdBy: "test",
+        },
+      });
+      expect(tooManyCapturePaths.statusCode).toBe(409);
+      expect(tooManyCapturePaths.json()).toMatchObject({
+        error: { code: "unsupported_by_backend" },
+      });
+      expect(tooManyCapturePaths.json()).toMatchObject({
+        error: { message: expect.stringContaining("at most 8") },
+      });
+
+      const duplicateConditionPath = await broker.inject({
+        method: "POST",
+        url: "/v1/probes",
+        payload: {
+          serviceId: "orders-native",
+          sourceCommit: "abcdef1",
+          type: "snapshot",
+          file: "src/main.rs",
+          line: 10,
+          watchPaths: Array.from(
+            { length: 8 },
+            (_, index) => `request.value_${index}`,
+          ),
+          condition: {
+            path: "request.value_0",
+            op: "eq",
+            value: 1,
+          },
+          createdBy: "test",
+        },
+      });
+      expect(duplicateConditionPath.statusCode).toBe(201);
+
+      const conditionalCounter = await broker.inject({
+        method: "POST",
+        url: "/v1/probes",
+        payload: {
+          serviceId: "orders-native",
+          sourceCommit: "abcdef1",
+          type: "counter",
+          file: "src/main.rs",
+          line: 10,
+          condition: {
+            path: "request.value_0",
+            op: "eq",
+            value: 1,
+          },
+          createdBy: "test",
+        },
+      });
+      expect(conditionalCounter.statusCode).toBe(409);
+      expect(conditionalCounter.json()).toMatchObject({
+        error: { code: "unsupported_by_backend" },
+      });
+
       const created = await broker.inject({
         method: "POST",
         url: "/v1/probes",

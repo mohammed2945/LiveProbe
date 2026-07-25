@@ -223,7 +223,16 @@ fn capture_paths(probe: &ProbeAssignment) -> anyhow::Result<Vec<String>> {
     if let Some(condition) = &probe.condition {
         paths.insert(condition.path.clone());
     }
+    validate_capture_path_count(paths.len())?;
     Ok(paths.into_iter().collect())
+}
+
+fn validate_capture_path_count(path_count: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        path_count <= MAX_CAPTURE_SLOTS,
+        "capture slot limit exceeded: native probes support at most {MAX_CAPTURE_SLOTS} unique paths"
+    );
+    Ok(())
 }
 
 fn outbound_paths(probe: &ProbeAssignment) -> anyhow::Result<BTreeSet<String>> {
@@ -567,6 +576,23 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    #[test]
+    fn rejects_more_unique_paths_than_the_native_abi_can_capture() {
+        let mut assignment = probe("snapshot");
+        assignment.watch_paths = Some(
+            (0..MAX_CAPTURE_SLOTS)
+                .map(|index| format!("value_{index}"))
+                .collect(),
+        );
+        assignment.condition = Some(Condition {
+            path: "condition_only".into(),
+            op: "eq".into(),
+            value: serde_json::json!(1),
+        });
+        let error = capture_paths(&assignment).unwrap_err().to_string();
+        assert!(error.contains("capture slot limit exceeded"));
     }
 
     #[test]

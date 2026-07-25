@@ -139,7 +139,8 @@ tree.
 The loader embeds the approved compiled `liveprobe.bpf.o`. No external BPF
 object is installed or located at runtime. The build:
 
-- fails if the approved object is missing;
+- compiles the checked-in BPF source into Cargo's build output directory, so a
+  clean checkout does not require a generated source-tree object;
 - audits its BPF instructions for forbidden helper 36
   (`bpf_probe_write_user`);
 - embeds its build-time SHA-256 digest; and
@@ -329,7 +330,8 @@ Therefore:
 
 - raw-hit counters are exact and never event-sampled;
 - sampling reduces capture work but does not conceal raw-hit safety load;
-- the token bucket is an additional output ceiling;
+- the token bucket is a shared atomic per-probe output ceiling, so its burst is
+  exact even when the target thread moves between CPUs;
 - hit limits count accepted physical captures/events as appropriate; and
 - changing `sample_every` changes the physical generation so stale records are
   rejected.
@@ -400,6 +402,9 @@ Condition-only paths are captured for local evaluation but excluded from
 outbound variables unless independently requested. Conditions are evaluated
 before output. Redaction then applies to snapshots, watches, logs, metrics,
 statuses, unavailable details, and error diagnostics.
+The broker and worker both reject probes requiring more than eight unique
+capture paths, including a distinct condition-only path, so assignments cannot
+exceed the fixed native ABI slot count.
 
 ## Mandatory tests
 
@@ -424,12 +429,14 @@ Final checkpoint results:
 
 | Check | Result |
 | --- | --- |
-| Full TypeScript workspace test | PASS, 174 passed / 6 PostgreSQL skips |
-| Broker suite including PostgreSQL restart tests | PASS, 66/66 |
+| Full TypeScript workspace test | PASS, 180 passed / 9 PostgreSQL skips |
+| Broker suite including PostgreSQL restart tests | PASS, 72/72 |
 | Shared TypeScript protocol contract | PASS, 29/29 |
 | MCP contract/package tests | PASS, 18/18 |
-| Rust workspace | PASS, 50/50 |
-| Read-only audit | PASS, 71 source files and 7 guards |
+| Python SDK | PASS, 86/86 |
+| Java bridge | PASS, 176 assertions |
+| Rust workspace | PASS, 56/56 |
+| Read-only audit | PASS, 70 runtime source files and 7 guards |
 | Compiled BPF helper audit | PASS |
 | Release loader relocation and digest | PASS |
 | Local Linux x86-64 privileged BPF integration | PASS |
@@ -439,13 +446,13 @@ Final checkpoint results:
 | Automatic hot-burst detachment | PASS |
 | Repository credential/artifact inspection | PASS |
 | LiveProbe BPF cleanup | PASS: 0 links, 0 programs, 0 maps |
-| Post-review broker regression suite | PASS, 60/60 with 6 PostgreSQL skips |
+| Post-review broker regression suite | PASS, 63/63 with 9 PostgreSQL skips |
 
 Final E2E summaries:
 
 ```text
-NATIVE_E2E_RUST_OK buildId=ee09bee6d5b57a3fc50c4a461564a92e65383197 source=demo/rust-service/src/main.rs:16 counter=20 hot=raw-hit-budget-exceeded
-NATIVE_E2E_CPP_OK buildId=a7581a1d2beabba06d5e381d1cc37d02aa726929 source=demo/cpp-service/main.cpp:20 counter=20 hot=raw-hit-budget-exceeded
+NATIVE_E2E_RUST_OK buildId=2aaa694d45d609f3fbff8dbbc0b6b4608b17a497 source=demo/rust-service/src/main.rs:16 counter=20 hot=raw-hit-budget-exceeded
+NATIVE_E2E_CPP_OK buildId=25eb0105f87692d51a6929b8287595001deb9897 source=demo/cpp-service/main.cpp:20 counter=20 hot=raw-hit-budget-exceeded
 ```
 
 Both E2Es use MCP for native service discovery, supported logical probe

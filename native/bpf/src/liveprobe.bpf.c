@@ -12,13 +12,13 @@ struct liveprobe_probe_state {
     __u64 captures;
     __u64 accepted_raw_hits;
 };
-struct liveprobe_rate_state { __u32 tokens; __u32 reserved; __u64 last_refill_ns; };
+struct liveprobe_rate_state { __u64 packed_second_tokens; };
 
 struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 4096); __type(key, __u64); __type(value, struct liveprobe_capture_plan); } probe_plans SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 4096); __type(key, __u64); __type(value, struct liveprobe_probe_state); } probe_state SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_PERCPU_HASH); __uint(max_entries, 4096); __type(key, __u64); __type(value, __u64); } raw_hit_counters SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_PERCPU_HASH); __uint(max_entries, 4096); __type(key, __u64); __type(value, __u64); } capture_counters SEC(".maps");
-struct { __uint(type, BPF_MAP_TYPE_PERCPU_HASH); __uint(max_entries, 4096); __type(key, __u64); __type(value, struct liveprobe_rate_state); } rate_limit_state SEC(".maps");
+struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 4096); __type(key, __u64); __type(value, struct liveprobe_rate_state); } rate_limit_state SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_PERCPU_HASH); __uint(max_entries, 4096); __type(key, __u64); __type(value, __u64); } dropped_event_counters SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_PERCPU_HASH); __uint(max_entries, 4096); __type(key, __u64); __type(value, __u64); } counter_aggregates SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_RINGBUF); __uint(max_entries, 1 << 22); } events SEC(".maps");
@@ -99,23 +99,32 @@ static __always_inline int sample_hit(struct liveprobe_capture_plan *plan, __u64
 static __always_inline int consume_token(struct liveprobe_capture_plan *plan, __u64 cookie) {
     struct liveprobe_rate_state *rate = bpf_map_lookup_elem(&rate_limit_state, &cookie);
     if (!rate) {
-        struct liveprobe_rate_state initial = { .tokens = plan->burst, .last_refill_ns = bpf_ktime_get_ns() };
+        __u64 second = bpf_ktime_get_ns() / 1000000000ULL;
+        struct liveprobe_rate_state initial = {
+            .packed_second_tokens = (second << 32) | plan->burst
+        };
         bpf_map_update_elem(&rate_limit_state, &cookie, &initial, BPF_NOEXIST);
         rate = bpf_map_lookup_elem(&rate_limit_state, &cookie);
         if (!rate) return 0;
     }
-    __u64 now = bpf_ktime_get_ns();
-    int accepted = 0;
-    if (!rate->last_refill_ns) { rate->last_refill_ns = now; rate->tokens = plan->burst; }
-    __u64 elapsed = now - rate->last_refill_ns;
-    if (elapsed >= 1000000000ULL) {
-        __u64 added = (elapsed / 1000000000ULL) * plan->refill_per_second;
-        __u64 replenished = rate->tokens + added;
-        rate->tokens = replenished > plan->burst ? plan->burst : replenished;
-        rate->last_refill_ns = now;
+    __u64 now_second = bpf_ktime_get_ns() / 1000000000ULL;
+#pragma unroll
+    for (int attempt = 0; attempt < 8; attempt++) {
+        __u64 previous = rate->packed_second_tokens;
+        __u64 last_second = previous >> 32;
+        __u64 tokens = (__u32)previous;
+        if (now_second > last_second) {
+            __u64 added = (now_second - last_second) * plan->refill_per_second;
+            tokens += added;
+            if (tokens > plan->burst) tokens = plan->burst;
+            last_second = now_second;
+        }
+        if (!tokens) return 0;
+        __u64 next = (last_second << 32) | (__u32)(tokens - 1);
+        if (__sync_val_compare_and_swap(&rate->packed_second_tokens, previous, next) == previous)
+            return 1;
     }
-    if (rate->tokens) { rate->tokens--; accepted = 1; }
-    return accepted;
+    return 0;
 }
 
 SEC("uprobe/liveprobe_count")

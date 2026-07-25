@@ -257,10 +257,7 @@ fn main() -> anyhow::Result<()> {
                     &registry.values().cloned().collect::<Vec<_>>(),
                 ) {
                     Ok(()) => match client.assignments(&config.agent_id, assignment_version) {
-                        Ok(assignments) => {
-                            assignment_version = assignments.version;
-                            Some(assignments)
-                        }
+                        Ok(assignments) => Some(assignments),
                         Err(error) => {
                             eprintln!(
                                 "native assignment polling unavailable; retaining cached desired state: {error:#}"
@@ -380,6 +377,11 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+                assignment_version = assignment_poll_cursor(
+                    assignment_version,
+                    assignments.version,
+                    rebuild_retry_required,
+                );
                 if rebuild_retry_required {
                     for (site_id, cached) in &cached_desired {
                         if retry_logicals.contains(&logical_key(&cached.0, &cached.1)) {
@@ -1137,6 +1139,14 @@ fn planning_error_should_retry(error: &str) -> bool {
     permanent_reason_from_error(error).is_none() || error.contains("no-debug-info")
 }
 
+fn assignment_poll_cursor(current: u64, candidate: u64, rebuild_retry_required: bool) -> u64 {
+    if rebuild_retry_required {
+        current
+    } else {
+        candidate
+    }
+}
+
 fn assignment_logical_key(
     probe: &liveprobe_native_agent::broker::ProbeAssignment,
     instance: &DiscoveredInstance,
@@ -1159,7 +1169,7 @@ fn unix_timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::planning_error_should_retry;
+    use super::{assignment_poll_cursor, planning_error_should_retry};
 
     #[test]
     fn retries_missing_or_temporarily_unreadable_debug_artifacts() {
@@ -1167,5 +1177,11 @@ mod tests {
         assert!(planning_error_should_retry("temporary permission denied"));
         assert!(!planning_error_should_retry("source-file-ambiguous"));
         assert!(!planning_error_should_retry("unsupported-register-piece"));
+    }
+
+    #[test]
+    fn advances_assignment_cursor_only_after_a_complete_rebuild() {
+        assert_eq!(assignment_poll_cursor(7, 8, true), 7);
+        assert_eq!(assignment_poll_cursor(7, 8, false), 8);
     }
 }

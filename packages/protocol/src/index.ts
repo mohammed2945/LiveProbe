@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const NATIVE_MAX_CAPTURE_SLOTS = 8;
+
 export const RuntimeBackendSchema = z.enum(["managed-runtime", "native-ebpf"]);
 export const RuntimeLanguageSchema = z.enum([
   "node", "python", "jvm", "rust", "cpp",

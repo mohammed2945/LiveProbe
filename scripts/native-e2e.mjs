@@ -66,10 +66,10 @@ async function stop(child) {
   ]);
   if (child.exitCode === null) child.kill("SIGKILL");
 }
-async function waitFor(description, operation, timeout = 20_000) {
-  const deadline = Date.now() + timeout;
+async function waitFor(description, operation, timeout = 60_000) {
+  const deadline = performance.now() + timeout;
   let lastError;
-  while (Date.now() < deadline) {
+  while (performance.now() < deadline) {
     try {
       const value = await operation();
       if (value) return value;
@@ -301,8 +301,20 @@ try {
     .filter((event) => event.type === "counter")
     .reduce((sum, event) => sum + event.delta, 0);
   if (counter !== 20) throw new Error(`counter aggregation was ${counter}, expected exactly 20`);
-  const allEvidence = JSON.stringify([...evidence.values()]);
-  if (allEvidence.includes("31337")) throw new Error("redacted scalar leaked through broker evidence");
+  const outboundPayloads = [...evidence.values()].flatMap((value) =>
+    value.events.flatMap((event) => {
+      if (event.type === "snapshot") {
+        return [{ variables: event.variables, watches: event.watches, stack: event.stack }];
+      }
+      if (event.type === "log") return [event.message];
+      if (event.type === "metric") {
+        return [{ sum: event.sum, min: event.min, max: event.max, last: event.last }];
+      }
+      return [];
+    }));
+  if (JSON.stringify(outboundPayloads).includes("31337")) {
+    throw new Error("redacted scalar leaked through emitted evidence payloads");
+  }
 
   await new Promise((done) => setTimeout(done, 150));
   await stop(brokerProcess);

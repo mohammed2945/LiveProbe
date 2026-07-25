@@ -25,15 +25,19 @@ authenticated broker HTTP desired state
 
 The broker and worker cannot supply BPF bytes, a BPF object path, a program
 name outside the approved enum, or a command to execute. The loader binary
-embeds the build's approved `liveprobe.bpf.o`, verifies its SHA-256 digest
-before loading it, and accepts only typed bounded capture plans. The build and
-`make -C native/bpf audit` reject helper 36
+compiles the checked-in BPF source into Cargo's output directory, embeds that
+approved `liveprobe.bpf.o`, verifies its SHA-256 digest before loading it, and
+accepts only typed bounded capture plans. This also makes a direct Cargo build
+work from a clean checkout without a pre-generated source-tree object. The
+build and `make -C native/bpf audit` reject helper 36
 (`bpf_probe_write_user`). The loader owns unpinned links and removes them when
 it exits or when its authenticated worker process disappears.
 
 Raw target bytes stay on the host. The agent decodes only bounded scalar slots,
 evaluates conditions locally, redacts keys and configured exact values, and
 sends sanitized JSON to the broker.
+Both the broker and agent enforce the fixed eight-slot capture limit across
+unique watch, log, metric, and condition paths.
 
 ## Supported install layout
 
@@ -184,7 +188,8 @@ The kernel performs these operations in order:
 
 1. Increment the exact per-CPU raw-hit counter on every uprobe hit.
 2. Accept each deterministic Nth hit (`N=1` accepts every hit).
-3. Apply the event token bucket as an additional output ceiling.
+3. Apply one shared atomic token bucket per probe as an additional output
+   ceiling. The configured burst remains exact across CPU migration.
 4. Reserve the probe hit limit and emit a ring-buffer record.
 
 Raw-hit counters and counter-probe aggregation are never event-sampled. The

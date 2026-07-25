@@ -17,6 +17,7 @@ import {
   NativeInstanceSchema,
   NativeInstanceSetSchema,
   NativeIngestEnvelopeSchema,
+  NATIVE_MAX_CAPTURE_SLOTS,
   NativeProbeStatusSchema,
   NativeReasonCodeSchema,
   NativeStatusMetadataSchema,
@@ -1286,6 +1287,29 @@ function compileProbeInput(input: CreateProbeInput): Record<string, unknown> {
   return compiledCommon;
 }
 
+function nativeCapturePaths(input: CreateProbeInput): Set<string> {
+  const paths = new Set<string>();
+  if (input.condition !== undefined) {
+    paths.add(input.condition.path);
+  }
+  if (input.type === "snapshot") {
+    for (const path of input.watchPaths ?? []) {
+      paths.add(path);
+    }
+  } else if (input.type === "metric" && input.metricPath !== undefined) {
+    paths.add(input.metricPath);
+  } else if (input.type === "log") {
+    const interpolation = /\$\{([^.}]+(?:\.[^.}]+)*)\}/gu;
+    for (const match of input.template.matchAll(interpolation)) {
+      const path = match[1];
+      if (path !== undefined) {
+        paths.add(path);
+      }
+    }
+  }
+  return paths;
+}
+
 function requiresExpressionCapability(
   input: Record<string, unknown>,
 ): boolean {
@@ -1354,6 +1378,8 @@ export class BrokerState {
                 ? ["stackFrameLimit", "omit stack capture options"]
                 : input.type === "metric" && input.metricExpression !== undefined
                   ? ["metricExpression", "metricPath"]
+                  : input.type === "counter" && input.condition !== undefined
+                    ? ["condition", "an unconditional counter"]
                   : input.type === "log" && input.logLevel !== "info"
                     ? ["logLevel", "info"]
                     : undefined;
@@ -1372,6 +1398,14 @@ export class BrokerState {
           409,
           "unsupported_by_backend",
           `native-ebpf service ${input.serviceId} requires at least one bounded watchPath`,
+        );
+      }
+      const capturePathCount = nativeCapturePaths(input).size;
+      if (capturePathCount > NATIVE_MAX_CAPTURE_SLOTS) {
+        throw new BrokerHttpError(
+          409,
+          "unsupported_by_backend",
+          `native-ebpf service ${input.serviceId} requires ${capturePathCount} unique capture paths, but the native ABI supports at most ${NATIVE_MAX_CAPTURE_SLOTS} including condition paths`,
         );
       }
     }

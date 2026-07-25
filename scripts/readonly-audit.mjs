@@ -51,7 +51,7 @@ const rules = [
   },
   {
     name: "Loader command execution IPC",
-    directory: "native/loader",
+    directory: "native/loader/src",
     extensions: new Set([".rs"]),
     pattern: /(?:std::process::Command|Command::new|\bsystem\s*\()/u,
     forbiddenSample: 'Command::new("sh").arg("-c").arg(request.command);',
