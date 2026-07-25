@@ -14,6 +14,7 @@ import {
   PostgresStore,
   buildBroker,
   createClerkAuthenticator,
+  createNativeCredentialMaterial,
   createServiceCredentialMaterial,
   type AuditEventRecord,
   type BrokerPrincipal,
@@ -2997,6 +2998,72 @@ describe("Postgres persistence", () => {
       ]);
     } finally {
       await inspection.end();
+    }
+  });
+
+  postgresIt("revokes native credentials when their parent scope is archived", async () => {
+    const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
+    await resetPostgresSchema(databaseUrl);
+    const store = new PostgresStore(databaseUrl);
+    await store.restore(new BrokerState());
+    try {
+      const scope = {
+        tenantId: DEFAULT_TENANT_ID,
+        projectId: "native-project",
+        environmentId: "production",
+      };
+
+      expect(
+        await store.createProject(
+          scope.tenantId,
+          scope.projectId,
+          "Native Project",
+        ),
+      ).toBeDefined();
+      expect(await store.createEnvironment(scope, "Production")).toBeDefined();
+
+      const environmentCredential = createNativeCredentialMaterial({
+        agentId: "environment-host",
+        allowedServiceIds: ["orders-native"],
+        label: "environment credential",
+        scope,
+      });
+      await store.createNativeCredential(environmentCredential.record);
+      expect(
+        await store.authenticateNativeCredential(
+          environmentCredential.record.secretHash,
+        ),
+      ).toBeDefined();
+      expect(await store.archiveEnvironment(scope)).toBe(true);
+      expect(
+        await store.authenticateNativeCredential(
+          environmentCredential.record.secretHash,
+        ),
+      ).toBeUndefined();
+
+      expect(await store.createEnvironment(scope, "Production")).toBeDefined();
+      const projectCredential = createNativeCredentialMaterial({
+        agentId: "project-host",
+        allowedServiceIds: ["orders-native"],
+        label: "project credential",
+        scope,
+      });
+      await store.createNativeCredential(projectCredential.record);
+      expect(
+        await store.authenticateNativeCredential(
+          projectCredential.record.secretHash,
+        ),
+      ).toBeDefined();
+      expect(await store.archiveProject(scope.tenantId, scope.projectId)).toBe(
+        true,
+      );
+      expect(
+        await store.authenticateNativeCredential(
+          projectCredential.record.secretHash,
+        ),
+      ).toBeUndefined();
+    } finally {
+      await store.close();
     }
   });
 

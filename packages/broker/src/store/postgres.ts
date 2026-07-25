@@ -458,6 +458,11 @@ export class PostgresStore {
          where tenant_id = $1 and project_id = $2 and revoked_at is null`,
         [tenantId, projectId],
       );
+      await client.query(
+        `update native_credentials set revoked_at = now()
+         where tenant_id = $1 and project_id = $2 and revoked_at is null`,
+        [tenantId, projectId],
+      );
       return true;
     });
   }
@@ -514,6 +519,12 @@ export class PostgresStore {
       if (archived.rowCount !== 1) return false;
       await client.query(
         `update service_credentials set revoked_at = now()
+         where tenant_id = $1 and project_id = $2 and environment_id = $3
+           and revoked_at is null`,
+        [scope.tenantId, scope.projectId, scope.environmentId],
+      );
+      await client.query(
+        `update native_credentials set revoked_at = now()
          where tenant_id = $1 and project_id = $2 and environment_id = $3
            and revoked_at is null`,
         [scope.tenantId, scope.projectId, scope.environmentId],
@@ -1412,7 +1423,21 @@ export class PostgresStore {
          agent_id, allowed_service_ids, label, key_prefix, created_at,
          last_used_at, revoked_at
        from native_credentials
-       where secret_hash = $1 and revoked_at is null`,
+       where secret_hash = $1 and revoked_at is null
+         and exists (
+           select 1 from projects
+           where projects.tenant_id = native_credentials.tenant_id
+             and projects.project_id = native_credentials.project_id
+             and projects.archived_at is null
+         )
+         and exists (
+           select 1 from environments
+           where environments.tenant_id = native_credentials.tenant_id
+             and environments.project_id = native_credentials.project_id
+             and environments.environment_id =
+               native_credentials.environment_id
+             and environments.archived_at is null
+         )`,
       [secretHash],
     );
     const row = result.rows[0];

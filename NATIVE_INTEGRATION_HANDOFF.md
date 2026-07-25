@@ -429,8 +429,8 @@ Final checkpoint results:
 
 | Check | Result |
 | --- | --- |
-| Full TypeScript workspace test | PASS, 180 passed / 9 PostgreSQL skips |
-| Broker suite including PostgreSQL restart tests | PASS, 72/72 |
+| Full TypeScript workspace test | PASS, 180 passed / 10 PostgreSQL skips |
+| Broker suite including PostgreSQL restart tests | PASS, 73/73 |
 | Shared TypeScript protocol contract | PASS, 29/29 |
 | MCP contract/package tests | PASS, 18/18 |
 | Python SDK | PASS, 86/86 |
@@ -446,7 +446,7 @@ Final checkpoint results:
 | Automatic hot-burst detachment | PASS |
 | Repository credential/artifact inspection | PASS |
 | LiveProbe BPF cleanup | PASS: 0 links, 0 programs, 0 maps |
-| Post-review broker regression suite | PASS, 63/63 with 9 PostgreSQL skips |
+| Post-review broker regression suite | PASS, 63/63 with 10 PostgreSQL skips |
 
 Final E2E summaries:
 
