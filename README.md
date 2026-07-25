@@ -242,13 +242,16 @@ and `default` environment. Users without an active organization receive
 `organization_required`; incomplete organization enrollment receives
 `clerk_session_pending`.
 
-LiveProbe resolves the user's current organization membership through Clerk
-and maps `org:admin` to `admin`, `org:member`/`org:operator` to `operator`, and
-`org:viewer` to `viewer`. Admins manage service credentials and probes;
-operators manage probes; viewers have read-only diagnostic access. Unknown or
-removed memberships fail closed. Shared keys remain an admin break-glass path
-in `internal/default/default`. Agents use individually revocable
-`lp_service_...` credentials and cannot call human control-plane routes.
+LiveProbe resolves the user's current organization membership through Clerk.
+For the pilot, every supported organization role has the same human
+control-plane permissions: members can manage their organization's catalog,
+service credentials, probes, diagnostics, and audit events. The protocol keeps
+the historical `admin`, `operator`, and `viewer` role values for migration and
+audit compatibility, but does not enforce separate human permission levels.
+Unknown or removed memberships fail closed. Shared keys remain an admin
+break-glass path in `internal/default/default`. Agents use individually
+revocable `lp_service_...` credentials and cannot call human control-plane
+routes.
 
 When `CLERK_PUBLISHABLE_KEY`, `CLERK_FRONTEND_API_URL`, and
 `LIVEPROBE_PUBLIC_URL` are set, the broker also exposes a stateless Streamable
@@ -313,7 +316,7 @@ without putting either secret in the command environment:
 ```sh
 PROJECT_ID=totemic-studio-502902-u2 \
   DATABASE_BACKEND=cloud-sql \
-  CLOUD_SQL_AVAILABILITY_TYPE=zonal \
+  CLOUD_SQL_AVAILABILITY_TYPE=regional \
   deploy/gcp/deploy.sh
 ```
 

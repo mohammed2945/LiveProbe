@@ -1735,7 +1735,7 @@ export function createMcpServer(
     {
       title: "List audit events",
       description:
-        "List tenant-scoped probe and service-credential control events. This read-only tool requires the LiveProbe admin role and never returns bearer secrets or captured probe values.",
+        "List tenant-scoped probe and service-credential control events. This read-only tool is available to authenticated organization members and never returns bearer secrets or captured probe values.",
       inputSchema: ListAuditEventsInputSchema,
       annotations: { readOnlyHint: true },
     },

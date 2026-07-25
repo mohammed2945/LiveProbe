@@ -67,7 +67,7 @@ const hostedMcpConfig = `{
 }`;
 
 const commonRuntimeEnv = `LIVEPROBE_BROKER_URL=https://liveprobe.tryastrea.tech
-LIVEPROBE_PROJECT_ID=acquireiq
+LIVEPROBE_PROJECT_ID=acme
 LIVEPROBE_ENVIRONMENT=production
 LIVEPROBE_SERVICE_ID=api
 LIVEPROBE_API_KEY=lp_service_<shown-once-secret>
@@ -119,7 +119,7 @@ export const docs: DocPage[] = [
           <li>
             <strong>Create a project</strong>
             Use one stable ID for the repository or application, such as{" "}
-            <code>acquireiq</code>.
+            <code>acme</code>.
           </li>
           <li>
             <strong>Create an environment</strong>
@@ -139,9 +139,9 @@ export const docs: DocPage[] = [
         </ol>
         <CodeBlock
           language="text"
-          code={`Create project "acquireiq", add its "production" environment,
+          code={`Create project "acme", add its "production" environment,
 register service "api", and create a production service credential
-labeled "AcquireIQ API production".`}
+labeled "Acme API production".`}
         />
 
         <h2 id="start-agent">3. Start one runtime agent</h2>
@@ -161,7 +161,7 @@ labeled "AcquireIQ API production".`}
         <p>Run these read-only tools before placing a probe:</p>
         <CodeBlock
           language="text"
-          code={`Ping the LiveProbe broker. In project acquireiq and environment
+          code={`Ping the LiveProbe broker. In project acme and environment
 production, list online services and show the safety overview.
 Do not create a probe yet.`}
         />
@@ -230,7 +230,7 @@ Do not create a probe yet.`}
             [
               "Project",
               "Repository or application identity",
-              <code key="p">acquireiq</code>,
+              <code key="p">acme</code>,
             ],
             [
               "Environment",
@@ -304,8 +304,8 @@ Do not create a probe yet.`}
           headers={["Repository", "Project", "Environment", "Services"]}
           rows={[
             [
-              "AcquireIQ",
-              <code key="1">acquireiq</code>,
+              "Acme Inc",
+              <code key="1">acme</code>,
               <code key="2">production</code>,
               <span key="3">
                 <code>api</code>, <code>worker</code>
@@ -330,12 +330,12 @@ Do not create a probe yet.`}
         </p>
         <CodeBlock
           language="text"
-          code={`1. create_project(project_id="acquireiq", display_name="AcquireIQ")
-2. create_environment(project_id="acquireiq",
+          code={`1. create_project(project_id="acme", display_name="Acme Inc")
+2. create_environment(project_id="acme",
    environment_id="production", display_name="Production")
-3. register_service(project_id="acquireiq",
+3. register_service(project_id="acme",
    service_id="api", display_name="API")
-4. create_service_credential(project_id="acquireiq",
+4. create_service_credential(project_id="acme",
    environment_id="production", service_id="api",
    label="API production July 2026")`}
         />

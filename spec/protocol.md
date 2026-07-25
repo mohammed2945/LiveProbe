@@ -30,9 +30,11 @@ behavior from another implementation.
   user.
 - All `/v1/*` routes use `Authorization: Bearer <credential>`. Shared keys are
   break-glass admins in the `internal/default/default` scope. Verified Clerk
-  tokens are checked against current Organization membership and map
-  `org:admin` to `admin`, `org:member`/`org:operator` to `operator`, and
-  `org:viewer` to `viewer`. Unknown roles and removed memberships receive HTTP
+  tokens are checked against current Organization membership. During the
+  pilot, every supported Organization role has the same human control-plane
+  permissions. Historical `admin`, `operator`, and `viewer` values remain in
+  the protocol for migration and audit compatibility but are not separate
+  authorization levels. Unknown roles and removed memberships receive HTTP
   403. Clerk sessions without an active Organization return HTTP 403
   `organization_required`; pending enrollment returns HTTP 403
   `clerk_session_pending`. Per-service keys begin with `lp_service_` and can
@@ -603,7 +605,7 @@ returns `503 catalog_store_unavailable` with the JSON fallback.
 
 ```json
 {
-  "projectId": "acquireiq",
+  "projectId": "acme",
   "environmentId": "production",
   "serviceId": "payment-service",
   "label": "Payments production"

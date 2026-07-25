@@ -160,7 +160,7 @@ To rotate the shared API key without disconnecting every client at once:
 ```sh
 PROJECT_ID="<PROJECT_ID>" deploy/gcp/rotate-api-key.sh begin
 PROJECT_ID="<PROJECT_ID>" DATABASE_BACKEND=cloud-sql \
-  CLOUD_SQL_AVAILABILITY_TYPE=zonal deploy/gcp/deploy.sh
+  CLOUD_SQL_AVAILABILITY_TYPE=regional deploy/gcp/deploy.sh
 ```
 
 Securely distribute the printed new key and update every MCP/operator process
@@ -171,7 +171,7 @@ immediately previous key. Once migration is complete:
 ```sh
 PROJECT_ID="<PROJECT_ID>" deploy/gcp/rotate-api-key.sh finish
 PROJECT_ID="<PROJECT_ID>" DATABASE_BACKEND=cloud-sql \
-  CLOUD_SQL_AVAILABILITY_TYPE=zonal deploy/gcp/deploy.sh
+  CLOUD_SQL_AVAILABILITY_TYPE=regional deploy/gcp/deploy.sh
 ```
 
 The second deployment removes acceptance of the previous key. Never start a
