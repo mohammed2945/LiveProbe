@@ -35,10 +35,13 @@ function close(server: Server): Promise<void> {
 
 async function main(): Promise<void> {
   const config = loadServiceConfig();
+  const projectId = process.env["LIVEPROBE_PROJECT_ID"];
+  const environment = process.env["LIVEPROBE_ENVIRONMENT"];
   const liveProbe = await LiveProbe.start({
     serviceId: config.serviceId,
     brokerUrl: config.brokerUrl,
-    environment: process.env["NODE_ENV"] ?? "development",
+    ...(projectId === undefined ? {} : { projectId }),
+    ...(environment === undefined ? {} : { environment }),
   });
 
   const pool = new FakeDbPool(5);

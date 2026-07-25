@@ -131,7 +131,8 @@ async def lifespan(app: FastAPI):
         agent = liveprobe.start(
             service_id=SERVICE_ID,
             broker_url=BROKER_URL,
-            environment=os.getenv("ENVIRONMENT", "demo"),
+            project_id=os.getenv("LIVEPROBE_PROJECT_ID"),
+            environment=os.getenv("LIVEPROBE_ENVIRONMENT"),
             poll_interval=float(os.getenv("LIVEPROBE_POLL_INTERVAL", "1")),
             flush_interval=float(os.getenv("LIVEPROBE_FLUSH_INTERVAL", "2")),
         )
