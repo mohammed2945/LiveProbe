@@ -1,4 +1,5 @@
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
+import type { NativeIngestEnvelope } from "@liveprobe/protocol";
 
 import type {
   AuditEventRecord,
@@ -123,6 +124,15 @@ interface NativeCredentialRow extends QueryResultRow {
   created_at: Date;
   last_used_at: Date | null;
   revoked_at: Date | null;
+}
+
+function sameScope(
+  candidate: ResourceScope,
+  scope: ResourceScope,
+): boolean {
+  return candidate.tenantId === scope.tenantId &&
+    candidate.projectId === scope.projectId &&
+    candidate.environmentId === scope.environmentId;
 }
 interface NativeAgentRow extends QueryResultRow {
   tenant_id: string; project_id: string; environment_id: string;
@@ -659,7 +669,11 @@ export class PostgresStore {
       const hasNormalizedState =
         services.rowCount !== 0 ||
         probes.rowCount !== 0 ||
-        versions.rowCount !== 0;
+        versions.rowCount !== 0 ||
+        nativeAgents.rowCount !== 0 ||
+        nativeInstances.rowCount !== 0 ||
+        nativeStatuses.rowCount !== 0 ||
+        nativeVersions.rowCount !== 0;
       if (!hasNormalizedState) {
         const legacy = await client
           .query<{ snapshot: unknown }>(
@@ -963,6 +977,165 @@ export class PostgresStore {
     );
     await this.withTransaction(async (client) => {
       await this.insertServices(client, services);
+      if (probeIds.length > 0) {
+        await client.query(
+          `delete from probe_events where probe_id = any($1::text[])
+             and tenant_id = $2`,
+          [probeIds, scope.tenantId],
+        );
+      }
+      await this.insertEvents(client, events);
+      await this.insertStatuses(client, statuses);
+    });
+  }
+
+  public async persistNativeAgent(
+    state: BrokerState,
+    agentId: string,
+    scope: ResourceScope,
+  ): Promise<void> {
+    const snapshot = state.snapshot();
+    await this.withTransaction(async (client) => {
+      await this.insertNativeState(client, {
+        ...snapshot,
+        nativeAgents: snapshot.nativeAgents.filter(
+          (agent) =>
+            agent.agentId === agentId &&
+            sameScope(agent, scope),
+        ),
+        nativeInstances: [],
+        nativeStatuses: [],
+        nativeAssignmentVersions: snapshot.nativeAssignmentVersions.filter(
+          (version) =>
+            version.agentId === agentId &&
+            sameScope(version, scope),
+        ),
+      });
+    });
+  }
+
+  public async persistNativeInstances(
+    state: BrokerState,
+    agentId: string,
+    scope: ResourceScope,
+  ): Promise<void> {
+    const snapshot = state.snapshot();
+    const nativeAgents = snapshot.nativeAgents.filter(
+      (agent) => agent.agentId === agentId && sameScope(agent, scope),
+    );
+    const nativeInstances = snapshot.nativeInstances.filter(
+      (instance) => instance.agentId === agentId && sameScope(instance, scope),
+    );
+    const nativeAssignmentVersions = snapshot.nativeAssignmentVersions.filter(
+      (version) => version.agentId === agentId && sameScope(version, scope),
+    );
+    const nativeServices = snapshot.services.filter(
+      (service) =>
+        service.backend === "native-ebpf" &&
+        sameScope(service, scope),
+    );
+    await this.withTransaction(async (client) => {
+      await this.insertNativeState(client, {
+        ...snapshot,
+        nativeAgents,
+        nativeInstances: [],
+        nativeStatuses: [],
+        nativeAssignmentVersions,
+      });
+      await client.query(
+        `delete from native_instances
+         where tenant_id = $1 and project_id = $2 and environment_id = $3
+           and agent_id = $4`,
+        [scope.tenantId, scope.projectId, scope.environmentId, agentId],
+      );
+      await this.insertNativeState(client, {
+        ...snapshot,
+        nativeAgents: [],
+        nativeInstances,
+        nativeStatuses: [],
+        nativeAssignmentVersions: [],
+      });
+      await client.query(
+        `delete from native_probe_statuses as status
+         where status.tenant_id = $1 and status.project_id = $2
+           and status.environment_id = $3 and status.agent_id = $4
+           and not exists (
+             select 1 from native_instances as instance
+             where instance.tenant_id = status.tenant_id
+               and instance.project_id = status.project_id
+               and instance.environment_id = status.environment_id
+               and instance.agent_id = status.agent_id
+               and instance.instance_id = status.instance_id
+               and instance.build_id = status.build_id
+           )`,
+        [scope.tenantId, scope.projectId, scope.environmentId, agentId],
+      );
+      await client.query(
+        `delete from services as service
+         where service.tenant_id = $1 and service.project_id = $2
+           and service.environment_id = $3
+           and service.backend = 'native-ebpf'
+           and not exists (
+             select 1 from native_instances as instance
+             where instance.tenant_id = service.tenant_id
+               and instance.project_id = service.project_id
+               and instance.environment_id = service.environment_id
+               and instance.service_id = service.service_id
+           )`,
+        [scope.tenantId, scope.projectId, scope.environmentId],
+      );
+      await this.insertServices(client, nativeServices);
+    });
+  }
+
+  public async persistNativeIngest(
+    state: BrokerState,
+    input: NativeIngestEnvelope,
+    scope: ResourceScope,
+  ): Promise<void> {
+    const snapshot = state.snapshot();
+    const probeIds = [...new Set(input.events.map((event) => event.probeId))];
+    const events = snapshot.events.filter(
+      (entry) =>
+        probeIds.includes(entry.probeId) &&
+        sameScope(entry.scope, scope),
+    );
+    const statuses = snapshot.statuses.filter(
+      (entry) =>
+        probeIds.includes(entry.probeId) &&
+        sameScope(entry.scope, scope),
+    );
+    await this.withTransaction(async (client) => {
+      await this.insertServices(
+        client,
+        snapshot.services.filter(
+          (service) =>
+            service.serviceId === input.serviceId &&
+            sameScope(service, scope),
+        ),
+      );
+      await this.insertNativeState(client, {
+        ...snapshot,
+        nativeAgents: snapshot.nativeAgents.filter(
+          (agent) =>
+            agent.agentId === input.agentId &&
+            sameScope(agent, scope),
+        ),
+        nativeInstances: [],
+        nativeStatuses: snapshot.nativeStatuses.filter(
+          (status) =>
+            status.agentId === input.agentId &&
+            status.instanceId === input.instanceId &&
+            status.buildId === input.buildId &&
+            probeIds.includes(status.probeId) &&
+            sameScope(status, scope),
+        ),
+        nativeAssignmentVersions: snapshot.nativeAssignmentVersions.filter(
+          (version) =>
+            version.agentId === input.agentId &&
+            sameScope(version, scope),
+        ),
+      });
       if (probeIds.length > 0) {
         await client.query(
           `delete from probe_events where probe_id = any($1::text[])
@@ -1330,7 +1503,8 @@ export class PostgresStore {
            architecture=excluded.architecture,
            capabilities=excluded.capabilities,
            agent_version=excluded.agent_version,
-           last_seen=excluded.last_seen`,
+           last_seen=excluded.last_seen
+         where excluded.last_seen >= native_agents.last_seen`,
         [
           agent.tenantId, agent.projectId, agent.environmentId, agent.agentId,
           agent.hostname, agent.architecture, JSON.stringify(agent.capabilities),
@@ -1338,7 +1512,6 @@ export class PostgresStore {
         ],
       );
     }
-    await client.query("delete from native_instances");
     for (const instance of snapshot.nativeInstances) {
       await client.query(
         `insert into native_instances (
@@ -1349,7 +1522,24 @@ export class PostgresStore {
          ) values (
            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17,
            $18::timestamptz
-         )`,
+         )
+         on conflict (
+           tenant_id, project_id, environment_id, agent_id, instance_id
+         ) do update set
+           service_id=excluded.service_id,
+           language=excluded.language,
+           pid=excluded.pid,
+           process_start_time=excluded.process_start_time,
+           executable_path=excluded.executable_path,
+           executable_device=excluded.executable_device,
+           executable_inode=excluded.executable_inode,
+           build_id=excluded.build_id,
+           architecture=excluded.architecture,
+           capabilities=excluded.capabilities,
+           cgroup=excluded.cgroup,
+           container_id=excluded.container_id,
+           last_seen=excluded.last_seen
+         where excluded.last_seen >= native_instances.last_seen`,
         [
           instance.tenantId, instance.projectId, instance.environmentId,
           instance.agentId, instance.instanceId, instance.serviceId,
@@ -1362,13 +1552,18 @@ export class PostgresStore {
         ],
       );
     }
-    await client.query("delete from native_probe_statuses");
     for (const status of snapshot.nativeStatuses) {
       await client.query(
         `insert into native_probe_statuses (
            tenant_id, project_id, environment_id, probe_id, probe_version,
            agent_id, instance_id, build_id, status
-         ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)`,
+         ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+         on conflict (
+           tenant_id, project_id, environment_id, probe_id, probe_version,
+           agent_id, instance_id, build_id
+         ) do update set status=excluded.status
+         where (excluded.status->>'updatedAt')::timestamptz >=
+           (native_probe_statuses.status->>'updatedAt')::timestamptz`,
         [
           status.tenantId, status.projectId, status.environmentId,
           status.probeId, status.probeVersion, status.agentId,
@@ -1542,7 +1737,8 @@ export class PostgresStore {
          tenant_id = excluded.tenant_id,
          status = excluded.status,
          updated_at = excluded.updated_at,
-         detail = excluded.detail`,
+         detail = excluded.detail
+       where excluded.updated_at >= probe_statuses.updated_at`,
       [
         JSON.stringify(
           statuses.map((entry) => ({

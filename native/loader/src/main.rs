@@ -20,6 +20,33 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkerIdentity {
+    pid: i32,
+    process_start_time: String,
+}
+
+fn worker_identity(pid: i32) -> std::io::Result<WorkerIdentity> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    Ok(WorkerIdentity {
+        pid,
+        process_start_time: proc_start_time(&stat)?,
+    })
+}
+
+fn proc_start_time(stat: &str) -> std::io::Result<String> {
+    let close = stat
+        .rfind(')')
+        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "malformed worker proc stat"))?;
+    stat[close + 1..]
+        .split_whitespace()
+        .nth(19)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            std::io::Error::new(ErrorKind::InvalidData, "missing worker process start time")
+        })
+}
+
 fn main() -> anyhow::Result<()> {
     if !cfg!(target_os = "linux") {
         anyhow::bail!("liveprobe-bpf-loader only runs on Linux");
@@ -76,7 +103,9 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                if worker_pid.is_some_and(|pid| !Path::new(&format!("/proc/{pid}")).exists()) {
+                if worker_pid.as_ref().is_some_and(|expected| {
+                    !worker_identity(expected.pid).is_ok_and(|current| current == *expected)
+                }) {
                     manager.detach_all();
                     worker_pid = None;
                 }
@@ -98,16 +127,16 @@ fn handle(
     stream: &mut UnixStream,
     policy: &LoaderPolicy,
     manager: &mut BpfManager,
-    worker_pid: &mut Option<i32>,
+    worker_pid: &mut Option<WorkerIdentity>,
 ) -> anyhow::Result<()> {
     let credentials = getsockopt(stream, PeerCredentials)?;
     policy.validate_peer(credentials.uid())?;
-    let peer_pid = credentials.pid();
+    let peer = worker_identity(credentials.pid())?;
     anyhow::ensure!(
-        worker_pid.is_none_or(|expected| expected == peer_pid),
+        worker_pid.as_ref().is_none_or(|expected| expected == &peer),
         "local-policy-denied: loader is already paired with another worker process"
     );
-    *worker_pid = Some(peer_pid);
+    *worker_pid = Some(peer);
     let request = read_request(stream)?;
     let response = match request {
         LoaderRequest::GetInfo { request_id } => LoaderResponse::Info {
@@ -178,4 +207,21 @@ fn handle(
         },
     };
     write_response(stream, &response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_start_time_after_parenthesized_process_name() {
+        let stat =
+            "42 (worker with spaces) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 424242 20";
+        assert_eq!(proc_start_time(stat).unwrap(), "424242");
+    }
+
+    #[test]
+    fn rejects_malformed_process_stat() {
+        assert!(proc_start_time("42 malformed").is_err());
+    }
 }

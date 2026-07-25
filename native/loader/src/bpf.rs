@@ -12,10 +12,7 @@ use std::{
     time::Duration,
 };
 
-const APPROVED_BPF_BYTES: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../bpf/liveprobe.bpf.o"
-));
+const APPROVED_BPF_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/liveprobe.bpf.o"));
 const APPROVED_BPF_SHA256: &str = env!("LIVEPROBE_APPROVED_BPF_SHA256");
 
 pub struct BpfManager {

@@ -101,6 +101,82 @@ const instance = {
 };
 
 describe("scoped native integration", () => {
+  it("versions every attachment-relevant native instance change", async () => {
+    const broker = await buildBroker({ store: false });
+    try {
+      expect((await broker.inject({
+        method: "POST",
+        url: "/v1/native/agents/register",
+        payload: {
+          agentId: "host-a",
+          hostname: "local",
+          backend: "native-ebpf",
+          architecture: "x86_64",
+          capabilities: ["uprobe", "count", "counter"],
+          agentVersion: "0.2.0",
+        },
+      })).statusCode).toBe(201);
+      expect((await broker.inject({
+        method: "PUT",
+        url: "/v1/native/agents/host-a/instances",
+        payload: { instances: [instance] },
+      })).statusCode).toBe(202);
+      const initial = (await broker.inject({
+        method: "GET",
+        url: "/v1/native/agents/host-a/assignments?since=0",
+      })).json<{ version: number }>();
+
+      expect((await broker.inject({
+        method: "PUT",
+        url: "/v1/native/agents/host-a/instances",
+        payload: {
+          instances: [{
+            ...instance,
+            cgroup: "/system.slice/orders-v2",
+            lastSeen: "2026-07-24T00:01:00.000Z",
+          }],
+        },
+      })).statusCode).toBe(202);
+      const changed = (await broker.inject({
+        method: "GET",
+        url: `/v1/native/agents/host-a/assignments?since=${initial.version}`,
+      })).json<{ version: number; assignments: unknown[] }>();
+      expect(changed.version).toBeGreaterThan(initial.version);
+      expect(changed.assignments).toHaveLength(1);
+
+      expect((await broker.inject({
+        method: "PUT",
+        url: "/v1/native/agents/host-a/instances",
+        payload: {
+          instances: [{
+            ...instance,
+            cgroup: "/system.slice/orders-v2",
+            lastSeen: "2026-07-24T00:02:00.000Z",
+          }],
+        },
+      })).statusCode).toBe(202);
+      expect((await broker.inject({
+        method: "GET",
+        url: `/v1/native/agents/host-a/assignments?since=${changed.version}`,
+      })).json()).toEqual({ version: changed.version, assignments: [] });
+
+      expect((await broker.inject({
+        method: "PUT",
+        url: "/v1/native/agents/host-a/instances",
+        payload: { instances: [] },
+      })).statusCode).toBe(202);
+      expect((await broker.inject({
+        method: "GET",
+        url: "/v1/services",
+      })).json<{ services: Array<{ serviceId: string }> }>().services)
+        .not.toContainEqual(expect.objectContaining({
+          serviceId: instance.serviceId,
+        }));
+    } finally {
+      await broker.close();
+    }
+  });
+
   it("creates, scopes, uses, lists, and immediately revokes a host credential", async () => {
     const store = new CredentialTestStore();
     const broker = await buildBroker({ apiKey: "admin-test-key", store });
@@ -364,6 +440,65 @@ describe("scoped native integration", () => {
       expect(stale.json()).toMatchObject({
         error: { code: "probe_version_changed" },
       });
+
+      expect((await broker.inject({
+        method: "POST",
+        url: "/v1/native/ingest",
+        payload: {
+          agentId: "host-a",
+          serviceId: "orders-native",
+          instanceId: instance.instanceId,
+          buildId: instance.buildId,
+          backend: "native-ebpf",
+          agentStatus: { state: "green" },
+          events: [{
+            probeId: probe.id,
+            probeVersion: probe.version,
+            type: "status",
+            ts: "2026-07-26T00:02:00.000Z",
+            status: "hit-limit-reached",
+            agentId: "host-a",
+            instanceId: instance.instanceId,
+            buildId: instance.buildId,
+          }],
+        },
+      })).statusCode).toBe(202);
+      expect((await broker.inject({
+        method: "POST",
+        url: "/v1/native/ingest",
+        payload: {
+          agentId: "host-a",
+          serviceId: "orders-native",
+          instanceId: instance.instanceId,
+          buildId: instance.buildId,
+          backend: "native-ebpf",
+          agentStatus: { state: "green" },
+          events: [{
+            probeId: probe.id,
+            probeVersion: probe.version,
+            type: "status",
+            ts: "2026-07-26T00:01:00.000Z",
+            status: "armed",
+            agentId: "host-a",
+            instanceId: instance.instanceId,
+            buildId: instance.buildId,
+          }],
+        },
+      })).statusCode).toBe(202);
+      const afterTerminal = (await broker.inject({
+        method: "GET",
+        url: "/v1/native/agents/host-a/assignments?since=0",
+      })).json<{
+        assignments: Array<{
+          instanceId: string;
+          probes: Array<{ id: string }>;
+        }>;
+      }>();
+      expect(
+        afterTerminal.assignments.find(
+          (assignment) => assignment.instanceId === instance.instanceId,
+        )?.probes,
+      ).not.toContainEqual(expect.objectContaining({ id: probe.id }));
 
       await broker.inject({
         method: "POST",

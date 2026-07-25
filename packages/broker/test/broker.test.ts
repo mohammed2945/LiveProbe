@@ -2288,6 +2288,176 @@ describe("Postgres persistence", () => {
     }
   });
 
+  postgresIt("does not erase another broker's native state from a stale snapshot", async () => {
+    const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
+    await resetPostgresSchema(databaseUrl);
+
+    const first = await buildBroker({
+      store: new PostgresStore(databaseUrl),
+      persistence: false,
+    });
+    openBrokers.push(first);
+    const stale = await buildBroker({
+      store: new PostgresStore(databaseUrl),
+      persistence: false,
+    });
+    openBrokers.push(stale);
+
+    expect((await first.inject({
+      method: "POST",
+      url: "/v1/native/agents/register",
+      payload: {
+        agentId: "concurrent-host",
+        hostname: "concurrent-host",
+        backend: "native-ebpf",
+        architecture: "x86_64",
+        capabilities: ["uprobe", "count", "counter"],
+        agentVersion: "0.2.0",
+      },
+    })).statusCode).toBe(201);
+    expect((await first.inject({
+      method: "PUT",
+      url: "/v1/native/agents/concurrent-host/instances",
+      payload: {
+        instances: [{
+          instanceId: "concurrent-100-10",
+          serviceId: "concurrent-native",
+          language: "rust",
+          pid: 100,
+          processStartTime: "10",
+          executablePath: "/opt/concurrent",
+          buildId: "abcdef1234567890",
+          architecture: "x86_64",
+          capabilities: ["uprobe", "count", "counter"],
+          lastSeen: new Date().toISOString(),
+        }],
+      },
+    })).statusCode).toBe(202);
+    const nativeProbe = (await first.inject({
+      method: "POST",
+      url: "/v1/probes",
+      payload: {
+        serviceId: "concurrent-native",
+        sourceCommit: "abcdef1",
+        type: "counter",
+        file: "src/main.rs",
+        line: 10,
+        createdBy: "native-broker",
+      },
+    })).json<{ probe: ProbeDefinition }>().probe;
+    expect((await first.inject({
+      method: "POST",
+      url: "/v1/native/ingest",
+      payload: {
+        agentId: "concurrent-host",
+        serviceId: "concurrent-native",
+        instanceId: "concurrent-100-10",
+        buildId: "abcdef1234567890",
+        backend: "native-ebpf",
+        agentStatus: { state: "green" },
+        events: [{
+          probeId: nativeProbe.id,
+          probeVersion: nativeProbe.version,
+          type: "counter",
+          ts: "2026-07-25T00:00:00.000Z",
+          delta: 7,
+        }, {
+          probeId: nativeProbe.id,
+          probeVersion: nativeProbe.version,
+          type: "status",
+          ts: "2026-07-25T00:00:01.000Z",
+          status: "armed",
+          agentId: "concurrent-host",
+          instanceId: "concurrent-100-10",
+          buildId: "abcdef1234567890",
+        }],
+      },
+    })).statusCode).toBe(202);
+
+    expect((await stale.inject({
+      method: "POST",
+      url: "/v1/probes",
+      payload: {
+        serviceId: "unrelated-managed-service",
+        sourceCommit: "abcdef1",
+        type: "counter",
+        file: "src/index.ts",
+        line: 10,
+        createdBy: "stale-broker",
+      },
+    })).statusCode).toBe(201);
+
+    const inspection = new Client({ connectionString: databaseUrl });
+    await inspection.connect();
+    try {
+      const instances = await inspection.query<{ instance_id: string }>(
+        `select instance_id from native_instances
+         where agent_id = 'concurrent-host'`,
+      );
+      expect(instances.rows).toEqual([
+        { instance_id: "concurrent-100-10" },
+      ]);
+      const events = await inspection.query<{ count: string }>(
+        `select count(*) from probe_events where probe_id = $1`,
+        [nativeProbe.id],
+      );
+      expect(events.rows[0]?.count).toBe("2");
+      const status = await inspection.query<{ status: string }>(
+        `select status from probe_statuses where probe_id = $1`,
+        [nativeProbe.id],
+      );
+      expect(status.rows).toEqual([{ status: "armed" }]);
+    } finally {
+      await inspection.end();
+    }
+  });
+
+  postgresIt("prefers normalized native state over a stale legacy snapshot", async () => {
+    const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
+    await resetPostgresSchema(databaseUrl);
+
+    const state = new BrokerState();
+    state.registerNativeAgent({
+      agentId: "native-only-host",
+      hostname: "native-only-host",
+      backend: "native-ebpf",
+      architecture: "x86_64",
+      capabilities: ["uprobe", "count"],
+      agentVersion: "0.2.0",
+    }, DEFAULT_SCOPE);
+    const store = new PostgresStore(databaseUrl);
+    await store.restore(new BrokerState());
+    await store.persistNativeAgent(state, "native-only-host", DEFAULT_SCOPE);
+    await store.close();
+
+    const inspection = new Client({ connectionString: databaseUrl });
+    await inspection.connect();
+    try {
+      await inspection.query(
+        `create table broker_snapshots (
+           id text primary key,
+           snapshot jsonb not null
+         )`,
+      );
+      await inspection.query(
+        `insert into broker_snapshots (id, snapshot) values ('liveprobe', $1)`,
+        [new BrokerState().snapshot()],
+      );
+    } finally {
+      await inspection.end();
+    }
+
+    const restored = new BrokerState();
+    const restoredStore = new PostgresStore(databaseUrl);
+    await restoredStore.restore(restored);
+    expect(
+      restored.nativeAssignments(
+        "native-only-host", 0, DEFAULT_SCOPE, ["*"],
+      ),
+    ).toEqual({ version: 0, assignments: [] });
+    await restoredStore.close();
+  });
+
   postgresIt("restores scoped native agents, instances, statuses, and monotonic versions", async () => {
     const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
     await resetPostgresSchema(databaseUrl);

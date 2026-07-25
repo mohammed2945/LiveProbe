@@ -22,6 +22,7 @@ import {
   NativeStatusMetadataSchema,
   ProbeDefinitionSchema as SharedProbeDefinitionSchema,
   type NativeAgentRegistration,
+  type NativeIngestEnvelope,
   type NativeInstance,
 } from "@liveprobe/protocol";
 import { z, ZodError } from "zod";
@@ -661,6 +662,21 @@ export interface BrokerStore {
     input: IngestInput,
     scope: ResourceScope,
   ): Promise<void>;
+  persistNativeAgent?(
+    state: BrokerState,
+    agentId: string,
+    scope: ResourceScope,
+  ): Promise<void>;
+  persistNativeInstances?(
+    state: BrokerState,
+    agentId: string,
+    scope: ResourceScope,
+  ): Promise<void>;
+  persistNativeIngest?(
+    state: BrokerState,
+    input: NativeIngestEnvelope,
+    scope: ResourceScope,
+  ): Promise<void>;
   persistSourceMapSet?(
     state: BrokerState,
     serviceId: string,
@@ -1134,6 +1150,27 @@ type ScopedServiceVersion = ResourceScope & {
   serviceId: string;
   version: number;
 };
+
+function nativeAttachmentIdentity(
+  instance: NativeInstance | NativeInstanceRecord,
+  fallbackCapabilities: readonly string[] = [],
+): string {
+  return JSON.stringify({
+    instanceId: instance.instanceId,
+    serviceId: instance.serviceId,
+    language: instance.language,
+    pid: instance.pid,
+    processStartTime: instance.processStartTime,
+    executablePath: instance.executablePath,
+    executableDevice: instance.executableDevice,
+    executableInode: instance.executableInode,
+    buildId: instance.buildId,
+    architecture: instance.architecture,
+    capabilities: [...(instance.capabilities ?? fallbackCapabilities)].sort(),
+    cgroup: instance.cgroup,
+    containerId: instance.containerId,
+  });
+}
 
 function resourceScope(scope: ResourceScope): ResourceScope {
   return {
@@ -1732,10 +1769,10 @@ export class BrokerState {
     }
     const previous = [...this.nativeInstances.values()]
       .filter((item) => sameResourceScope(item, scope) && item.agentId === agentId)
-      .map((item) => `${item.instanceId}\0${item.serviceId}\0${item.buildId}`)
+      .map((item) => nativeAttachmentIdentity(item))
       .sort();
     const next = instances
-      .map((item) => `${item.instanceId}\0${item.serviceId}\0${item.buildId}`)
+      .map((item) => nativeAttachmentIdentity(item, agent.capabilities))
       .sort();
     for (const [key, item] of this.nativeInstances) {
       if (
@@ -1878,6 +1915,12 @@ export class BrokerState {
           input.buildId,
         );
         const previous = this.nativeStatuses.get(statusKey);
+        if (
+          previous !== undefined &&
+          Date.parse(ts) < Date.parse(previous.updatedAt)
+        ) {
+          continue;
+        }
         this.nativeStatuses.set(
           statusKey,
           { status, updatedAt: ts, ...metadata },
@@ -2457,6 +2500,15 @@ export class BrokerState {
       const values = grouped.get(instance.serviceId) ?? [];
       values.push(instance);
       grouped.set(instance.serviceId, values);
+    }
+    for (const [key, service] of this.services) {
+      if (
+        sameResourceScope(service, scope) &&
+        service.backend === "native-ebpf" &&
+        !grouped.has(service.serviceId)
+      ) {
+        this.services.delete(key);
+      }
     }
     for (const [serviceId, instances] of grouped) {
       const capabilitySets = instances.map(
@@ -3215,6 +3267,33 @@ export async function buildBroker(
       ? store.persist(state)
       : store.persistSourceMapSet(state, serviceId, commitSha, scope));
   };
+  const persistNativeAgent = async (
+    agentId: string,
+    scope: ResourceScope,
+  ): Promise<void> => {
+    if (store === false) return;
+    await (store.persistNativeAgent === undefined
+      ? store.persist(state)
+      : store.persistNativeAgent(state, agentId, scope));
+  };
+  const persistNativeInstances = async (
+    agentId: string,
+    scope: ResourceScope,
+  ): Promise<void> => {
+    if (store === false) return;
+    await (store.persistNativeInstances === undefined
+      ? store.persist(state)
+      : store.persistNativeInstances(state, agentId, scope));
+  };
+  const persistNativeIngest = async (
+    input: NativeIngestEnvelope,
+    scope: ResourceScope,
+  ): Promise<void> => {
+    if (store === false) return;
+    await (store.persistNativeIngest === undefined
+      ? store.persist(state)
+      : store.persistNativeIngest(state, input, scope));
+  };
 
   const appendAuditEvent = async (
     request: FastifyRequest,
@@ -3717,7 +3796,7 @@ export async function buildBroker(
         const principal = requireNativeAccess(request, input.agentId);
         return mutateDurably(
           () => state.registerNativeAgent(input, principal),
-          persistSnapshot,
+          () => persistNativeAgent(input.agentId, principal),
         );
       },
     );
@@ -3747,7 +3826,7 @@ export async function buildBroker(
             principal,
             principal.allowedServiceIds,
           ),
-          persistSnapshot,
+          () => persistNativeInstances(agentId, principal),
         );
       },
     );
@@ -3790,7 +3869,7 @@ export async function buildBroker(
         }
         return mutateDurably(
           () => state.ingestNative(input, principal),
-          persistSnapshot,
+          () => persistNativeIngest(input, principal),
         );
       },
     );
