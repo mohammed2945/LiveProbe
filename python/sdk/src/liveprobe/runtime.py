@@ -38,6 +38,105 @@ _MAX_REQUEST_TIMEOUT_SECONDS = 10.0
 _MAX_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
+# Executable line tables, keyed by absolute path. The value carries the stat
+# signature the table was built from so an edited file is recompiled.
+_LINE_TABLE_CACHE: dict[str, tuple[float, int, frozenset[int]]] = {}
+_LINE_TABLE_LOCK = threading.Lock()
+
+
+def _loaded_source_paths() -> list[str]:
+    """Every source file currently loaded, normalised to forward slashes."""
+    paths: list[str] = []
+    seen: set[str] = set()
+    for module in list(sys.modules.values()):
+        path = getattr(module, "__file__", None)
+        if not isinstance(path, str) or not path.endswith(".py"):
+            continue
+        normalized = path.replace("\\", "/")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        paths.append(normalized)
+    return paths
+
+
+def _executable_lines(path: str) -> frozenset[int] | None:
+    """Lines a probe can be armed on, or ``None`` when the file cannot be read.
+
+    ``compile`` parses without executing. The module code object only carries
+    top-level lines, so nested code objects are walked to reach function and
+    comprehension bodies.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    signature = (stat.st_mtime, stat.st_size)
+    with _LINE_TABLE_LOCK:
+        cached = _LINE_TABLE_CACHE.get(path)
+    if cached is not None and cached[:2] == signature:
+        return cached[2]
+
+    try:
+        with open(path, "rb") as handle:
+            source = handle.read()
+        module_code = compile(source, path, "exec", dont_inherit=True)
+    except (OSError, SyntaxError, ValueError, MemoryError, RecursionError):
+        return None
+
+    lines: set[int] = set()
+    pending: list[CodeType] = [module_code]
+    visited: set[int] = set()
+    while pending:
+        code = pending.pop()
+        if id(code) in visited:
+            continue
+        visited.add(id(code))
+        for _start, _end, line in code.co_lines():
+            if line is not None:
+                lines.add(line)
+        for const in code.co_consts:
+            if isinstance(const, CodeType):
+                pending.append(const)
+
+    table = frozenset(lines)
+    with _LINE_TABLE_LOCK:
+        _LINE_TABLE_CACHE[path] = (*signature, table)
+    return table
+
+
+def _resolve_probe_target(file_suffix: str, line: int) -> str | None:
+    """Detail of why the probe cannot fire here, or ``None`` when it can.
+
+    Mirrors the Node agent: an unloaded file and an unreachable line both read
+    as ``line-not-found`` so a probe placed before its module imports reports an
+    error and flips to ``armed`` on a later poll.
+    """
+    matches = [
+        path for path in _loaded_source_paths() if path.endswith(file_suffix)
+    ]
+    if not matches:
+        return f"line-not-found: {file_suffix}:{line}"
+    if len(matches) > 1:
+        return f"ambiguous-script: {file_suffix} matched {', '.join(sorted(matches))}"
+
+    lines = _executable_lines(matches[0])
+    # An unreadable or unparsable file leaves the probe unvalidated rather than
+    # failing it: reporting an error we cannot substantiate is worse than
+    # reporting nothing.
+    if lines is not None and line not in lines:
+        return f"line-not-found: {file_suffix}:{line}"
+    return None
+
+
+def _is_plain_counter(probe: Probe) -> bool:
+    """A counter probe that produces its delta without reading any variable."""
+    return (
+        probe.kind == "counter"
+        and probe.condition is None
+        and probe.condition_expression is None
+    )
+
 
 def _env(name: str) -> str | None:
     value = os.environ.get(name)
@@ -321,6 +420,9 @@ class ProbeState:
     in_flight: int = 0
     active: bool = True
     last_error: str | None = None
+    # Why the probe's file/line cannot currently be reached, or ``None`` when
+    # the target resolves. Re-checked on every poll so an import flips it.
+    unresolved: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def reserve(self) -> ProbeReservation | None:
@@ -342,6 +444,25 @@ class ProbeState:
             reservation.finished = True
             self.in_flight -= 1
             if not emit or not self.active:
+                return False, False
+            self.emitted += 1
+            if self.emitted >= self.probe.hit_limit:
+                self.active = False
+                return True, True
+            return True, False
+
+    def count(self) -> tuple[bool, bool]:
+        """Record a counter hit that needs no capture.
+
+        Returns ``(counted, reached_limit)``. Used on the rate-limited path,
+        where reserving and committing separately would be pointless because
+        nothing can fail in between.
+        """
+        with self.lock:
+            if (
+                not self.active
+                or self.emitted + self.in_flight >= self.probe.hit_limit
+            ):
                 return False, False
             self.emitted += 1
             if self.emitted >= self.probe.hit_limit:
@@ -652,6 +773,9 @@ class LiveProbe:
         self._events: list[dict[str, object]] = []
         self._counter_aggregates: dict[str, int] = {}
         self._metric_aggregates: dict[str, MetricAggregate] = {}
+        # Written by the monitoring callback, drained by the worker thread.
+        self._uncaptured_counters: dict[str, int] = {}
+        self._uncaptured_counter_lock = threading.Lock()
         self._version = 0
         self._running = False
         self._installed = False
@@ -826,6 +950,11 @@ class LiveProbe:
 
             for state in matching:
                 if not self._hit_bucket.consume():
+                    # The rate limit bounds capture cost, not counting. An
+                    # unconditional counter needs no capture, so it stays exact
+                    # on hot paths instead of sampling at the bucket rate.
+                    if _is_plain_counter(state.probe):
+                        self._count_without_capture(state)
                     continue
                 if (
                     state.probe.condition is not None
@@ -1118,8 +1247,9 @@ class LiveProbe:
                 continue
             parsed[probe.probe_id] = probe
 
-        armed: list[ProbeState] = []
+        candidates: list[ProbeState] = []
         expired: list[ProbeState] = []
+        recheck: list[ProbeState] = []
         with self._state_lock:
             for probe_id, state in tuple(self._states.items()):
                 incoming = parsed.get(probe_id)
@@ -1131,14 +1261,18 @@ class LiveProbe:
                     state.deactivate()
                     replacement = ProbeState(incoming)
                     self._states[probe_id] = replacement
-                    armed.append(replacement)
+                    candidates.append(replacement)
+                elif state.unresolved is not None:
+                    # Unchanged but previously unreachable: the module may have
+                    # been imported since the last poll.
+                    recheck.append(state)
 
             for probe_id, probe in parsed.items():
                 if probe_id not in self._states:
                     state = ProbeState(probe)
                     self._states[probe_id] = state
-                    armed.append(state)
-            changed = bool(armed or expired)
+                    candidates.append(state)
+            changed = bool(candidates or expired)
             if changed:
                 self._refresh_active_index_locked()
 
@@ -1146,8 +1280,26 @@ class LiveProbe:
             self._enqueue_lifecycle(
                 "expired", tuple(expired), "omitted from broker active set"
             )
+        self._announce_targets(candidates + recheck)
+
+    def _announce_targets(self, states: list[ProbeState]) -> None:
+        """Emit ``armed`` for states whose target resolves, ``error`` otherwise.
+
+        A state that stays unreachable keeps its existing ``error`` status
+        rather than re-emitting it on every poll.
+        """
+        armed: list[ProbeState] = []
+        for state in states:
+            probe = state.probe
+            previous = state.unresolved
+            detail = _resolve_probe_target(probe.file, probe.line)
+            state.unresolved = detail
+            if detail is None:
+                armed.append(state)
+            elif detail != previous:
+                self._enqueue_lifecycle("error", (state,), detail)
         if armed:
-            self._enqueue_lifecycle("armed", tuple(armed), "broker probe set changed")
+            self._enqueue_lifecycle("armed", tuple(armed), "probe target resolved")
 
     def _refresh_active_index_locked(self) -> None:
         by_line: dict[int, list[ProbeState]] = {}
@@ -1207,6 +1359,8 @@ class LiveProbe:
                 self._status(state, "suspended", lifecycle.detail)
             elif lifecycle.action == "rearmed":
                 self._status(state, "armed", lifecycle.detail)
+            elif lifecycle.action == "hit-limit":
+                self._hit_limit_reached(state)
             elif lifecycle.action == "error":
                 self._status(state, "error", lifecycle.detail)
         if lifecycle.action == "suspended":
@@ -1423,6 +1577,34 @@ class LiveProbe:
             state.last_error = detail
         self._status(state, "error", detail)
 
+    def _count_without_capture(self, state: ProbeState) -> None:
+        """Record a rate-limited counter hit from the monitoring callback.
+
+        Runs on the application thread, so it must stay to a dict update under
+        an uncontended lock; the worker thread drains it at aggregation time.
+        """
+        counted, reached_limit = state.count()
+        if not counted:
+            return
+        probe_id = state.probe.probe_id
+        with self._uncaptured_counter_lock:
+            self._uncaptured_counters[probe_id] = (
+                self._uncaptured_counters.get(probe_id, 0) + 1
+            )
+        if reached_limit:
+            self._enqueue_lifecycle("hit-limit", (state,), "hit limit reached")
+
+    def _drain_uncaptured_counters(self) -> None:
+        with self._uncaptured_counter_lock:
+            if not self._uncaptured_counters:
+                return
+            drained = self._uncaptured_counters
+            self._uncaptured_counters = {}
+        for probe_id, delta in drained.items():
+            self._counter_aggregates[probe_id] = (
+                self._counter_aggregates.get(probe_id, 0) + delta
+            )
+
     def _hit_limit_reached(self, state: ProbeState) -> None:
         with self._state_lock:
             self._refresh_active_index_locked()
@@ -1450,6 +1632,7 @@ class LiveProbe:
         self._events.append(event)
 
     def _aggregate_events(self) -> list[dict[str, object]]:
+        self._drain_uncaptured_counters()
         timestamp = _now_rfc3339()
         events = [
             {

@@ -607,6 +607,13 @@ export interface ProbeStatus {
   status: ProbeStatusName;
   updatedAt: string;
   detail?: string | undefined;
+  /**
+   * When the agent last reported this probe as armed. `status` only holds the
+   * newest transition, so a probe that arms and immediately reaches its hit
+   * limit would otherwise leave no trace of having armed at all — which is
+   * indistinguishable from never having armed.
+   */
+  armedAt?: string | undefined;
 }
 
 export interface ServiceRecord {
@@ -899,6 +906,7 @@ const persistedStatusSchema = z
     status: StatusNameSchema,
     updatedAt: timestampSchema,
     detail: z.string().max(4_096).optional(),
+    armedAt: timestampSchema.optional(),
   })
   .strict();
 
@@ -1602,10 +1610,15 @@ export class BrokerState {
     for (const event of input.events) {
       this.appendEvent(event);
       if (event.type === "status") {
+        const armedAt =
+          event.status === "armed"
+            ? event.ts
+            : this.statuses.get(event.probeId)?.armedAt;
         const status: ProbeStatus = {
           status: event.status,
           updatedAt: event.ts,
           ...(event.detail === undefined ? {} : { detail: event.detail }),
+          ...(armedAt === undefined ? {} : { armedAt }),
         };
         this.statuses.set(event.probeId, status);
       }
@@ -1831,9 +1844,11 @@ export class BrokerState {
         stored.expired = true;
         expired += 1;
         this.incrementServiceVersion(stored.probe.serviceId, stored.scope);
+        const armedAt = this.statuses.get(stored.probe.id)?.armedAt;
         const status: ProbeStatus = {
           status: "expired",
           updatedAt: new Date(now).toISOString(),
+          ...(armedAt === undefined ? {} : { armedAt }),
         };
         this.statuses.set(stored.probe.id, status);
         this.appendEvent({

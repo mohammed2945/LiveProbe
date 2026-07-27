@@ -1136,3 +1136,146 @@ def test_network_and_shutdown_waits_have_hard_upper_bounds(
 ) -> None:
     with pytest.raises(ValueError):
         make_agent(fake_monitoring, limits=limits)
+
+
+def test_probe_on_missing_line_reports_error_not_armed(
+    fake_monitoring: Any,
+) -> None:
+    output = io.StringIO()
+    agent = make_agent(fake_monitoring, output=output)
+    agent._install_monitoring()
+    try:
+        agent._reconcile([probe("prb_dead", "snapshot", line=999_999)])
+        agent._drain_queue()
+
+        statuses = [
+            event for event in agent._events if event["type"] == "status"
+        ]
+        assert [event["status"] for event in statuses] == ["error"]
+        assert statuses[0]["detail"] == "line-not-found: test_runtime.py:999999"
+        assert "[liveprobe] PROBE ARMED" not in output.getvalue()
+    finally:
+        agent._uninstall_monitoring()
+
+
+def test_probe_on_missing_file_reports_error_not_armed(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring)
+    agent._install_monitoring()
+    try:
+        agent._reconcile(
+            [
+                {
+                    **probe("prb_nofile", "snapshot"),
+                    "file": "does/not/exist.py",
+                }
+            ]
+        )
+        agent._drain_queue()
+
+        statuses = [
+            event for event in agent._events if event["type"] == "status"
+        ]
+        assert [event["status"] for event in statuses] == ["error"]
+        assert statuses[0]["detail"] == "line-not-found: does/not/exist.py:700"
+    finally:
+        agent._uninstall_monitoring()
+
+
+def test_unresolved_probe_errors_once_then_arms_when_target_appears(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring)
+    agent._install_monitoring()
+    try:
+        definition = {
+            **probe("prb_late", "snapshot"),
+            "file": "imported/late.py",
+        }
+        agent._reconcile([definition])
+        agent._reconcile([definition])
+        agent._drain_queue()
+
+        # The same failure is reported once, not on every poll.
+        assert [
+            event["status"]
+            for event in agent._events
+            if event["type"] == "status"
+        ] == ["error"]
+
+        # Once the module resolves, the next poll flips the probe to armed.
+        import liveprobe.runtime as runtime
+
+        real_resolve = runtime._resolve_probe_target
+        runtime._resolve_probe_target = lambda file, line: None
+        try:
+            agent._reconcile([definition])
+            agent._drain_queue()
+        finally:
+            runtime._resolve_probe_target = real_resolve
+
+        assert [
+            event["status"]
+            for event in agent._events
+            if event["type"] == "status"
+        ] == ["error", "armed"]
+    finally:
+        agent._uninstall_monitoring()
+
+
+def test_counter_stays_exact_when_the_hit_budget_is_exhausted(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring, limits={"maxProbeHitsPerSecond": 1})
+    agent._install_monitoring()
+    try:
+        agent._reconcile([probe("prb_hot", "counter", hit_limit=10_000)])
+        agent._drain_queue()
+        # Drain the token the bucket starts full with.
+        trigger(agent)
+
+        for _ in range(500):
+            trigger(agent)
+        agent._drain_queue()
+
+        counters = [
+            event for event in agent._aggregate_events()
+            if event["type"] == "counter"
+        ]
+        assert counters == [
+            {
+                "probeId": "prb_hot",
+                "type": "counter",
+                "ts": counters[0]["ts"],
+                "delta": 501,
+            }
+        ]
+    finally:
+        agent._uninstall_monitoring()
+
+
+def test_rate_limited_counter_retires_at_its_hit_limit(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring, limits={"maxProbeHitsPerSecond": 1})
+    agent._install_monitoring()
+    try:
+        agent._reconcile([probe("prb_small", "counter", hit_limit=3)])
+        agent._drain_queue()
+
+        for _ in range(20):
+            trigger(agent)
+        agent._drain_queue()
+
+        counters = [
+            event for event in agent._aggregate_events()
+            if event["type"] == "counter"
+        ]
+        assert counters[0]["delta"] == 3
+        assert any(
+            event.get("status") == "hit-limit-reached"
+            for event in agent._events
+        )
+    finally:
+        agent._uninstall_monitoring()

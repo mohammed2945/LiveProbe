@@ -62,9 +62,16 @@ def wait_for(predicate: Any, timeout: float = 2.0) -> None:
 
 def integration_target(agent: LiveProbe) -> object | None:
     customer = {"id": "cus_123", "secret": "do-not-send"}
-    result = agent._on_line(integration_target.__code__, 901)
+    result = agent._on_line(integration_target.__code__, INTEGRATION_PROBE_LINE)
     assert customer["id"] == "cus_123"
     return result
+
+
+# The agent validates that a probe's line is actually executable, so this has to
+# be a real line in this file rather than a synthetic one.
+INTEGRATION_PROBE_LINE = max(
+    line for *_, line in integration_target.__code__.co_lines() if line is not None
+)
 
 
 def test_daemon_polls_captures_flushes_and_stops(fake_monitoring: Any) -> None:
@@ -75,7 +82,7 @@ def test_daemon_polls_captures_flushes_and_stops(fake_monitoring: Any) -> None:
             "serviceId": "integration-service",
             "type": "snapshot",
             "file": "test_integration.py",
-            "line": 901,
+            "line": INTEGRATION_PROBE_LINE,
             "watchPaths": ["customer.id", "customer.secret"],
             "hitLimit": 1,
             "ttlSeconds": 1800,
@@ -100,7 +107,7 @@ def test_daemon_polls_captures_flushes_and_stops(fake_monitoring: Any) -> None:
 
     try:
         agent.start()
-        wait_for(lambda: 901 in agent._active_by_line)
+        wait_for(lambda: INTEGRATION_PROBE_LINE in agent._active_by_line)
 
         integration_target(agent)
 

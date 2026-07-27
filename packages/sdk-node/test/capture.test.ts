@@ -88,3 +88,95 @@ describe("capture object budget", () => {
     );
   });
 });
+
+describe("capture block scopes", () => {
+  const OPTIONS = {
+    maxArray: 3,
+    maxDepth: 5,
+    maxObjects: 200,
+    maxProps: 50,
+    maxStackFrames: 8,
+    redactKeys: [],
+    scriptPath: () => "/app/work.js",
+  };
+
+  /** A pause inside `for (let i …)`: V8 keeps `i` out of the local scope. */
+  function pausedInLoop(): PausedEvent {
+    return {
+      hitBreakpoints: ["bp-1"],
+      callFrames: [
+        {
+          callFrameId: "frame-1",
+          functionName: "work",
+          location: { scriptId: "script-1", lineNumber: 4 },
+          scopeChain: [
+            { type: "block", object: { type: "object", objectId: "block-1" } },
+            { type: "local", object: { type: "object", objectId: "scope-1" } },
+            { type: "closure", object: { type: "object", objectId: "closure-1" } },
+            { type: "global", object: { type: "object", objectId: "global-1" } },
+          ],
+        },
+      ],
+    };
+  }
+
+  function scopeProperties(objectId: string) {
+    const byScope: Record<string, Array<[string, unknown]>> = {
+      "block-1": [
+        ["i", 7],
+        ["shadowed", "inner"],
+      ],
+      "scope-1": [
+        ["acc", 3],
+        ["shadowed", "outer"],
+      ],
+      "closure-1": [["closedOver", "leaked"]],
+      "global-1": [["process", "leaked"]],
+    };
+    return {
+      result: (byScope[objectId] ?? []).map(([name, value]) => ({
+        name,
+        enumerable: true,
+        value: { type: typeof value, value } as never,
+      })),
+    };
+  }
+
+  function capture(event: PausedEvent): RawCapture {
+    let result: RawCapture | undefined;
+    capturePaused(
+      {
+        getProperties({ objectId }, callback) {
+          callback(null, scopeProperties(objectId) as never);
+        },
+      } as never,
+      event,
+      OPTIONS,
+      (_error, value) => {
+        result = value;
+      },
+    );
+    if (result === undefined) throw new Error("capture did not complete");
+    return result;
+  }
+
+  it("captures block-scoped loop variables alongside frame locals", () => {
+    const { variables } = capture(pausedInLoop());
+
+    expect(variables["i"]).toBe(7);
+    expect(variables["acc"]).toBe(3);
+  });
+
+  it("lets an inner binding shadow the enclosing one of the same name", () => {
+    const { variables } = capture(pausedInLoop());
+
+    expect(variables["shadowed"]).toBe("inner");
+  });
+
+  it("does not merge closure or global scopes into frame variables", () => {
+    const { variables } = capture(pausedInLoop());
+
+    expect(variables).not.toHaveProperty("closedOver");
+    expect(variables).not.toHaveProperty("process");
+  });
+});

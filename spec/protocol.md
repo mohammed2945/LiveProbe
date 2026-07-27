@@ -442,6 +442,12 @@ Counter event:
 Counter deltas are positive integers pre-aggregated by the agent and normally
 flushed every two seconds.
 
+`maxProbeHitsPerSecond` bounds capture cost, not counting. A counter probe with
+no condition reads no variables, so agents that have already paused for the hit
+count it even when the hit budget is exhausted; such probes stay exact on hot
+paths rather than sampling at the budget rate. A conditional counter has to
+capture in order to evaluate its condition and is still subject to the budget.
+
 Metric event:
 
 ```json
@@ -475,6 +481,18 @@ Status event:
 `status` is `armed`, `error`, `hit-limit-reached`, `suspended`, or `expired`.
 `detail` is optional. Specific failures such as `line-not-found` are carried in
 `detail`.
+
+An agent that cannot reach a probe's file or line reports `error` with detail
+`line-not-found: {file}:{line}` rather than `armed`. The check repeats on every
+poll, so a probe placed on a module that has not been imported yet reports
+`error` and flips to `armed` once the module loads.
+
+Where the broker reports a probe's status it also carries `armedAt`, set the
+first time an agent reports that probe as `armed` and preserved across later
+transitions. `status` holds only the newest transition, so without `armedAt` a
+probe that armed and immediately reached its hit limit would be
+indistinguishable from one that never armed. `armedAt` is absent until the probe
+first arms.
 
 ## 5. Client-facing broker API
 
@@ -518,7 +536,8 @@ its service version.
       "status": {
         "status": "armed",
         "detail": "src/payments.js:34",
-        "updatedAt": "2026-07-19T18:30:00.123Z"
+        "updatedAt": "2026-07-19T18:30:00.123Z",
+        "armedAt": "2026-07-19T18:30:00.123Z"
       }
     }
   ]

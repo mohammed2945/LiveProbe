@@ -32,6 +32,11 @@ interface CaptureTask {
   depth: number;
   objectId: string;
   target: Record<string, unknown> | unknown[];
+  /**
+   * Set on the outer scopes of a frame so an inner binding that shadows an
+   * outer one of the same name wins.
+   */
+  preserveExisting?: boolean;
 }
 
 const CAPTURED_FUNCTION = (): void => {};
@@ -66,8 +71,26 @@ function createContainer(remote: RemoteObject): Record<string, unknown> | unknow
   return remote.subtype === "array" ? [] : Object.create(null) as Record<string, unknown>;
 }
 
-function localScopeId(frame: CallFrameDescriptor): string | undefined {
-  return frame.scopeChain.find((scope) => scope.type === "local")?.object.objectId;
+/**
+ * Scope kinds that hold bindings a probe author would call "local". `block`
+ * carries the per-iteration binding of `for (let i …)`, which V8 keeps out of
+ * the `local` scope. `closure` and `global` are deliberately excluded: merging
+ * them would leak module-level state into `variables`.
+ */
+const FRAME_SCOPE_TYPES = new Set(["local", "block", "catch"]);
+
+/**
+ * Frame scope object ids, innermost first — V8 orders `scopeChain` that way.
+ */
+function frameScopeIds(frame: CallFrameDescriptor): string[] {
+  const ids: string[] = [];
+  for (const scope of frame.scopeChain) {
+    const objectId = scope.object.objectId;
+    if (FRAME_SCOPE_TYPES.has(scope.type) && objectId !== undefined && !ids.includes(objectId)) {
+      ids.push(objectId);
+    }
+  }
+  return ids;
 }
 
 function selectedDescriptors(
@@ -115,17 +138,21 @@ export function capturePaused(
   const objectBudget = Math.max(1, options.maxObjects);
 
   frames.forEach((frame, index) => {
-    const objectId = localScopeId(frame);
+    const scopeIds = frameScopeIds(frame);
     const target = frameLocals[index];
-    if (
-      objectId !== undefined &&
-      target !== undefined &&
-      !isCaptureTruncated(target) &&
-      tasks.length < objectBudget
-    ) {
+    if (scopeIds.length === 0 || target === undefined || isCaptureTruncated(target)) {
+      return;
+    }
+    let captured = 0;
+    for (const objectId of scopeIds) {
+      if (tasks.length >= objectBudget) break;
       materializedObjects.set(objectId, target);
-      tasks.push({ depth: 0, objectId, target });
-    } else if (objectId !== undefined && target !== undefined) {
+      // Scopes arrive innermost-first, so every scope after the first is an
+      // enclosing one and must not overwrite a name it shadows.
+      tasks.push({ depth: 0, objectId, target, preserveExisting: captured > 0 });
+      captured += 1;
+    }
+    if (captured === 0) {
       frameLocals[index] = CAPTURE_TRUNCATED_VALUE;
     }
   });
@@ -161,6 +188,12 @@ export function capturePaused(
 
       for (const descriptor of selectedDescriptors(result.result, task.target, options)) {
         const key = descriptor.name;
+        if (
+          task.preserveExisting === true &&
+          Object.prototype.hasOwnProperty.call(task.target, key)
+        ) {
+          continue;
+        }
         if (isRedactedKey(key, options.redactKeys)) {
           if (!Array.isArray(task.target)) {
             defineData(task.target, key, undefined);

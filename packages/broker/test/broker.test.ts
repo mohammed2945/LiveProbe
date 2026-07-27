@@ -2904,3 +2904,80 @@ describe("Postgres persistence", () => {
     }
   });
 });
+
+describe("probe status arming history", () => {
+  function ingestStatus(
+    state: BrokerState,
+    probeId: string,
+    status: "armed" | "hit-limit-reached",
+    ts: string,
+  ): void {
+    state.ingest({
+      serviceId: "orders",
+      sdk: "node",
+      commitSha: "abcdef1234567890",
+      commitSource: "config",
+      agentStatus: { state: "green" },
+      events: [{ probeId, type: "status", ts, status }],
+    });
+  }
+
+  it("retains armedAt after a later status supersedes armed", () => {
+    const state = new BrokerState();
+    const probe = createCounter(state);
+
+    ingestStatus(state, probe.id, "armed", "2026-07-22T19:59:30.000Z");
+    ingestStatus(state, probe.id, "hit-limit-reached", "2026-07-22T19:59:31.000Z");
+
+    // Without armedAt, a probe that armed and immediately hit its limit is
+    // indistinguishable from one that never armed at all.
+    expect(state.getStatus(probe.id)).toMatchObject({
+      status: "hit-limit-reached",
+      armedAt: "2026-07-22T19:59:30.000Z",
+    });
+  });
+
+  it("leaves armedAt unset for a probe that never armed", () => {
+    const state = new BrokerState();
+    const probe = createCounter(state);
+
+    state.ingest({
+      serviceId: "orders",
+      sdk: "node",
+      commitSha: "abcdef1234567890",
+      commitSource: "config",
+      agentStatus: { state: "green" },
+      events: [
+        {
+          probeId: probe.id,
+          type: "status",
+          ts: "2026-07-22T19:59:30.000Z",
+          status: "error",
+          detail: "line-not-found: src/orders.ts:19",
+        },
+      ],
+    });
+
+    expect(state.getStatus(probe.id)?.armedAt).toBeUndefined();
+  });
+
+  it("keeps armedAt across expiry and a persistence round-trip", () => {
+    let now = Date.parse("2026-07-22T19:59:00.000Z");
+    const state = new BrokerState({ clock: () => now });
+    const probe = createCounter(state, 1);
+
+    ingestStatus(state, probe.id, "armed", "2026-07-22T19:59:30.000Z");
+    now += 60_000;
+    expect(state.expireDueProbes()).toBe(1);
+    expect(state.getStatus(probe.id)).toMatchObject({
+      status: "expired",
+      armedAt: "2026-07-22T19:59:30.000Z",
+    });
+
+    const restored = new BrokerState();
+    restored.loadSnapshot(state.snapshot());
+    expect(restored.getStatus(probe.id)).toMatchObject({
+      armedAt: "2026-07-22T19:59:30.000Z",
+    });
+  });
+});

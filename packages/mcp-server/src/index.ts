@@ -448,6 +448,7 @@ const probeStatusSchema = z
     ]),
     updatedAt: z.string().datetime({ offset: true }),
     detail: z.string().optional(),
+    armedAt: z.string().datetime({ offset: true }).optional(),
   })
   .strict();
 

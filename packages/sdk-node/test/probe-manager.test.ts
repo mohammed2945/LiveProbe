@@ -615,3 +615,77 @@ describe("ProbeManager reconciliation", () => {
     ]);
   });
 });
+
+describe("ProbeManager counters under rate limiting", () => {
+  function counterProbe(overrides: Partial<ProbeDefinition> = {}): ProbeDefinition {
+    return probe({
+      id: "prb_counter",
+      type: "counter",
+      watchPaths: undefined,
+      hitLimit: 10_000,
+      ...overrides,
+    });
+  }
+
+  it("counts every hit even when the capture budget is exhausted", async () => {
+    const commands: string[] = [];
+    const inspector = createInspector(commands);
+    // A bucket that never yields a token: every hit takes the rate-limited path.
+    const { manager, aggregates } = setup(inspector, new TokenBucket(1, () => 0));
+    await manager.reconcile([counterProbe()]);
+    // Drain the token the bucket starts full with.
+    manager.handlePaused(paused(["bp-10"]));
+
+    for (let index = 0; index < 500; index += 1) {
+      manager.handlePaused(paused(["bp-10"]));
+    }
+    await nextImmediate();
+
+    expect(aggregates.flush()).toEqual([
+      expect.objectContaining({ probeId: "prb_counter", delta: 501 }),
+    ]);
+    // Counting is not capture, so nothing was dropped.
+    expect(manager.droppedHits).toBe(0);
+  });
+
+  it("retires a rate-limited counter at its hit limit", async () => {
+    const commands: string[] = [];
+    const inspector = createInspector(commands);
+    const { manager, events, aggregates } = setup(
+      inspector,
+      new TokenBucket(1, () => 0),
+    );
+    await manager.reconcile([counterProbe({ hitLimit: 3 })]);
+    events.takeBatch(100_000);
+
+    for (let index = 0; index < 20; index += 1) {
+      manager.handlePaused(paused(["bp-10"]));
+    }
+    await nextImmediate();
+
+    expect(aggregates.flush()).toEqual([
+      expect.objectContaining({ probeId: "prb_counter", delta: 3 }),
+    ]);
+    expect(events.takeBatch(100_000)).toEqual([
+      expect.objectContaining({ status: "hit-limit-reached" }),
+    ]);
+  });
+
+  it("still drops captures for a conditional counter", async () => {
+    const commands: string[] = [];
+    const inspector = createInspector(commands);
+    const { manager, aggregates } = setup(inspector, new TokenBucket(1, () => 0));
+    await manager.reconcile([
+      counterProbe({ condition: { path: "amount", op: "gt", value: 0 } }),
+    ]);
+    manager.handlePaused(paused(["bp-10"]));
+
+    manager.handlePaused(paused(["bp-10"]));
+    await nextImmediate();
+
+    expect(aggregates.flush()).toEqual([
+      expect.objectContaining({ probeId: "prb_counter", delta: 1 }),
+    ]);
+    expect(manager.droppedHits).toBe(1);
+  });
+});

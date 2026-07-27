@@ -185,10 +185,30 @@ export class ProbeManager {
     }
     // V8 has already paused before delivering this notification. With the
     // deliberately read-only command set, the safest over-budget behavior is
-    // an immediate resume; exact hot-path counters would require code injection.
+    // an immediate resume.
     if (!this.#rateLimiter.tryTake()) {
-      this.#droppedHits += 1;
+      // The rate limit bounds capture cost, not counting. An unconditional
+      // counter needs no capture, so it stays exact on hot paths instead of
+      // sampling at maxProbeHitsPerSecond.
+      const counted = candidates.filter(
+        ({ definition }) =>
+          definition.type === "counter" &&
+          definition.condition === undefined &&
+          definition.conditionExpression === undefined,
+      );
+      for (const probe of counted) {
+        this.#aggregates.incrementCounter(probe.definition.id);
+        probe.hits += 1;
+      }
+      if (counted.length < candidates.length) {
+        this.#droppedHits += 1;
+      }
       this.#resumeOnly();
+      for (const probe of counted) {
+        if (probe.hits >= probe.definition.hitLimit) {
+          void this.#retireAtHitLimit(probe);
+        }
+      }
       return;
     }
 
