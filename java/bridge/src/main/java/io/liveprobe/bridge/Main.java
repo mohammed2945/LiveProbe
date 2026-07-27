@@ -495,13 +495,25 @@ final class BridgeAgent implements AutoCloseable {
         List<Map<String, Object>> finalBatch = eventBuffer.drain();
         AgentSafetyStatus safetyStatus = probeManager.agentStatus();
         try {
-            broker.ingest(
-                    safetyStatus.state(),
-                    safetyStatus.detail(),
-                    safetyStatus.reasonCode(),
-                    config.hitsPerSecond(),
-                    finalBatch);
-        } catch (IOException | RuntimeException exception) {
+            // Isolated like every other flush, and for a sharper reason: this is the last one, so
+            // a stale event discarding the batch would take the terminal status transitions with
+            // it and there is no later flush to report them.
+            IngestIsolation.Result outcome = IngestIsolation.send(
+                    finalBatch,
+                    events -> broker.ingest(
+                            safetyStatus.state(),
+                            safetyStatus.detail(),
+                            safetyStatus.reasonCode(),
+                            config.hitsPerSecond(),
+                            events));
+            if (!outcome.rejected.isEmpty()) {
+                System.err.println("[liveprobe] final broker ingest rejected "
+                        + outcome.rejected.size() + " event(s)");
+            } else if (outcome.lastError != null) {
+                System.err.println(
+                        "[liveprobe] final broker ingest failed: " + safeMessage(outcome.lastError));
+            }
+        } catch (RuntimeException exception) {
             System.err.println("[liveprobe] final broker ingest failed: " + safeMessage(exception));
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();

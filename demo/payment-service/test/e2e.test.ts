@@ -466,9 +466,11 @@ async function metricAndLogPhase(
 /**
  * Checks log rendering below the hit budget.
  *
- * This runs after the metric phase rather than beside it: both have to capture,
- * both therefore have to sit on the capture line, and the Node agent cannot arm
- * two probes at one location.
+ * This runs after the metric phase rather than beside it. Both have to capture,
+ * and the Node agent cannot arm two probes at one location — but the counter
+ * line is not an escape either: capturing at `payments.ts:60` fails with
+ * `inspector-capture: Maximum call stack size exceeded`, while the line below
+ * it captures fine. Only the counter, which reads nothing, can sit there.
  */
 async function logPhase(phase: PhaseContext): Promise<number> {
   const logId = await createProbe(phase.brokerUrl, {
