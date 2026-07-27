@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { BrokerIngestError } from "../src/broker-client.js";
-import { ingestIsolating } from "../src/ingest-isolation.js";
+import { MAX_INGEST_SPLITS, ingestIsolating } from "../src/ingest-isolation.js";
 import type { AgentEvent } from "../src/types.js";
 
 function counter(probeId: string): AgentEvent {
@@ -96,20 +96,21 @@ describe("ingestIsolating", () => {
 
   it("gives up splitting when no subset can satisfy the broker", async () => {
     const attempts: AgentEvent[][] = [];
-    // A 400 caused by a field outside `events` fails every sub-batch equally.
-    const result = await ingestIsolating(
-      batch,
-      async (events) => {
-        attempts.push(events);
-        throw new BrokerIngestError(400);
-      },
-      { splits: 2 },
+    // A 400 caused by a field outside `events` fails every sub-batch equally,
+    // so nothing terminates the recursion except the budget. The batch is far
+    // wider than log2 of the budget, which a per-branch depth cap would never
+    // bound — the budget has to be spent across the whole retry tree.
+    const wide = Array.from({ length: 400 }, (_unused, index) =>
+      counter(`prb_${String(index)}`),
     );
+    const result = await ingestIsolating(wide, async (events) => {
+      attempts.push(events);
+      throw new BrokerIngestError(400);
+    });
 
-    expect(result.rejected).toEqual(batch);
+    expect(result.rejected).toEqual(wide);
     expect(result.deferred).toEqual([]);
-    // Bounded rather than one request per event.
-    expect(attempts.length).toBeLessThanOrEqual(7);
+    expect(attempts.length).toBeLessThanOrEqual(2 * MAX_INGEST_SPLITS + 1);
   });
 
   it("preserves order when deferring across sub-batches", async () => {

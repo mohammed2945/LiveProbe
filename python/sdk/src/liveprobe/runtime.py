@@ -47,10 +47,20 @@ _LINE_TABLE_LOCK = threading.Lock()
 _LEADING_RELATIVE = re.compile(r"^(?:\.\./|\./|/)+")
 _REPEATED_SLASH = re.compile(r"/+")
 
-# How many times one flush may halve a rejected batch. Isolating a single bad
-# event out of a batch of N costs about log2(N) splits; the cap keeps a 400 that
-# no subset can satisfy from turning every flush into a request storm.
+# How many times one flush may halve a rejected batch, across the whole retry
+# tree rather than per branch. Isolating a single bad event out of a batch of N
+# costs about log2(N) splits, so this covers batches up to 256 events; beyond
+# that isolation gives up one level early and drops a small sub-batch rather
+# than letting a 400 no subset can satisfy turn every flush into a request
+# storm. The Node agent uses the same bound with the same meaning.
 _MAX_INGEST_SPLITS = 8
+
+
+@dataclass(slots=True)
+class _SplitBudget:
+    """Splits left for one flush, shared by every branch of its retry tree."""
+
+    splits: int
 
 
 def _normalize_probe_suffix(file_name: str) -> str:
@@ -1773,13 +1783,15 @@ class LiveProbe:
         ).encode("utf-8")
         if len(body) > capacity or not self._bandwidth_bucket.consume(len(body)):
             return
-        self._send_isolating(selected, splits=_MAX_INGEST_SPLITS, charge=False)
+        self._send_isolating(
+            selected, budget=_SplitBudget(_MAX_INGEST_SPLITS), charge=False
+        )
 
     def _send_isolating(
         self,
         selected: list[tuple[str, dict[str, object]]],
         *,
-        splits: int,
+        budget: _SplitBudget,
         charge: bool,
     ) -> None:
         """Send a batch, narrowing a rejection to the events that caused it.
@@ -1789,7 +1801,9 @@ class LiveProbe:
         every valid event alongside the bad one. Halving and retrying isolates
         the offender instead. A 400 caused by a field outside ``events``
         (service id, agent status) fails every subset equally, which is what
-        ``splits`` bounds.
+        ``budget`` bounds. The budget is shared by the whole retry tree, not
+        per branch: a per-branch depth cap would never fire, since bisecting N
+        events only ever recurses log2(N) deep.
 
         Retry bytes are debited from the bandwidth budget but never gated on
         it: refusing to send here would strand the batch behind an event that
@@ -1807,7 +1821,7 @@ class LiveProbe:
             if error.code != 400:
                 self._audit(f"BROKER FLUSH ERROR HTTP {error.code}")
                 return
-            if len(selected) <= 1 or splits <= 0:
+            if len(selected) <= 1 or budget.splits <= 0:
                 self._remove_selected_events(selected)
                 self._dropped_hits += len(selected)
                 self._audit(
@@ -1822,9 +1836,10 @@ class LiveProbe:
             self._remove_selected_events(selected)
             return
 
+        budget.splits -= 1
         middle = (len(selected) + 1) // 2
-        self._send_isolating(selected[:middle], splits=splits - 1, charge=True)
-        self._send_isolating(selected[middle:], splits=splits - 1, charge=True)
+        self._send_isolating(selected[:middle], budget=budget, charge=True)
+        self._send_isolating(selected[middle:], budget=budget, charge=True)
 
     def _remove_selected_events(
         self, selected: list[tuple[str, dict[str, object]]]

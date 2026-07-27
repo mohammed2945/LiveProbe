@@ -683,14 +683,18 @@ final class ProbeManager implements AutoCloseable {
                     failed.managed().definition.id(), "error", failed.detail()));
         } else if (outcome instanceof CaptureOutcome.RateLimited limited) {
             ManagedProbe managed = limited.managed();
+            // Buffered before the counting task is queued: a counter at its
+            // last slot retires from that task, and the broker keeps only the
+            // newest transition, so "suspended" must not land after
+            // "hit-limit-reached" and strand a retired probe as suspended.
+            eventBuffer.add(Protocol.statusEvent(
+                    managed.definition.id(), "suspended", "hits-per-second limit"));
             if (HitProcessor.isPlainCounter(managed.definition)) {
                 processorExecutor.execute(() -> hitProcessor.countWithoutCapture(
                         managed.definition,
                         managed.emittedSlots,
                         () -> completeMatchingLimit(managed)));
             }
-            eventBuffer.add(Protocol.statusEvent(
-                    managed.definition.id(), "suspended", "hits-per-second limit"));
             long delay = Math.max(TimeUnit.MILLISECONDS.toNanos(1), limited.waitNanos());
             safetyExecutor.schedule(
                     () -> reenable(limited.managed(), limited.request()),

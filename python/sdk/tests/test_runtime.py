@@ -1433,7 +1433,7 @@ def test_rejection_no_subset_can_satisfy_stops_splitting(
     fake_monitoring: Any,
 ) -> None:
     agent = make_agent(fake_monitoring)
-    agent._events.extend(_pending_log(f"prb_{index}") for index in range(8))
+    agent._events.extend(_pending_log(f"prb_{index}") for index in range(400))
     attempts: list[list[str]] = []
 
     def always_rejecting(
@@ -1453,7 +1453,7 @@ def test_rejection_no_subset_can_satisfy_stops_splitting(
     agent._flush()
 
     assert agent._events == []
-    assert agent._dropped_hits == 8
+    assert agent._dropped_hits == 400
     # Bounded by the split budget rather than one request per event forever.
     assert len(attempts) <= 2 * _MAX_INGEST_SPLITS + 1
 
