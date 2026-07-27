@@ -415,6 +415,13 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       "hit-limit-reached",
       "hit-limit-reached",
     ]);
+    // `status` only holds the newest transition, so armedAt is what keeps
+    // "armed then hit its limit" distinguishable from "never armed".
+    expect(
+      completedList.probes.map((entry) => entry.status?.armedAt),
+    ).toEqual(
+      armedList.probes.map((entry) => entry.status?.updatedAt),
+    );
 
     const services = await handlers.list_services();
     expect(services.services).toEqual([

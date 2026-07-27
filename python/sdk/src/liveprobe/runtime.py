@@ -40,8 +40,27 @@ _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 # Executable line tables, keyed by absolute path. The value carries the stat
 # signature the table was built from so an edited file is recompiled.
-_LINE_TABLE_CACHE: dict[str, tuple[float, int, frozenset[int]]] = {}
+_LINE_TABLE_CACHE: dict[str, tuple[float, int, frozenset[int] | None]] = {}
 _LINE_TABLE_LOCK = threading.Lock()
+
+
+_LEADING_RELATIVE = re.compile(r"^(?:\.\./|\./|/)+")
+_REPEATED_SLASH = re.compile(r"/+")
+
+
+def _normalize_probe_suffix(file_name: str) -> str:
+    """The path suffix a probe file is matched by, as the Node agent derives it."""
+    normalized = _REPEATED_SLASH.sub("/", file_name.replace("\\", "/"))
+    return _LEADING_RELATIVE.sub("", normalized)
+
+
+def _matches_suffix(path: str, suffix: str) -> bool:
+    """Suffix match on whole path segments.
+
+    A bare ``endswith`` would let a probe on ``app.py`` match ``/srv/myapp.py``
+    and resolve against the wrong file's line table.
+    """
+    return path == suffix or path.endswith(f"/{suffix}")
 
 
 def _loaded_source_paths() -> list[str]:
@@ -82,6 +101,10 @@ def _executable_lines(path: str) -> frozenset[int] | None:
             source = handle.read()
         module_code = compile(source, path, "exec", dont_inherit=True)
     except (OSError, SyntaxError, ValueError, MemoryError, RecursionError):
+        # Cached so an unreadable or unparsable file is not recompiled on every
+        # poll for the life of the probe.
+        with _LINE_TABLE_LOCK:
+            _LINE_TABLE_CACHE[path] = (*signature, None)
         return None
 
     lines: set[int] = set()
@@ -105,27 +128,39 @@ def _executable_lines(path: str) -> frozenset[int] | None:
     return table
 
 
-def _resolve_probe_target(file_suffix: str, line: int) -> str | None:
+def _resolve_probe_target(file_name: str, line: int) -> str | None:
     """Detail of why the probe cannot fire here, or ``None`` when it can.
 
     Mirrors the Node agent: an unloaded file and an unreachable line both read
     as ``line-not-found`` so a probe placed before its module imports reports an
-    error and flips to ``armed`` on a later poll.
+    error and flips to ``armed`` on a later poll. Resolution follows the same
+    rule as the script registry — shortest matching path wins, and only equally
+    specific matches are ambiguous.
     """
-    matches = [
-        path for path in _loaded_source_paths() if path.endswith(file_suffix)
-    ]
+    suffix = _normalize_probe_suffix(file_name)
+    if not suffix:
+        return f"line-not-found: {file_name}:{line}"
+    matches = sorted(
+        path for path in _loaded_source_paths() if _matches_suffix(path, suffix)
+    )
     if not matches:
-        return f"line-not-found: {file_suffix}:{line}"
-    if len(matches) > 1:
-        return f"ambiguous-script: {file_suffix} matched {', '.join(sorted(matches))}"
+        return f"line-not-found: {file_name}:{line}"
+    matches.sort(key=len)
+    equally_specific = [
+        path for path in matches if len(path) == len(matches[0])
+    ]
+    if len(equally_specific) > 1:
+        return (
+            f"ambiguous-script: {file_name} matched "
+            f"{', '.join(sorted(equally_specific))}"
+        )
 
     lines = _executable_lines(matches[0])
     # An unreadable or unparsable file leaves the probe unvalidated rather than
     # failing it: reporting an error we cannot substantiate is worse than
     # reporting nothing.
     if lines is not None and line not in lines:
-        return f"line-not-found: {file_suffix}:{line}"
+        return f"line-not-found: {file_name}:{line}"
     return None
 
 
@@ -278,6 +313,9 @@ class Probe:
     service_id: str
     kind: str
     file: str
+    # ``file`` reduced to the path segments the monitoring callback matches on,
+    # precomputed so the hot path does no string work per hit.
+    suffix: str
     line: int
     hit_limit: int
     ttl_seconds: int
@@ -394,6 +432,7 @@ class Probe:
             service_id=service_id,
             kind=kind,
             file=file_name.replace("\\", "/"),
+            suffix=_normalize_probe_suffix(file_name),
             line=line,
             hit_limit=hit_limit,
             ttl_seconds=ttl_seconds,
@@ -943,7 +982,7 @@ class LiveProbe:
             matching = tuple(
                 state
                 for state in candidates
-                if filename.endswith(state.probe.file)
+                if _matches_suffix(filename, state.probe.suffix)
             )
             if not matching:
                 return self._disable

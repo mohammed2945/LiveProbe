@@ -1279,3 +1279,45 @@ def test_rate_limited_counter_retires_at_its_hit_limit(
         )
     finally:
         agent._uninstall_monitoring()
+
+
+def test_probe_file_matches_on_path_segments_not_bare_suffix(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring)
+    agent._install_monitoring()
+    try:
+        # "runtime.py" must not match ".../tests/test_runtime.py": a bare
+        # endswith would resolve against the wrong file's line table.
+        agent._reconcile(
+            [{**probe("prb_suffix", "snapshot"), "file": "untime.py"}]
+        )
+        agent._drain_queue()
+
+        statuses = [
+            event for event in agent._events if event["type"] == "status"
+        ]
+        assert [event["status"] for event in statuses] == ["error"]
+        assert statuses[0]["detail"] == "line-not-found: untime.py:700"
+    finally:
+        agent._uninstall_monitoring()
+
+
+def test_probe_file_accepts_a_leading_relative_prefix(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring)
+    agent._install_monitoring()
+    try:
+        agent._reconcile(
+            [{**probe("prb_relative", "snapshot"), "file": "./test_runtime.py"}]
+        )
+        agent._drain_queue()
+
+        assert [
+            event["status"]
+            for event in agent._events
+            if event["type"] == "status"
+        ] == ["armed"]
+    finally:
+        agent._uninstall_monitoring()
