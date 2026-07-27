@@ -22,6 +22,17 @@ SERVICE_ID = "billing-worker-e2e"
 PROBE_FILE = "app.py"
 COMMIT_SHA = "abcdef1234567890"
 
+# A seeded user whose address is present, so every burst renewal succeeds and
+# the probe line is reached exactly once per request.
+_BURST_USER = "standard-us"
+# Driven back to back over loopback this lands far above the 10 hits/second
+# budget, which is the point: the counter must stay exact anyway.
+_COUNTER_BURST = 50
+# Spaced under the budget so captures are never dropped and the aggregate is
+# predictable from the request bodies alone.
+_METRIC_SUBTOTALS = [1_000, 2_000, 3_000, 4_000, 5_000]
+_METRIC_SPACING_SECONDS = 0.15
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
@@ -108,6 +119,33 @@ def _read_log(path: Path) -> str:
     return "\n".join(lines[-60:])
 
 
+def _rejection_lines(app_log: Path) -> list[str]:
+    """Every 400 the agent has reported, read from the whole log.
+
+    The diagnostic reader keeps only a tail; a rejection that scrolled out of
+    it would read as an absent rejection rather than a missed one.
+    """
+    try:
+        text = app_log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [
+        line for line in text.splitlines() if "BROKER FLUSH REJECTED" in line
+    ]
+
+
+def _settled_rejections(app_log: Path) -> list[str]:
+    """Rejections recorded once the log has stopped gaining new ones."""
+    previous = -1
+    for _ in range(60):
+        lines = _rejection_lines(app_log)
+        if len(lines) == previous:
+            return lines
+        previous = len(lines)
+        time.sleep(0.25)
+    raise TimeoutError("agent kept reporting rejected flushes")
+
+
 def _bug_line() -> int:
     matches = [
         line_number
@@ -169,6 +207,116 @@ def _snapshot_event(
     return None
 
 
+def _create_probe(broker_url: str, payload: dict[str, object]) -> str:
+    status, body = _json_request("POST", f"{broker_url}/v1/probes", payload)
+    if status != 201:
+        raise AssertionError(f"probe creation failed ({status}): {body}")
+    probe = body.get("probe")
+    if not isinstance(probe, dict) or not isinstance(probe.get("id"), str):
+        raise AssertionError("broker did not return a probe id")
+    return probe["id"]
+
+
+def _delete_probe(broker_url: str, probe_id: str) -> None:
+    encoded_probe_id = urllib.parse.quote(probe_id, safe="")
+    try:
+        _json_request(
+            "DELETE", f"{broker_url}/v1/probes/{encoded_probe_id}", timeout=2
+        )
+    except Exception:
+        pass
+
+
+def _probe_data(broker_url: str, probe_id: str) -> dict[str, Any]:
+    encoded_probe_id = urllib.parse.quote(probe_id, safe="")
+    status, payload = _json_request(
+        "GET", f"{broker_url}/v1/probes/{encoded_probe_id}/data"
+    )
+    if status != 200:
+        raise AssertionError(f"probe data returned HTTP {status}")
+    return payload
+
+
+def _probe_events(
+    broker_url: str, probe_id: str, event_type: str
+) -> list[dict[str, Any]]:
+    events = _probe_data(broker_url, probe_id).get("events", [])
+    if not isinstance(events, list):
+        return []
+    return [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("type") == event_type
+    ]
+
+
+def _counter_total(broker_url: str, probe_id: str) -> int:
+    """Sum the counter deltas the agent has flushed so far.
+
+    Counters arrive pre-aggregated, one event per flush, so the running total
+    is the sum of every delta rather than the value of the newest event.
+    """
+    return sum(
+        int(event["delta"])
+        for event in _probe_events(broker_url, probe_id, "counter")
+        if isinstance(event.get("delta"), int)
+    )
+
+
+def _wait_armed(
+    broker_url: str,
+    probe_id: str,
+    processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+) -> None:
+    def is_armed() -> bool:
+        status = _probe_data(broker_url, probe_id).get("status")
+        return isinstance(status, dict) and status.get("status") == "armed"
+
+    _wait_for(
+        f"probe {probe_id} to arm", is_armed, timeout=10, processes=processes
+    )
+
+
+def _drain(
+    app_url: str, processes: tuple[tuple[str, subprocess.Popen[bytes]], ...]
+) -> int:
+    """Wait for in-flight requests to finish so a burst count is unambiguous.
+
+    The traffic generator is stopped before this runs, but requests it already
+    issued can still be completing. Every later phase compares a probe total
+    against a burst size it drove itself, so a single straggler would make an
+    exact assertion wrong.
+    """
+    previous = -1
+    for _ in range(100):
+        for name, process in processes:
+            if process.poll() is not None:
+                raise RuntimeError(f"{name} exited while draining traffic")
+        current = _completed_requests(app_url)
+        if current == previous:
+            return current
+        previous = current
+        time.sleep(0.1)
+    raise TimeoutError("timed out waiting for in-flight requests to drain")
+
+
+def _burst(app_url: str, subtotals: list[int], *, spacing: float = 0.0) -> None:
+    """Drive renewals one at a time so the hit count equals the request count."""
+    for subtotal in subtotals:
+        status, payload = _json_request(
+            "POST",
+            f"{app_url}/renew",
+            {"user_id": _BURST_USER, "subtotal_cents": subtotal},
+            timeout=5.0,
+        )
+        if status != 200:
+            raise AssertionError(
+                f"burst renewal returned HTTP {status}: {payload}"
+            )
+        if spacing > 0:
+            time.sleep(spacing)
+
+
 def _child(node: object, key: str) -> dict[str, Any]:
     if not isinstance(node, dict) or node.get("t") != "obj":
         raise AssertionError(f"expected serialized object while reading {key}")
@@ -211,6 +359,366 @@ def _assert_sanitized_evidence(event: dict[str, Any]) -> None:
         )
     ):
         raise AssertionError("requested stack frames did not include bounded locals")
+
+
+def _phase_counter_exactness(
+    broker_url: str,
+    app_url: str,
+    line: int,
+    processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+) -> dict[str, Any]:
+    """Prove the hit budget bounds capture cost rather than counting.
+
+    A counter and a log probe share one line. The burst runs far above the
+    budget, so the log probe — which has to capture to render its message —
+    must lose hits, while the counter, which reads nothing, must record every
+    one. Asserting the counter alone would pass even with no limiter running,
+    so the dropped captures are what give the exact total its meaning.
+    """
+    counter_id = _create_probe(
+        broker_url,
+        {
+            "serviceId": SERVICE_ID,
+            "type": "counter",
+            "file": PROBE_FILE,
+            "line": line,
+            "hitLimit": 10_000,
+            "ttlSeconds": 60,
+            "createdBy": "e2e:billing-worker",
+        },
+    )
+    log_id = _create_probe(
+        broker_url,
+        {
+            "serviceId": SERVICE_ID,
+            "type": "log",
+            "file": PROBE_FILE,
+            "line": line,
+            "template": "renewing ${subtotal_cents}",
+            "hitLimit": 10_000,
+            "ttlSeconds": 60,
+            "createdBy": "e2e:billing-worker",
+        },
+    )
+    try:
+        _wait_armed(broker_url, counter_id, processes)
+        _wait_armed(broker_url, log_id, processes)
+        _burst(app_url, [2_500] * _COUNTER_BURST)
+
+        def counter_reached() -> int | None:
+            total = _counter_total(broker_url, counter_id)
+            return total if total >= _COUNTER_BURST else None
+
+        # Waiting for "at least" and then asserting equality reports an
+        # overcount as a failed assertion rather than as a timeout.
+        total = _wait_for(
+            "counter total to reach the burst size",
+            counter_reached,
+            timeout=20,
+            processes=processes,
+        )
+        if total != _COUNTER_BURST:
+            raise AssertionError(
+                f"counter recorded {total} hits for {_COUNTER_BURST} requests"
+            )
+        messages = [
+            event.get("message")
+            for event in _probe_events(broker_url, log_id, "log")
+        ]
+        if not messages:
+            raise AssertionError("log probe on the same line captured nothing")
+        if len(messages) >= _COUNTER_BURST:
+            raise AssertionError(
+                "the hit budget dropped no captures, so the exact counter "
+                "total does not demonstrate anything about rate limiting"
+            )
+        if "renewing 2500" not in messages:
+            raise AssertionError(
+                f"log template did not render live locals: {messages[:3]}"
+            )
+        return {
+            "requests": _COUNTER_BURST,
+            "counter_total": total,
+            "log_captures": len(messages),
+        }
+    finally:
+        _delete_probe(broker_url, log_id)
+        _delete_probe(broker_url, counter_id)
+
+
+def _phase_metric_and_log(
+    broker_url: str,
+    app_url: str,
+    line: int,
+    processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+) -> dict[str, Any]:
+    """Check metric aggregation and log rendering below the hit budget.
+
+    Spacing the requests under the budget keeps the limiter out of the picture,
+    so every field is predictable from the request bodies alone.
+    """
+    metric_id = _create_probe(
+        broker_url,
+        {
+            "serviceId": SERVICE_ID,
+            "type": "metric",
+            "file": PROBE_FILE,
+            "line": line,
+            "metricPath": "subtotal_cents",
+            "hitLimit": 10_000,
+            "ttlSeconds": 60,
+            "createdBy": "e2e:billing-worker",
+        },
+    )
+    log_id = _create_probe(
+        broker_url,
+        {
+            "serviceId": SERVICE_ID,
+            "type": "log",
+            "file": PROBE_FILE,
+            "line": line,
+            "template": "renewal subtotal=${subtotal_cents}",
+            "logLevel": "warn",
+            "hitLimit": 10_000,
+            "ttlSeconds": 60,
+            "createdBy": "e2e:billing-worker",
+        },
+    )
+    try:
+        _wait_armed(broker_url, metric_id, processes)
+        _wait_armed(broker_url, log_id, processes)
+        _burst(app_url, _METRIC_SUBTOTALS, spacing=_METRIC_SPACING_SECONDS)
+
+        expected = len(_METRIC_SUBTOTALS)
+
+        def metric_reached() -> list[dict[str, Any]] | None:
+            events = _probe_events(broker_url, metric_id, "metric")
+            observed = sum(int(event["count"]) for event in events)
+            return events if observed >= expected else None
+
+        events = _wait_for(
+            "metric aggregate to cover the burst",
+            metric_reached,
+            timeout=20,
+            processes=processes,
+        )
+        count = sum(int(event["count"]) for event in events)
+        total = sum(float(event["sum"]) for event in events)
+        smallest = min(float(event["min"]) for event in events)
+        largest = max(float(event["max"]) for event in events)
+        if count != expected:
+            raise AssertionError(
+                f"metric counted {count} samples for {expected} requests"
+            )
+        if total != float(sum(_METRIC_SUBTOTALS)):
+            raise AssertionError(
+                f"metric sum was {total}, expected {sum(_METRIC_SUBTOTALS)}"
+            )
+        if smallest != float(min(_METRIC_SUBTOTALS)) or largest != float(
+            max(_METRIC_SUBTOTALS)
+        ):
+            raise AssertionError(
+                f"metric bounds were {smallest}..{largest}, expected "
+                f"{min(_METRIC_SUBTOTALS)}..{max(_METRIC_SUBTOTALS)}"
+            )
+
+        def logs_reached() -> list[dict[str, Any]] | None:
+            events = _probe_events(broker_url, log_id, "log")
+            return events if len(events) >= expected else None
+
+        log_events = _wait_for(
+            "one log event per request",
+            logs_reached,
+            timeout=20,
+            processes=processes,
+        )
+        messages = sorted(str(event.get("message")) for event in log_events)
+        wanted = sorted(
+            f"renewal subtotal={subtotal}" for subtotal in _METRIC_SUBTOTALS
+        )
+        if messages != wanted:
+            raise AssertionError(
+                f"log messages were {messages}, expected {wanted}"
+            )
+        if any(event.get("level") != "warn" for event in log_events):
+            raise AssertionError("log level did not survive the round trip")
+        return {
+            "samples": count,
+            "sum": total,
+            "min": smallest,
+            "max": largest,
+            "log_events": len(log_events),
+        }
+    finally:
+        _delete_probe(broker_url, log_id)
+        _delete_probe(broker_url, metric_id)
+
+
+def _capture_count(
+    broker_url: str,
+    app_url: str,
+    line: int,
+    probe_count: int,
+    processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+) -> int:
+    """Run a fixed over-budget burst against N log probes on one line.
+
+    Returns the smallest number of captures any single probe managed, which is
+    the quantity the per-capture budget is supposed to leave unchanged as N
+    grows.
+    """
+    probe_ids = [
+        _create_probe(
+            broker_url,
+            {
+                "serviceId": SERVICE_ID,
+                "type": "log",
+                "file": PROBE_FILE,
+                "line": line,
+                "template": f"capture {index} ${{subtotal_cents}}",
+                "hitLimit": 10_000,
+                "ttlSeconds": 60,
+                "createdBy": "e2e:billing-worker",
+            },
+        )
+        for index in range(probe_count)
+    ]
+    try:
+        for probe_id in probe_ids:
+            _wait_armed(broker_url, probe_id, processes)
+        # Let the bucket refill to capacity so both measurements start level.
+        time.sleep(1.5)
+        _burst(app_url, [2_500] * _COUNTER_BURST)
+        # The flush interval is 0.25s; this is several flushes of slack.
+        time.sleep(1.5)
+        return min(
+            len(_probe_events(broker_url, probe_id, "log"))
+            for probe_id in probe_ids
+        )
+    finally:
+        for probe_id in probe_ids:
+            _delete_probe(broker_url, probe_id)
+
+
+def _phase_per_capture_budget(
+    broker_url: str,
+    app_url: str,
+    line: int,
+    processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+) -> dict[str, Any]:
+    """Prove the budget is charged per pause rather than per probe.
+
+    One line event reads the frame once and shares it with every probe on the
+    line, so three probes should each capture about as often as one probe does.
+    Charging per probe instead would drain the bucket three times as fast and
+    leave each probe with roughly a third. The threshold sits halfway between
+    those outcomes because this is a timing measurement, not an exact one.
+    """
+    alone = _capture_count(broker_url, app_url, line, 1, processes)
+    if alone <= 0:
+        raise AssertionError("a single log probe captured nothing")
+    together = _capture_count(broker_url, app_url, line, 3, processes)
+    if together * 2 <= alone:
+        raise AssertionError(
+            f"each of three probes on one line captured {together} hits "
+            f"against {alone} for a probe on its own, which is the share a "
+            "per-probe budget would produce"
+        )
+    return {"one_probe": alone, "three_probes_min": together}
+
+
+def _phase_ingest_isolation(
+    broker_url: str,
+    app_url: str,
+    line: int,
+    app_log: Path,
+    processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+) -> dict[str, Any]:
+    """Prove one rejected event no longer discards the batch around it.
+
+    Deleting a probe the agent has already armed is the realistic way a flush
+    turns poisonous: the agent keeps emitting for the fraction of a second
+    before its next poll, and the broker refuses any event naming a probe it no
+    longer knows. Validation covers the whole request body, so that single
+    stale event returns HTTP 400 for the entire batch without saying which
+    event was at fault. The counter sharing the line has to survive it.
+    """
+    counter_id = _create_probe(
+        broker_url,
+        {
+            "serviceId": SERVICE_ID,
+            "type": "counter",
+            "file": PROBE_FILE,
+            "line": line,
+            "hitLimit": 10_000,
+            "ttlSeconds": 60,
+            "createdBy": "e2e:billing-worker",
+        },
+    )
+    poison_id = _create_probe(
+        broker_url,
+        {
+            "serviceId": SERVICE_ID,
+            "type": "log",
+            "file": PROBE_FILE,
+            "line": line,
+            "template": "stale ${subtotal_cents}",
+            # One hit, so the flush carries a single stale event. Isolation is
+            # deliberately bounded at a handful of splits per flush, and a
+            # batch that is mostly poison exhausts that budget and takes valid
+            # events down with it — which is the documented trade-off, not the
+            # behaviour under test here.
+            "hitLimit": 1,
+            "ttlSeconds": 60,
+            "createdBy": "e2e:billing-worker",
+        },
+    )
+    try:
+        _wait_armed(broker_url, counter_id, processes)
+        _wait_armed(broker_url, poison_id, processes)
+        # Earlier phases delete their probes too, so their own stale events are
+        # still working through the buffer. Let those settle, then treat only
+        # later rejections as evidence that this burst was the poisoned flush.
+        before = _settled_rejections(app_log)
+        # Delete, then burst without pausing: the agent polls every 100ms, so
+        # the opening requests still emit log events for a probe the broker has
+        # already forgotten, and those events sit in the same buffer as the
+        # counter aggregate.
+        _delete_probe(broker_url, poison_id)
+        _burst(app_url, [2_500] * _COUNTER_BURST)
+
+        def rejected() -> list[str] | None:
+            lines = _rejection_lines(app_log)
+            return lines if len(lines) > len(before) else None
+
+        rejections = _wait_for(
+            "the broker to refuse the batch carrying the stale event",
+            rejected,
+            timeout=20,
+            processes=processes,
+        )
+
+        def counter_reached() -> int | None:
+            total = _counter_total(broker_url, counter_id)
+            return total if total >= _COUNTER_BURST else None
+
+        total = _wait_for(
+            "counter total to survive the rejected batch",
+            counter_reached,
+            timeout=25,
+            processes=processes,
+        )
+        if total != _COUNTER_BURST:
+            raise AssertionError(
+                f"counter recorded {total} hits for {_COUNTER_BURST} requests "
+                "flushed alongside a rejected event"
+            )
+        return {
+            "counter_total": total,
+            "rejection": rejections[-1].strip(),
+        }
+    finally:
+        _delete_probe(broker_url, counter_id)
 
 
 def main() -> int:
@@ -417,12 +925,39 @@ def main() -> int:
                     processes=active_processes,
                 )
 
+                # The remaining phases assert exact totals against bursts they
+                # drive themselves, so the background traffic has to stop and
+                # its in-flight requests have to land first.
+                _json_request(
+                    "DELETE",
+                    f"{broker_url}/v1/probes/"
+                    f"{urllib.parse.quote(probe_id, safe='')}",
+                )
+                probe_id = None
+                _terminate(traffic)
+                traffic = None
+                quiet_processes = (("broker", broker), ("app", app))
+                _drain(app_url, quiet_processes)
+
+                line = _bug_line()
+                counter_phase = _phase_counter_exactness(
+                    broker_url, app_url, line, quiet_processes
+                )
+                metric_phase = _phase_metric_and_log(
+                    broker_url, app_url, line, quiet_processes
+                )
+                budget_phase = _phase_per_capture_budget(
+                    broker_url, app_url, line, quiet_processes
+                )
+                isolation_phase = _phase_ingest_isolation(
+                    broker_url, app_url, line, app_log, quiet_processes
+                )
+
                 print(
                     json.dumps(
                         {
                             "result": "PASS",
-                            "probe_id": probe_id,
-                            "bug_line": _bug_line(),
+                            "bug_line": line,
                             "evidence": {
                                 "user.address": None,
                                 "user.is_legacy": True,
@@ -432,6 +967,10 @@ def main() -> int:
                                 "at_evidence": at_evidence,
                                 "after_evidence": after_evidence,
                             },
+                            "counter_exactness": counter_phase,
+                            "metric_and_log": metric_phase,
+                            "per_capture_budget": budget_phase,
+                            "ingest_isolation": isolation_phase,
                         },
                         indent=2,
                         sort_keys=True,

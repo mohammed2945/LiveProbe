@@ -18,6 +18,16 @@ const inventorySource = resolve(
   "demo/inventory-service/src/main/java/io/liveprobe/demo/inventory/InventoryService.java",
 );
 const serviceId = "inventory-service-e2e";
+const INVENTORY_PROBE_FILE =
+  "demo/inventory-service/src/main/java/io/liveprobe/demo/inventory/InventoryService.java";
+/**
+ * Driven back to back this lands far above the 10 hits/second budget, which is
+ * the point: on the JVM the counter is expected to fall short.
+ */
+const COUNTER_BURST = 50;
+/** Spaced under the budget so no hit is lost and the aggregate is exact. */
+const METRIC_QUANTITIES = [1, 2, 3, 4, 5];
+const METRIC_SPACING_MS = 150;
 
 function delay(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
@@ -118,6 +128,74 @@ function watchValue(snapshot, expression) {
   return watchNode.v;
 }
 
+/**
+ * Reservations come in pairs by construction: the engine makes both requests in
+ * a wave read the cache before either commits, so a lone request would block on
+ * the latch. Each pair uses a fresh sku and wave so stock never runs across
+ * measurements.
+ */
+async function reservePair(inventoryUrl, index, quantity) {
+  const responses = await Promise.all(
+    ["leader", "follower"].map((role) =>
+      fetch(
+        `${inventoryUrl}/reserve?sku=sku-${String(index)}&quantity=${String(quantity)}` +
+          `&wave=wave-${String(index)}&role=${role}`,
+        { method: "POST" },
+      ),
+    ),
+  );
+  for (const response of responses) {
+    // Stock is one unit per wave, so anything above a single unit is refused —
+    // the probe line runs either way, which is all these phases depend on.
+    assert.ok(
+      response.status === 201 || response.status === 409,
+      `reservation ${String(index)} returned ${String(response.status)}`,
+    );
+    await response.arrayBuffer();
+  }
+}
+
+async function createProbe(brokerUrl, payload) {
+  const created = await requestJson(`${brokerUrl}/v1/probes`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return created.probe.id;
+}
+
+async function deleteProbe(brokerUrl, probeId) {
+  await fetch(`${brokerUrl}/v1/probes/${probeId}`, { method: "DELETE" }).catch(
+    () => {},
+  );
+}
+
+async function probeEvents(brokerUrl, probeId, type) {
+  const data = await requestJson(`${brokerUrl}/v1/probes/${probeId}/data`);
+  return (data.events ?? []).filter((event) => event.type === type);
+}
+
+async function waitArmed(brokerUrl, probeId) {
+  await waitFor(`probe ${probeId} to arm`, 15_000, async () => {
+    const data = await requestJson(`${brokerUrl}/v1/probes/${probeId}/data`);
+    return data.status?.status === "armed" ? true : null;
+  });
+}
+
+/** Waits for in-flight reservations to land so a burst count is unambiguous. */
+async function drain(inventoryUrl) {
+  let previous = -1;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const stats = await requestJson(`${inventoryUrl}/stats`);
+    if (stats.inFlightRequests === 0 && stats.completedRequests === previous) {
+      return stats.completedRequests;
+    }
+    previous = stats.completedRequests;
+    await delay(100);
+  }
+  throw new Error("timed out waiting for in-flight reservations to drain");
+}
+
 async function markerLine() {
   const lines = (await readFile(inventorySource, "utf8")).split(/\r?\n/u);
   const matches = lines
@@ -125,6 +203,120 @@ async function markerLine() {
     .filter((line) => line !== null);
   assert.equal(matches.length, 1, "inventory probe marker must be unique");
   return matches[0];
+}
+
+/**
+ * Checks that a JVM counter under sustained rate limiting is a floor.
+ *
+ * The bridge cannot count what it never receives: rather than resume from a
+ * suspend it cannot afford, it disables the breakpoint request until the budget
+ * window resets, so hits inside that window are never delivered. The strict
+ * upper bound is the discriminating half of this — it is what proves the
+ * limiter fired at all, and it is the assertion the Node and Python agents
+ * deliberately fail, because there a plain counter stays exact.
+ */
+async function counterFloorPhase(brokerUrl, inventoryUrl, serviceId, line) {
+  const counterId = await createProbe(brokerUrl, {
+    serviceId,
+    type: "counter",
+    file: INVENTORY_PROBE_FILE,
+    line,
+    hitLimit: 10_000,
+    ttlSeconds: 120,
+    createdBy: "e2e:jvm",
+  });
+  try {
+    await waitArmed(brokerUrl, counterId);
+    for (let index = 0; index < COUNTER_BURST; index += 1) {
+      await reservePair(inventoryUrl, `floor-${String(index)}`, 1);
+    }
+    const total = await waitFor("a JVM counter total", 25_000, async () => {
+      const events = await probeEvents(brokerUrl, counterId, "counter");
+      const observed = events.reduce((sum, event) => sum + event.delta, 0);
+      return observed > 0 ? observed : null;
+    });
+    assert.ok(
+      total < COUNTER_BURST,
+      `JVM counter recorded ${String(total)} of ${String(COUNTER_BURST)} hits; ` +
+        "the limiter never fired, so this run says nothing about the floor",
+    );
+    return total;
+  } finally {
+    await deleteProbe(brokerUrl, counterId);
+  }
+}
+
+/**
+ * Checks JVM metric aggregation and log rendering below the hit budget.
+ *
+ * Spaced under the budget the breakpoint request is never disabled, so every
+ * field is predictable from the request queries alone.
+ */
+async function metricAndLogPhase(brokerUrl, inventoryUrl, serviceId, line) {
+  const common = {
+    serviceId,
+    file: INVENTORY_PROBE_FILE,
+    line,
+    hitLimit: 10_000,
+    ttlSeconds: 120,
+    createdBy: "e2e:jvm",
+  };
+  const metricId = await createProbe(brokerUrl, {
+    ...common,
+    type: "metric",
+    metricPath: "requested",
+  });
+  const logId = await createProbe(brokerUrl, {
+    ...common,
+    type: "log",
+    template: "reserve requested=${requested} role=${requestRole}",
+    logLevel: "warn",
+  });
+  try {
+    await waitArmed(brokerUrl, metricId);
+    await waitArmed(brokerUrl, logId);
+    for (const [index, quantity] of METRIC_QUANTITIES.entries()) {
+      await reservePair(inventoryUrl, `metric-${String(index)}`, quantity);
+      await delay(METRIC_SPACING_MS);
+    }
+
+    const metrics = await waitFor("JVM metric aggregate", 25_000, async () => {
+      const events = await probeEvents(brokerUrl, metricId, "metric");
+      const observed = events.reduce((count, event) => count + event.count, 0);
+      return observed >= METRIC_QUANTITIES.length ? events : null;
+    });
+    const samples = metrics.reduce((count, event) => count + event.count, 0);
+    const sum = metrics.reduce((total, event) => total + event.sum, 0);
+    assert.equal(samples, METRIC_QUANTITIES.length);
+    assert.equal(sum, METRIC_QUANTITIES.reduce((a, b) => a + b, 0));
+    assert.equal(
+      Math.min(...metrics.map((event) => event.min)),
+      Math.min(...METRIC_QUANTITIES),
+    );
+    assert.equal(
+      Math.max(...metrics.map((event) => event.max)),
+      Math.max(...METRIC_QUANTITIES),
+    );
+
+    const logs = await waitFor("one JVM log event per reservation", 25_000, async () => {
+      const events = await probeEvents(brokerUrl, logId, "log");
+      return events.length >= METRIC_QUANTITIES.length ? events : null;
+    });
+    assert.deepEqual(
+      logs.map((event) => event.message).sort(),
+      METRIC_QUANTITIES.map(
+        (quantity) => `reserve requested=${String(quantity)} role=follower`,
+      ).sort(),
+    );
+    assert.ok(
+      logs.every((event) => event.level === "warn"),
+      "JVM log level did not survive the round trip",
+    );
+    return { samples, sum, logs: logs.length };
+  } finally {
+    await deleteProbe(brokerUrl, logId);
+    await deleteProbe(brokerUrl, metricId);
+  }
 }
 
 async function waitForExit(child) {
@@ -305,11 +497,31 @@ try {
 
   await fetch(`${brokerUrl}/v1/probes/${probeId}`, { method: "DELETE" });
   probeId = undefined;
+
+  // The remaining phases assert totals against bursts they drive themselves, so
+  // the wave traffic has to be finished and drained first.
+  await drain(inventoryUrl);
+  const counterFloor = await counterFloorPhase(
+    brokerUrl,
+    inventoryUrl,
+    serviceId,
+    line,
+  );
+  const aggregates = await metricAndLogPhase(
+    brokerUrl,
+    inventoryUrl,
+    serviceId,
+    line,
+  );
+
   console.log(
     `JVM e2e passed: bridge attached on loopback, probe line ${String(line)}, ` +
       `stale stock ${String(cachedStock)}>${String(authoritativeStock)}, ` +
       `${String(snapshot.stack.length)} stack frame(s), traffic advanced by ` +
-      `${String(statsAfter.completedRequests - statsBefore.completedRequests)}.`,
+      `${String(statsAfter.completedRequests - statsBefore.completedRequests)}, ` +
+      `counter floor ${String(counterFloor)}/${String(COUNTER_BURST)} under the ` +
+      `hit budget, ${String(aggregates.samples)} metric samples summing ` +
+      `${String(aggregates.sum)} and ${String(aggregates.logs)} log messages.`,
   );
 } catch (error) {
   const logs = children

@@ -17,12 +17,44 @@ interface ManagedChild {
 interface StatsResponse {
   counters: {
     requests: number;
+    inFlight: number;
   };
   pool: {
     active: number;
     capacity: number;
   };
 }
+
+interface CounterEvent {
+  type: "counter";
+  delta: number;
+}
+
+interface LogEvent {
+  type: "log";
+  message: string;
+  level: string;
+}
+
+interface MetricEvent {
+  type: "metric";
+  count: number;
+  sum: number;
+  min: number;
+  max: number;
+}
+
+/**
+ * Driven back to back over loopback this lands far above the 10 hits/second
+ * budget, which is the point: the counter must stay exact anyway.
+ */
+const COUNTER_BURST = 50;
+/**
+ * Spaced under the budget so no capture is dropped and every metric field is
+ * predictable from the request bodies alone.
+ */
+const METRIC_AMOUNTS = [1_000, 2_000, 3_000, 4_000, 5_000];
+const METRIC_SPACING_MS = 150;
 
 type SanitizedNode =
   | { t: "str"; v: string }
@@ -165,13 +197,389 @@ function objectChild(node: SanitizedNode, key: string): SanitizedNode {
   return child;
 }
 
-async function findProbeLine(sourcePaymentsPath: string): Promise<number> {
+async function createProbe(
+  brokerUrl: string,
+  payload: Record<string, unknown>,
+): Promise<string> {
+  const created = await requestJson<{ probe: { id: string } }>(
+    `${brokerUrl}/v1/probes`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  return created.probe.id;
+}
+
+async function deleteProbe(brokerUrl: string, probeId: string): Promise<void> {
+  await fetch(`${brokerUrl}/v1/probes/${probeId}`, { method: "DELETE" }).catch(
+    () => undefined,
+  );
+}
+
+async function probeEvents<T>(
+  brokerUrl: string,
+  probeId: string,
+  type: string,
+): Promise<T[]> {
+  const data = await requestJson<ProbeDataResponse & {
+    status?: { status?: string };
+  }>(`${brokerUrl}/v1/probes/${probeId}/data`);
+  return data.events.filter((event) => event.type === type) as T[];
+}
+
+/**
+ * Counters arrive pre-aggregated, one event per flush, so the running total is
+ * the sum of every delta rather than the value of the newest event.
+ */
+async function counterTotal(
+  brokerUrl: string,
+  probeId: string,
+): Promise<number> {
+  const events = await probeEvents<CounterEvent>(brokerUrl, probeId, "counter");
+  return events.reduce((total, event) => total + event.delta, 0);
+}
+
+async function waitArmed(brokerUrl: string, probeId: string): Promise<void> {
+  await waitFor(`probe ${probeId} to arm`, 10_000, async () => {
+    const data = await requestJson<{ status?: { status?: string } }>(
+      `${brokerUrl}/v1/probes/${probeId}/data`,
+    );
+    return data.status?.status === "armed" ? true : null;
+  });
+}
+
+/**
+ * Waits for in-flight requests to finish so a burst count is unambiguous.
+ *
+ * The traffic generator is stopped before this runs, but requests it already
+ * issued can still be completing, and every later phase compares a probe total
+ * against a burst size it drove itself.
+ */
+async function drain(serviceUrl: string): Promise<number> {
+  let previous = -1;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const stats = await requestJson<StatsResponse>(`${serviceUrl}/stats`);
+    if (stats.counters.inFlight === 0 && stats.counters.requests === previous) {
+      return stats.counters.requests;
+    }
+    previous = stats.counters.requests;
+    await delay(100);
+  }
+  throw new Error("timed out waiting for in-flight payments to drain");
+}
+
+/**
+ * Drives payments one at a time so the hit count equals the request count.
+ *
+ * Each request uses a fresh user id: balances are per user and every payment
+ * debits, so reusing one id would eventually fail for insufficient funds and
+ * change which branch the probe line sits on.
+ */
+async function burst(
+  serviceUrl: string,
+  amounts: number[],
+  label: string,
+  spacingMs = 0,
+): Promise<void> {
+  for (const [index, amountCents] of amounts.entries()) {
+    const response = await fetch(`${serviceUrl}/pay`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        user: { id: `${label}-${String(index)}`, tier: "premium" },
+        amountCents,
+      }),
+    });
+    assert.equal(
+      response.status,
+      201,
+      `burst payment ${String(index)} returned ${String(response.status)}`,
+    );
+    await response.arrayBuffer();
+    if (spacingMs > 0) await delay(spacingMs);
+  }
+}
+
+async function findProbeLine(
+  sourcePaymentsPath: string,
+  marker = "LIVEPROBE_SNAPSHOT_TARGET",
+): Promise<number> {
   const lines = (await readFile(sourcePaymentsPath, "utf8")).split(/\r?\n/u);
   const matches = lines
-    .map((line, index) => (line.includes("LIVEPROBE_SNAPSHOT_TARGET") ? index + 1 : null))
+    .map((line, index) => (line.includes(marker) ? index + 1 : null))
     .filter((line): line is number => line !== null);
-  assert.deepEqual(matches.length, 1, "source probe marker must occur exactly once");
+  assert.deepEqual(matches.length, 1, `${marker} must occur exactly once`);
   return matches[0] as number;
+}
+
+interface PhaseContext {
+  brokerUrl: string;
+  serviceUrl: string;
+  serviceId: string;
+  service: ManagedChild;
+  /** Line the capturing probe sits on. */
+  captureLine: number;
+  /**
+   * Line the counter sits on, one statement earlier.
+   *
+   * The Node agent cannot arm two probes on the same line — V8 refuses a second
+   * `setBreakpointByUrl` at a location that already has a breakpoint — so these
+   * phases put the counter one line above the capturing probe. Both lines run
+   * once per payment and the hit budget is per agent rather than per line, so
+   * the totals and the limiting behaviour are unchanged.
+   */
+  counterLine: number;
+}
+
+/** Counts the agent's reports of a batch the broker refused. */
+function rejectionLines(output: string): string[] {
+  return output
+    .split(/\r?\n/u)
+    .filter((line) => line.includes("BROKER ERROR") && line.includes("400"));
+}
+
+/**
+ * Proves the hit budget bounds capture cost rather than counting.
+ *
+ * A counter and a log probe share one line. The burst runs far above the
+ * budget, so the log probe — which has to capture to render its message — must
+ * lose hits, while the counter, which reads nothing, must record every one.
+ * Asserting the counter alone would pass even with no limiter running, so the
+ * dropped captures are what give the exact total its meaning.
+ */
+async function counterExactnessPhase(
+  phase: PhaseContext,
+): Promise<{ counterTotal: number; logCaptures: number }> {
+  const common = {
+    serviceId: phase.serviceId,
+    file: "src/payments.ts",
+    line: phase.captureLine,
+    ttlSeconds: 120,
+    createdBy: "e2e:payment-service",
+  };
+  const counterId = await createProbe(phase.brokerUrl, {
+    ...common,
+    line: phase.counterLine,
+    type: "counter",
+    hitLimit: 10_000,
+  });
+  const logId = await createProbe(phase.brokerUrl, {
+    ...common,
+    type: "log",
+    template: "paying ${amountCents}",
+    hitLimit: 10_000,
+  });
+  try {
+    await waitArmed(phase.brokerUrl, counterId);
+    await waitArmed(phase.brokerUrl, logId);
+    await burst(
+      phase.serviceUrl,
+      Array.from({ length: COUNTER_BURST }, () => 2_500),
+      "counter-burst",
+    );
+
+    // Waiting for "at least" and then asserting equality reports an overcount
+    // as a failed assertion rather than as a timeout.
+    const total = await waitFor("counter total to reach the burst size", 20_000, async () => {
+      const observed = await counterTotal(phase.brokerUrl, counterId);
+      return observed >= COUNTER_BURST ? observed : null;
+    });
+    assert.equal(
+      total,
+      COUNTER_BURST,
+      `counter recorded ${String(total)} hits for ${String(COUNTER_BURST)} requests`,
+    );
+
+    const logs = await probeEvents<LogEvent>(phase.brokerUrl, logId, "log");
+    assert.ok(logs.length > 0, "log probe on the same line captured nothing");
+    assert.ok(
+      logs.length < COUNTER_BURST,
+      "the hit budget dropped no captures, so the exact counter total does " +
+        "not demonstrate anything about rate limiting",
+    );
+    assert.ok(
+      logs.some((event) => event.message === "paying 2500"),
+      `log template did not render live locals: ${JSON.stringify(logs.slice(0, 3))}`,
+    );
+    return { counterTotal: total, logCaptures: logs.length };
+  } finally {
+    await deleteProbe(phase.brokerUrl, logId);
+    await deleteProbe(phase.brokerUrl, counterId);
+  }
+}
+
+/**
+ * Checks metric aggregation and log rendering below the hit budget.
+ *
+ * Spacing the requests under the budget keeps the limiter out of the picture,
+ * so every field is predictable from the request bodies alone.
+ */
+async function metricAndLogPhase(
+  phase: PhaseContext,
+): Promise<{ samples: number; sum: number }> {
+  const common = {
+    serviceId: phase.serviceId,
+    file: "src/payments.ts",
+    line: phase.captureLine,
+    ttlSeconds: 120,
+    createdBy: "e2e:payment-service",
+  };
+  const metricId = await createProbe(phase.brokerUrl, {
+    ...common,
+    type: "metric",
+    metricPath: "amountCents",
+    hitLimit: 10_000,
+  });
+  try {
+    await waitArmed(phase.brokerUrl, metricId);
+    await burst(
+      phase.serviceUrl,
+      METRIC_AMOUNTS,
+      "metric-burst",
+      METRIC_SPACING_MS,
+    );
+
+    const metrics = await waitFor("metric aggregate to cover the burst", 20_000, async () => {
+      const events = await probeEvents<MetricEvent>(
+        phase.brokerUrl,
+        metricId,
+        "metric",
+      );
+      const observed = events.reduce((count, event) => count + event.count, 0);
+      return observed >= METRIC_AMOUNTS.length ? events : null;
+    });
+    const samples = metrics.reduce((count, event) => count + event.count, 0);
+    const sum = metrics.reduce((total, event) => total + event.sum, 0);
+    assert.equal(samples, METRIC_AMOUNTS.length);
+    assert.equal(sum, METRIC_AMOUNTS.reduce((a, b) => a + b, 0));
+    assert.equal(Math.min(...metrics.map((event) => event.min)), Math.min(...METRIC_AMOUNTS));
+    assert.equal(Math.max(...metrics.map((event) => event.max)), Math.max(...METRIC_AMOUNTS));
+
+    return { samples, sum };
+  } finally {
+    await deleteProbe(phase.brokerUrl, metricId);
+  }
+}
+
+/**
+ * Checks log rendering below the hit budget.
+ *
+ * This runs after the metric phase rather than beside it: both have to capture,
+ * both therefore have to sit on the capture line, and the Node agent cannot arm
+ * two probes at one location.
+ */
+async function logPhase(phase: PhaseContext): Promise<number> {
+  const logId = await createProbe(phase.brokerUrl, {
+    serviceId: phase.serviceId,
+    file: "src/payments.ts",
+    line: phase.captureLine,
+    ttlSeconds: 120,
+    createdBy: "e2e:payment-service",
+    type: "log",
+    template: "payment amount=${amountCents}",
+    logLevel: "warn",
+    hitLimit: 10_000,
+  });
+  try {
+    await waitArmed(phase.brokerUrl, logId);
+    await burst(phase.serviceUrl, METRIC_AMOUNTS, "log-burst", METRIC_SPACING_MS);
+    const logs = await waitFor("one log event per request", 20_000, async () => {
+      const events = await probeEvents<LogEvent>(phase.brokerUrl, logId, "log");
+      return events.length >= METRIC_AMOUNTS.length ? events : null;
+    });
+    assert.deepEqual(
+      logs.map((event) => event.message).sort(),
+      METRIC_AMOUNTS.map((amount) => `payment amount=${String(amount)}`).sort(),
+    );
+    assert.ok(
+      logs.every((event) => event.level === "warn"),
+      "log level did not survive the round trip",
+    );
+    return logs.length;
+  } finally {
+    await deleteProbe(phase.brokerUrl, logId);
+  }
+}
+
+/**
+ * Proves one rejected event no longer discards the batch around it.
+ *
+ * Deleting a probe the agent has already armed is the realistic way a flush
+ * turns poisonous: the agent keeps emitting until its next poll, and the broker
+ * refuses any event naming a probe it no longer knows. Validation covers the
+ * whole request body, so that single stale event returns HTTP 400 for the
+ * entire batch without saying which event was at fault. The counter sharing the
+ * line has to survive it.
+ */
+async function ingestIsolationPhase(
+  phase: PhaseContext,
+): Promise<{ counterTotal: number; rejection: string }> {
+  const common = {
+    serviceId: phase.serviceId,
+    file: "src/payments.ts",
+    line: phase.captureLine,
+    ttlSeconds: 120,
+    createdBy: "e2e:payment-service",
+  };
+  const counterId = await createProbe(phase.brokerUrl, {
+    ...common,
+    line: phase.counterLine,
+    type: "counter",
+    hitLimit: 10_000,
+  });
+  const poisonId = await createProbe(phase.brokerUrl, {
+    ...common,
+    type: "log",
+    template: "stale ${amountCents}",
+    // One hit, so the flush carries a single stale event. Isolation is
+    // deliberately bounded at a handful of splits per flush, and a batch that
+    // is mostly poison exhausts that budget and takes valid events down with
+    // it — the documented trade-off, not the behaviour under test here.
+    hitLimit: 1,
+  });
+  try {
+    await waitArmed(phase.brokerUrl, counterId);
+    await waitArmed(phase.brokerUrl, poisonId);
+    const before = rejectionLines(phase.service.output()).length;
+    // Delete, then burst without pausing: the agent polls once a second, so the
+    // opening requests still emit for a probe the broker has already forgotten,
+    // and those events sit in the same buffer as the counter aggregate.
+    await deleteProbe(phase.brokerUrl, poisonId);
+    await burst(
+      phase.serviceUrl,
+      Array.from({ length: COUNTER_BURST }, () => 2_500),
+      "isolation-burst",
+    );
+
+    const rejection = await waitFor(
+      "the broker to refuse the batch carrying the stale event",
+      20_000,
+      async () => {
+        const lines = rejectionLines(phase.service.output());
+        return lines.length > before ? (lines.at(-1) ?? null) : null;
+      },
+    );
+
+    const total = await waitFor(
+      "counter total to survive the rejected batch",
+      25_000,
+      async () => {
+        const observed = await counterTotal(phase.brokerUrl, counterId);
+        return observed >= COUNTER_BURST ? observed : null;
+      },
+    );
+    assert.equal(
+      total,
+      COUNTER_BURST,
+      `counter recorded ${String(total)} hits for ${String(COUNTER_BURST)} ` +
+        "requests flushed alongside a rejected event",
+    );
+    return { counterTotal: total, rejection: rejection.trim() };
+  } finally {
+    await deleteProbe(phase.brokerUrl, counterId);
+  }
 }
 
 test(
@@ -345,6 +753,41 @@ test(
         )}->${String(afterHit.counters.requests)}->${String(
           afterContinuedTraffic.counters.requests,
         )}`,
+      );
+
+      // The remaining phases assert exact totals against bursts they drive
+      // themselves, so the background traffic has to stop and its in-flight
+      // payments have to land first.
+      await stopChild(traffic);
+      children.splice(children.indexOf(traffic), 1);
+      await drain(serviceUrl);
+
+      const phase: PhaseContext = {
+        brokerUrl,
+        serviceUrl,
+        serviceId,
+        service,
+        captureLine: probeLine,
+        counterLine: await findProbeLine(
+          sourcePaymentsPath,
+          "LIVEPROBE_COUNTER_TARGET",
+        ),
+      };
+      const counters = await counterExactnessPhase(phase);
+      context.diagnostic(
+        `counter exactness: ${String(counters.counterTotal)} counted, ` +
+          `${String(counters.logCaptures)} captured of ${String(COUNTER_BURST)}`,
+      );
+      const metrics = await metricAndLogPhase(phase);
+      context.diagnostic(
+        `metric: ${String(metrics.samples)} samples summing ${String(metrics.sum)}`,
+      );
+      const logCount = await logPhase(phase);
+      context.diagnostic(`log: ${String(logCount)} rendered messages`);
+      const isolation = await ingestIsolationPhase(phase);
+      context.diagnostic(
+        `ingest isolation: ${String(isolation.counterTotal)} counted through ` +
+          `"${isolation.rejection}"`,
       );
     } catch (error: unknown) {
       const logs = children

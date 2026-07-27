@@ -40,6 +40,7 @@ public final class BridgeTests {
         testSafeExpressionValidation();
         testExpressionIntegrations();
         testIngestRetryClassification();
+        testIngestIsolation();
         testBrokerRoutingHeaders();
         testCanonicalSafetyConfiguration();
         testRateLimiter();
@@ -51,6 +52,66 @@ public final class BridgeTests {
         testStackLocalReadBound();
         testAbsentStackLocalInfo();
         System.out.println("BridgeTests: " + assertions + " assertions passed");
+    }
+
+    private static void testIngestIsolation() throws Exception {
+        java.util.List<java.util.Map<String, Object>> batch = new java.util.ArrayList<>();
+        for (int index = 0; index < 8; index++) {
+            batch.add(java.util.Map.of("probeId", "prb_" + index));
+        }
+
+        java.util.List<java.util.List<java.util.Map<String, Object>>> attempts =
+                new java.util.ArrayList<>();
+        IngestIsolation.Sender rejectingFive = events -> {
+            attempts.add(events);
+            for (java.util.Map<String, Object> event : events) {
+                if ("prb_5".equals(event.get("probeId"))) {
+                    throw new BrokerIngestException(400);
+                }
+            }
+        };
+
+        IngestIsolation.Result isolated = IngestIsolation.send(batch, rejectingFive);
+        assertEquals(1, isolated.rejected.size(), "only the refused event is dropped");
+        assertEquals("prb_5", isolated.rejected.get(0).get("probeId"), "the refused event");
+        assertTrue(isolated.deferred.isEmpty(), "nothing deferred for a 400");
+        // Every other event reached the broker in some accepted sub-batch.
+        java.util.Set<Object> delivered = new java.util.HashSet<>();
+        for (java.util.List<java.util.Map<String, Object>> attempt : attempts) {
+            boolean poisoned = attempt.stream()
+                    .anyMatch(event -> "prb_5".equals(event.get("probeId")));
+            if (!poisoned) {
+                attempt.forEach(event -> delivered.add(event.get("probeId")));
+            }
+        }
+        assertEquals(7, delivered.size(), "every valid event was delivered");
+
+        IngestIsolation.Result clean = IngestIsolation.send(batch, events -> {});
+        assertTrue(clean.rejected.isEmpty() && clean.deferred.isEmpty(), "a clean batch lands");
+
+        IngestIsolation.Result transientFailure = IngestIsolation.send(batch, events -> {
+            throw new java.io.IOException("connection reset");
+        });
+        assertEquals(8, transientFailure.deferred.size(), "a transient failure defers the batch");
+        assertTrue(transientFailure.rejected.isEmpty(), "a transient failure drops nothing");
+
+        // A 400 caused by a field outside `events` fails every sub-batch equally, so nothing
+        // terminates the recursion except the budget. The batch is far wider than log2 of the
+        // budget, which a per-branch depth cap would never bound — the budget has to be spent
+        // across the whole retry tree.
+        java.util.List<java.util.Map<String, Object>> wide = new java.util.ArrayList<>();
+        for (int index = 0; index < 400; index++) {
+            wide.add(java.util.Map.of("probeId", "prb_wide_" + index));
+        }
+        int[] sends = {0};
+        IngestIsolation.Result exhausted = IngestIsolation.send(wide, events -> {
+            sends[0]++;
+            throw new BrokerIngestException(400);
+        });
+        assertEquals(400, exhausted.rejected.size(), "an unsatisfiable batch is dropped whole");
+        assertTrue(
+                sends[0] <= 2 * IngestIsolation.MAX_INGEST_SPLITS + 1,
+                "the split budget bounds the retries, seen " + sends[0]);
     }
 
     private static void testJson() {
