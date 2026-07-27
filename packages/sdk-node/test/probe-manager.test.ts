@@ -689,3 +689,60 @@ describe("ProbeManager counters under rate limiting", () => {
     expect(manager.droppedHits).toBe(1);
   });
 });
+
+describe("ProbeManager counter and metric reporting", () => {
+  // Reproductions for two QA reports that no code change was made for. They
+  // exist so a regression would surface as a failure rather than a rumour.
+  it("reports a small hit count in full rather than as zero", async () => {
+    const commands: string[] = [];
+    const inspector = createInspector(commands);
+    // The default budget: five hits sit well inside it, so nothing is dropped.
+    const { manager, aggregates } = setup(inspector);
+    await manager.reconcile([
+      probe({ id: "prb_counter", type: "counter", watchPaths: undefined, hitLimit: 10_000 }),
+    ]);
+
+    for (let index = 0; index < 5; index += 1) {
+      manager.handlePaused(paused(["bp-10"]));
+    }
+    await nextImmediate();
+
+    expect(aggregates.flush()).toEqual([
+      expect.objectContaining({ probeId: "prb_counter", delta: 5 }),
+    ]);
+  });
+
+  it("explains why a metric expression failed instead of erroring blankly", async () => {
+    const commands: string[] = [];
+    const inspector = createInspector(commands);
+    const { manager, events } = setup(inspector);
+    await manager.reconcile([
+      probe({
+        id: "prb_metric",
+        type: "metric",
+        watchPaths: undefined,
+        // `missing` is not in scope at the probe's line.
+        metricExpression: {
+          source: "missing * 2",
+          ast: {
+            type: "binary" as const,
+            operator: "multiply" as const,
+            left: { type: "reference" as const, path: ["missing"] },
+            right: { type: "literal" as const, value: 2 },
+          },
+        },
+        hitLimit: 10,
+      }),
+    ]);
+    events.takeBatch(100_000);
+
+    manager.handlePaused(paused(["bp-10"]));
+    await nextImmediate();
+
+    const [status] = events.takeBatch(100_000);
+    expect(status).toEqual(
+      expect.objectContaining({ probeId: "prb_metric", status: "error" }),
+    );
+    expect((status as { detail?: string }).detail).toMatch(/^invalid-metric: missing \* 2/u);
+  });
+});

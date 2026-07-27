@@ -47,6 +47,11 @@ _LINE_TABLE_LOCK = threading.Lock()
 _LEADING_RELATIVE = re.compile(r"^(?:\.\./|\./|/)+")
 _REPEATED_SLASH = re.compile(r"/+")
 
+# How many times one flush may halve a rejected batch. Isolating a single bad
+# event out of a batch of N costs about log2(N) splits; the cap keeps a 400 that
+# no subset can satisfy from turning every flush into a request storm.
+_MAX_INGEST_SPLITS = 8
+
 
 def _normalize_probe_suffix(file_name: str) -> str:
     """The path suffix a probe file is matched by, as the Node agent derives it."""
@@ -987,20 +992,23 @@ class LiveProbe:
             if not matching:
                 return self._disable
 
-            for state in matching:
-                if not self._hit_bucket.consume():
-                    # The rate limit bounds capture cost, not counting. An
-                    # unconditional counter needs no capture, so it stays exact
-                    # on hot paths instead of sampling at the bucket rate.
-                    if _is_plain_counter(state.probe):
-                        self._count_without_capture(state)
-                    continue
+            active = tuple(state for state in matching if state.is_active())
+            if not active:
+                return None
+            # One line event is one capture: the frame below is read once and
+            # shared by every probe on the line, so the hit budget is charged
+            # per pause rather than per probe. Charging per probe would leave
+            # each of N probes on a line with 1/N of the configured budget.
+            if not self._hit_bucket.consume():
+                self._skip_over_budget(active)
+                return None
+
+            for state in active:
                 if (
                     state.probe.condition is not None
                     or state.probe.condition_expression is not None
                 ):
-                    if state.is_active():
-                        captures.append(ProbeCandidate(state, None))
+                    captures.append(ProbeCandidate(state, None))
                     continue
                 reservation = state.reserve()
                 if reservation is not None:
@@ -1616,6 +1624,23 @@ class LiveProbe:
             state.last_error = detail
         self._status(state, "error", detail)
 
+    def _skip_over_budget(self, states: tuple[ProbeState, ...]) -> None:
+        """Handle a line event the hit budget cannot pay to capture.
+
+        The rate limit bounds capture cost, not counting. An unconditional
+        counter needs no capture, so it stays exact on hot paths instead of
+        sampling at the bucket rate. Anything that does need a capture is a
+        dropped hit, counted once for the pause to match the Node agent.
+        """
+        dropped = False
+        for state in states:
+            if _is_plain_counter(state.probe):
+                self._count_without_capture(state)
+            else:
+                dropped = True
+        if dropped:
+            self._dropped_hits += 1
+
     def _count_without_capture(self, state: ProbeState) -> None:
         """Record a rate-limited counter hit from the monitoring callback.
 
@@ -1748,31 +1773,75 @@ class LiveProbe:
         ).encode("utf-8")
         if len(body) > capacity or not self._bandwidth_bucket.consume(len(body)):
             return
+        self._send_isolating(selected, splits=_MAX_INGEST_SPLITS, charge=False)
+
+    def _send_isolating(
+        self,
+        selected: list[tuple[str, dict[str, object]]],
+        *,
+        splits: int,
+        charge: bool,
+    ) -> None:
+        """Send a batch, narrowing a rejection to the events that caused it.
+
+        A 400 says the payload failed validation but not which event was at
+        fault, and the batch is a single request — so discarding it discards
+        every valid event alongside the bad one. Halving and retrying isolates
+        the offender instead. A 400 caused by a field outside ``events``
+        (service id, agent status) fails every subset equally, which is what
+        ``splits`` bounds.
+
+        Retry bytes are debited from the bandwidth budget but never gated on
+        it: refusing to send here would strand the batch behind an event that
+        can never be delivered.
+        """
+        payload = self._ingest_payload([event for _, event in selected])
+        body = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        if charge:
+            self._bandwidth_bucket.consume(len(body))
         try:
             self._request_json("POST", "/v1/ingest", body=body)
         except urllib.error.HTTPError as error:
-            if error.code == 400:
+            if error.code != 400:
+                self._audit(f"BROKER FLUSH ERROR HTTP {error.code}")
+                return
+            if len(selected) <= 1 or splits <= 0:
                 self._remove_selected_events(selected)
                 self._dropped_hits += len(selected)
                 self._audit(
                     f"BROKER FLUSH REJECTED HTTP 400; "
                     f"dropped {len(selected)} event(s)"
                 )
-            else:
-                self._audit(f"BROKER FLUSH ERROR HTTP {error.code}")
-            return
+                return
         except (OSError, ValueError, json.JSONDecodeError) as error:
             self._audit(f"BROKER FLUSH ERROR {type(error).__name__}")
             return
+        else:
+            self._remove_selected_events(selected)
+            return
 
-        self._remove_selected_events(selected)
+        middle = (len(selected) + 1) // 2
+        self._send_isolating(selected[:middle], splits=splits - 1, charge=True)
+        self._send_isolating(selected[middle:], splits=splits - 1, charge=True)
 
     def _remove_selected_events(
         self, selected: list[tuple[str, dict[str, object]]]
     ) -> None:
-        normal_sent = sum(source == "event" for source, _ in selected)
-        if normal_sent:
-            del self._events[:normal_sent]
+        """Drop delivered events from the pending buffers.
+
+        Removal is by identity, not by count: a rejected batch is retried in
+        halves, so a delivered sub-batch is not necessarily a prefix of
+        ``self._events`` and a prefix delete would discard the wrong events.
+        """
+        delivered = {
+            id(event) for source, event in selected if source == "event"
+        }
+        if delivered:
+            self._events[:] = [
+                event for event in self._events if id(event) not in delivered
+            ]
         for source, event in selected:
             probe_id = event["probeId"]
             if not isinstance(probe_id, str):

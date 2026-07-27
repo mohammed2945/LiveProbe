@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from liveprobe.runtime import (
+    _MAX_INGEST_SPLITS,
     Condition,
     Limits,
     LiveProbe,
@@ -1321,3 +1322,192 @@ def test_probe_file_accepts_a_leading_relative_prefix(
         ] == ["armed"]
     finally:
         agent._uninstall_monitoring()
+
+
+def test_hit_budget_is_charged_per_pause_not_per_probe(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring, limits={"maxProbeHitsPerSecond": 1})
+    agent._install_monitoring()
+    try:
+        # Three probes on one line share a single frame read, so one token pays
+        # for all of them. Charging per probe would leave each with 1/3 of the
+        # configured budget.
+        agent._reconcile(
+            [
+                probe("prb_one", "snapshot"),
+                probe("prb_two", "snapshot"),
+                probe("prb_three", "snapshot"),
+            ]
+        )
+        agent._drain_queue()
+
+        trigger(agent)
+        agent._drain_queue()
+
+        assert sorted(
+            event["probeId"]
+            for event in agent._events
+            if event["type"] == "snapshot"
+        ) == ["prb_one", "prb_three", "prb_two"]
+    finally:
+        agent._uninstall_monitoring()
+
+
+def test_over_budget_pause_counts_one_dropped_hit(fake_monitoring: Any) -> None:
+    agent = make_agent(fake_monitoring, limits={"maxProbeHitsPerSecond": 1})
+    agent._install_monitoring()
+    try:
+        agent._reconcile(
+            [probe("prb_one", "snapshot"), probe("prb_two", "snapshot")]
+        )
+        agent._drain_queue()
+        # Drain the token the bucket starts full with.
+        trigger(agent)
+        agent._drain_queue()
+
+        trigger(agent)
+        agent._drain_queue()
+
+        # One pause was refused, not one per probe on the line.
+        assert agent._dropped_hits == 1
+    finally:
+        agent._uninstall_monitoring()
+
+
+def _rejecting_request_json(
+    poison: str, attempts: list[list[str]]
+) -> Any:
+    """A ``_request_json`` stub that 400s any batch holding ``poison``."""
+
+    def request_json(
+        method: str, path: str, body: bytes | None = None
+    ) -> dict[str, object]:
+        if path != "/v1/ingest" or body is None:
+            return {}
+        events = json.loads(body.decode("utf-8"))["events"]
+        attempts.append([event["probeId"] for event in events])
+        if any(event["probeId"] == poison for event in events):
+            raise urllib.error.HTTPError(
+                "http://broker/v1/ingest", 400, "Bad Request", {}, None  # type: ignore[arg-type]
+            )
+        return {"accepted": len(events)}
+
+    return request_json
+
+
+def _pending_log(probe_id: str) -> dict[str, object]:
+    return {
+        "probeId": probe_id,
+        "type": "log",
+        "ts": "2026-07-27T12:00:00.000Z",
+        "message": "hello",
+        "level": "info",
+    }
+
+
+def test_rejected_batch_drops_only_the_offending_event(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring)
+    agent._events.extend(_pending_log(f"prb_{index}") for index in range(8))
+    attempts: list[list[str]] = []
+    agent._request_json = _rejecting_request_json("prb_5", attempts)  # type: ignore[method-assign]
+
+    agent._flush()
+
+    assert agent._events == []
+    assert agent._dropped_hits == 1
+    delivered = {
+        probe_id
+        for attempt in attempts
+        if "prb_5" not in attempt
+        for probe_id in attempt
+    }
+    assert delivered == {f"prb_{index}" for index in range(8)} - {"prb_5"}
+    # Bisecting eight events costs a handful of requests, not one per event.
+    assert len(attempts) <= 9
+
+
+def test_rejection_no_subset_can_satisfy_stops_splitting(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring)
+    agent._events.extend(_pending_log(f"prb_{index}") for index in range(8))
+    attempts: list[list[str]] = []
+
+    def always_rejecting(
+        method: str, path: str, body: bytes | None = None
+    ) -> dict[str, object]:
+        # A 400 caused by a field outside "events" — a bad service id, say —
+        # fails every sub-batch equally, so splitting can never converge.
+        assert body is not None
+        events = json.loads(body.decode("utf-8"))["events"]
+        attempts.append([event["probeId"] for event in events])
+        raise urllib.error.HTTPError(
+            "http://broker/v1/ingest", 400, "Bad Request", {}, None  # type: ignore[arg-type]
+        )
+
+    agent._request_json = always_rejecting  # type: ignore[method-assign]
+
+    agent._flush()
+
+    assert agent._events == []
+    assert agent._dropped_hits == 8
+    # Bounded by the split budget rather than one request per event forever.
+    assert len(attempts) <= 2 * _MAX_INGEST_SPLITS + 1
+
+
+def test_transient_failure_keeps_the_batch_for_retry(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring)
+    agent._events.extend(_pending_log(f"prb_{index}") for index in range(4))
+
+    def failing(
+        method: str, path: str, body: bytes | None = None
+    ) -> dict[str, object]:
+        raise urllib.error.HTTPError(
+            "http://broker/v1/ingest", 503, "Unavailable", {}, None  # type: ignore[arg-type]
+        )
+
+    agent._request_json = failing  # type: ignore[method-assign]
+
+    agent._flush()
+
+    assert [event["probeId"] for event in agent._events] == [
+        f"prb_{index}" for index in range(4)
+    ]
+    assert agent._dropped_hits == 0
+
+
+def test_partial_delivery_removes_the_events_that_were_delivered(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring)
+    agent._events.extend(_pending_log(f"prb_{index}") for index in range(4))
+
+    def half_down(
+        method: str, path: str, body: bytes | None = None
+    ) -> dict[str, object]:
+        assert body is not None
+        events = json.loads(body.decode("utf-8"))["events"]
+        probe_ids = [event["probeId"] for event in events]
+        if len(probe_ids) == 4:
+            raise urllib.error.HTTPError(
+                "http://broker/v1/ingest", 400, "Bad Request", {}, None  # type: ignore[arg-type]
+            )
+        if "prb_0" in probe_ids:
+            raise urllib.error.HTTPError(
+                "http://broker/v1/ingest", 503, "Unavailable", {}, None  # type: ignore[arg-type]
+            )
+        return {"accepted": len(probe_ids)}
+
+    agent._request_json = half_down  # type: ignore[method-assign]
+
+    agent._flush()
+
+    # The delivered half was the tail. Removing by count instead of identity
+    # would drop the head that still needs retrying and keep the tail forever.
+    assert [event["probeId"] for event in agent._events] == ["prb_0", "prb_1"]
+    assert agent._dropped_hits == 0

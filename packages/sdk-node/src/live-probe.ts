@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { BrokerClient, BrokerIngestError } from "./broker-client.js";
+import { BrokerClient } from "./broker-client.js";
 import { AggregateBuffer, EventBuffer } from "./event-buffer.js";
 import { InspectorClient } from "./inspector-client.js";
 import { ProbeManager } from "./probe-manager.js";
@@ -9,6 +9,7 @@ import { EventLoopSafetyMonitor } from "./safety-monitor.js";
 import { ScriptRegistry } from "./script-registry.js";
 import { SourceMapUploader } from "./source-map-uploader.js";
 import { normalizeSerializerConfig } from "./serializer.js";
+import { MAX_INGEST_SPLITS, ingestIsolating } from "./ingest-isolation.js";
 import type { AgentStatus, SerializerConfigInput } from "./types.js";
 
 export interface LiveProbeLimits {
@@ -460,22 +461,30 @@ export class LiveProbe {
         `${String(this.#events.droppedEvents)} queue-dropped` +
         (this.#environment === undefined ? "" : `; env=${this.#environment}`),
     };
-    try {
-      await this.#broker.ingest(
-        this.#serviceId,
-        this.#commitSha,
-        this.#commitSource,
-        agentStatus,
-        events,
-      );
-      this.#clearBrokerError();
-    } catch (error) {
-      if (error instanceof BrokerIngestError && error.statusCode === 400) {
-        this.#events.recordRejected(events);
-      } else {
-        this.#events.requeueFront(events);
-      }
-      this.#reportBrokerError(error);
+    const { rejected, deferred } = await ingestIsolating(
+      events,
+      async (batch) => {
+        try {
+          await this.#broker.ingest(
+            this.#serviceId,
+            this.#commitSha,
+            this.#commitSource,
+            agentStatus,
+            batch,
+          );
+          this.#clearBrokerError();
+        } catch (error) {
+          this.#reportBrokerError(error);
+          throw error;
+        }
+      },
+      { splits: MAX_INGEST_SPLITS },
+    );
+    if (rejected.length > 0) {
+      this.#events.recordRejected(rejected);
+    }
+    if (deferred.length > 0) {
+      this.#events.requeueFront(deferred);
     }
   }
 

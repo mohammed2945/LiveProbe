@@ -43,6 +43,7 @@ public final class BridgeTests {
         testBrokerRoutingHeaders();
         testCanonicalSafetyConfiguration();
         testRateLimiter();
+        testRateLimitedCounters();
         testFalseThenTrueHitLimit();
         testConcurrentMatchingSlots();
         testStackLineFiltering();
@@ -624,6 +625,45 @@ public final class BridgeTests {
         assertTrue(
                 String.valueOf(invalidEvent.get("detail")).contains("division-by-zero"),
                 "invalid metric status includes evaluation reason");
+    }
+
+    private static void testRateLimitedCounters() {
+        Protocol.ProbeDefinition plain =
+                Protocol.parseProbe(probeObject("prb_hot_counter", "counter"));
+        Map<String, Object> conditionalObject = probeObject("prb_cond_counter", "counter");
+        conditionalObject.put("condition", Map.of("path", "amount", "op", "gt", "value", 0L));
+        Protocol.ProbeDefinition conditional = Protocol.parseProbe(conditionalObject);
+        Protocol.ProbeDefinition snapshot =
+                Protocol.parseProbe(probeObject("prb_snapshot", "snapshot"));
+
+        assertTrue(HitProcessor.isPlainCounter(plain), "unconditional counter needs no capture");
+        assertFalse(
+                HitProcessor.isPlainCounter(conditional),
+                "conditional counter must capture to evaluate its condition");
+        assertFalse(HitProcessor.isPlainCounter(snapshot), "snapshot is not a counter");
+
+        // The breakpoint event that tripped the budget has already been
+        // delivered, so its hit is countable even though nothing was captured.
+        AggregationStore aggregations = new AggregationStore();
+        HitProcessor processor =
+                new HitProcessor(
+                        SafeSerializer.Config.defaults(), new EventBuffer(10), aggregations);
+        processor.countWithoutCapture(plain, new EmittedSlots(2), () -> {});
+        processor.countWithoutCapture(plain, new EmittedSlots(2), () -> {});
+        List<Map<String, Object>> counted = aggregations.drain();
+        assertEquals(1, counted.size(), "rate-limited counter aggregates");
+        assertEquals(2L, counted.get(0).get("delta"), "every delivered hit is counted");
+
+        // Counting still consumes the hit limit and retires the probe with it.
+        AggregationStore limited = new AggregationStore();
+        EmittedSlots slots = new EmittedSlots(1);
+        boolean[] retired = {false};
+        HitProcessor limitProcessor =
+                new HitProcessor(SafeSerializer.Config.defaults(), new EventBuffer(10), limited);
+        limitProcessor.countWithoutCapture(plain, slots, () -> retired[0] = true);
+        limitProcessor.countWithoutCapture(plain, slots, () -> retired[0] = true);
+        assertTrue(retired[0], "hit limit reached while rate limited");
+        assertEquals(1L, limited.drain().get(0).get("delta"), "hit limit bounds the count");
     }
 
     private static void testRateLimiter() {

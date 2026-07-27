@@ -682,8 +682,15 @@ final class ProbeManager implements AutoCloseable {
             eventBuffer.add(Protocol.statusEvent(
                     failed.managed().definition.id(), "error", failed.detail()));
         } else if (outcome instanceof CaptureOutcome.RateLimited limited) {
+            ManagedProbe managed = limited.managed();
+            if (HitProcessor.isPlainCounter(managed.definition)) {
+                processorExecutor.execute(() -> hitProcessor.countWithoutCapture(
+                        managed.definition,
+                        managed.emittedSlots,
+                        () -> completeMatchingLimit(managed)));
+            }
             eventBuffer.add(Protocol.statusEvent(
-                    limited.managed().definition.id(), "suspended", "hits-per-second limit"));
+                    managed.definition.id(), "suspended", "hits-per-second limit"));
             long delay = Math.max(TimeUnit.MILLISECONDS.toNanos(1), limited.waitNanos());
             safetyExecutor.schedule(
                     () -> reenable(limited.managed(), limited.request()),
@@ -1134,6 +1141,34 @@ final class HitProcessor {
         this.serializerConfig = serializerConfig;
         this.eventBuffer = eventBuffer;
         this.aggregations = aggregations;
+    }
+
+    /**
+     * Records a counter hit the hit budget refused to pay for a capture on.
+     *
+     * <p>The breakpoint event has already been delivered and an unconditional
+     * counter reads no variables, so this hit is countable even though nothing
+     * was captured. Unlike the Node and Python agents the JVM bridge disables
+     * the {@code BreakpointRequest} while over budget, so hits that occur
+     * before it is re-enabled are never delivered and cannot be counted: a JVM
+     * counter under sustained rate limiting is a floor, not an exact total.
+     */
+    void countWithoutCapture(
+            Protocol.ProbeDefinition probe, EmittedSlots emittedSlots, Runnable onLimitReached) {
+        EmittedSlots.Claim claim = emittedSlots.tryClaim();
+        if (!claim.acquired()) {
+            return;
+        }
+        if (claim.limitReached()) {
+            onLimitReached.run();
+        }
+        aggregations.increment(probe.id());
+    }
+
+    static boolean isPlainCounter(Protocol.ProbeDefinition probe) {
+        return probe.type() == Protocol.ProbeType.COUNTER
+                && probe.condition() == null
+                && probe.conditionExpression() == null;
     }
 
     void process(RawHit hit, EmittedSlots emittedSlots, Runnable onLimitReached) {

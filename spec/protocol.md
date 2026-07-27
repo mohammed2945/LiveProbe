@@ -364,6 +364,13 @@ A successful ingest returns HTTP 202:
 }
 ```
 
+Ingest validates the whole request body, so a single malformed event returns
+HTTP 400 for the entire batch without naming the offender. Agents must not treat
+that as licence to discard the batch: on a 400 they retry the events in halves
+until the rejection is isolated to the events that actually caused it, dropping
+only those. A 400 whose cause lies outside `events` fails every subset equally,
+so agents bound the number of retries per flush rather than splitting forever.
+
 Every event has `probeId`, `type`, and `ts`. Event `type` is `snapshot`, `log`,
 `counter`, `metric`, or `status`.
 
@@ -447,6 +454,20 @@ no condition reads no variables, so agents that have already paused for the hit
 count it even when the hit budget is exhausted; such probes stay exact on hot
 paths rather than sampling at the budget rate. A conditional counter has to
 capture in order to evaluate its condition and is still subject to the budget.
+
+The budget is charged per capture, not per probe. An agent that reads a frame
+once and shares it across every probe on the line charges one hit for that
+pause, so placing N probes on the same line does not leave each with 1/N of the
+configured budget. The JVM bridge is the exception by construction: each probe
+is its own breakpoint request and its own VM suspend, so there is no shared
+capture to amortise and each probe is charged individually.
+
+The JVM bridge also cannot make counters exact. Rather than resume immediately
+it disables the breakpoint request until the budget window resets — a JVM
+suspend per hit is too expensive to absorb — so hits during that window are
+never delivered and cannot be counted. It counts the hit that tripped the
+budget and reports `suspended` for the window, which makes a JVM counter under
+sustained rate limiting a floor rather than an exact total.
 
 Metric event:
 
