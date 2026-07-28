@@ -20,7 +20,7 @@ GCP_LOGS_ARGS ?= --tail=200
 	build typescript-build payment-build java-build inventory-build \
 	redaction-audit readonly-audit bench ride-analysis-bench ride-analysis-scale \
 	python-probe-bundle-bench ride-analysis-e2e ride-analysis-tracks \
-	ride-investigation-e2e ride-runtime-model-track ride-adaptive-comparison \
+	ride-investigation-smoke ride-investigation-e2e ride-runtime-model-track ride-adaptive-comparison \
 	ride-four-method-benchmark ride-four-method-benchmark-codex \
 	e2e-node e2e-python e2e-jvm \
 	demo-prerequisites demo demo-down \
@@ -119,6 +119,12 @@ ride-investigation-e2e:
 	npm --prefix packages/mcp-server run build
 	npm --prefix packages/broker run build
 	node demo/ride-analysis/e2e-investigation.mjs
+
+ride-investigation-smoke:
+	npm --prefix packages/mcp-server run build
+	npm --prefix packages/broker run build
+	LIVEPROBE_INVESTIGATION_E2E_RESULT=$${TMPDIR:-/tmp}/liveprobe-investigation-smoke.json \
+		node demo/ride-analysis/e2e-investigation.mjs
 
 ride-four-method-benchmark:
 	npm --prefix packages/mcp-server run build

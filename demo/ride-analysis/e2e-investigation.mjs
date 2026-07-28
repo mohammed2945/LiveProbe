@@ -170,8 +170,13 @@ async function waitForArmed(handlers, deployed) {
   }, "investigation probes");
 }
 
-async function waitForSnapshots(handlers, deployed, expectedTraceIds = []) {
-  await waitFor(async () => {
+async function waitForSnapshots(
+  handlers,
+  deployed,
+  expectedTraceIds = [],
+  requireEveryProbe = false,
+) {
+  return waitFor(async () => {
     const states = await Promise.all(
       deployed.probes.map(({ probe }) =>
         handlers.get_probe_data({ probe_id: probe.id, wait_seconds: 0 }),
@@ -180,14 +185,109 @@ async function waitForSnapshots(handlers, deployed, expectedTraceIds = []) {
     const snapshots = states.flatMap((state) =>
       state.events.filter((event) => event.type === "snapshot"),
     );
-    if (expectedTraceIds.length === 0) return snapshots.length > 0;
+    if (expectedTraceIds.length === 0) {
+      return snapshots.length > 0 ? snapshots : false;
+    }
     const observed = new Set(
       snapshots
         .map((event) => event.correlation?.traceId)
         .filter((traceId) => typeof traceId === "string"),
     );
-    return expectedTraceIds.every((traceId) => observed.has(traceId));
+    if (requireEveryProbe) {
+      const everyProbeObserved = states.every((state) => {
+        const probeTraceIds = new Set(
+          state.events
+            .filter((event) => event.type === "snapshot")
+            .map((event) => event.correlation?.traceId)
+            .filter((traceId) => typeof traceId === "string"),
+        );
+        return expectedTraceIds.every((traceId) =>
+          probeTraceIds.has(traceId),
+        );
+      });
+      if (!everyProbeObserved) return false;
+    }
+    return expectedTraceIds.every((traceId) => observed.has(traceId))
+      ? snapshots
+      : false;
   }, "investigation snapshots");
+}
+
+function assertTripwire(condition, message, details) {
+  if (!condition) {
+    throw new Error(
+      `${message}${details === undefined ? "" : `: ${JSON.stringify(details)}`}`,
+    );
+  }
+}
+
+function assertGraphAndFrontier(investigation) {
+  assertTripwire(
+    Number(investigation.stats?.graphNodes) > 0 &&
+      Number(investigation.stats?.graphEdges) > 0,
+    "criterion did not build a nonempty causal graph",
+    investigation.stats,
+  );
+  assertTripwire(
+    Array.isArray(investigation.graph?.runtimeTraversals) &&
+      investigation.graph.runtimeTraversals.length > 0,
+    "graph omitted runtime traversal identity",
+    investigation.graph,
+  );
+  assertTripwire(
+    investigation.probe_bundle?.sites?.length > 0,
+    "graph did not generate a deployable frontier",
+    investigation.probe_bundle,
+  );
+}
+
+function assertCanonicalDeployment(investigation, deployed) {
+  const bundle = investigation.probe_bundle;
+  assertTripwire(
+    bundle !== null && deployed.bundleId === bundle.bundle_id,
+    "deployment did not use the current immutable bundle",
+    { deployedBundle: deployed.bundleId, currentBundle: bundle?.bundle_id },
+  );
+  const sites = new Map(bundle.sites.map((site) => [site.site_id, site]));
+  assertTripwire(
+    deployed.probes.length === bundle.sites.length,
+    "deployment did not preserve the complete canonical frontier",
+    { deployed: deployed.probes.length, expected: bundle.sites.length },
+  );
+  for (const item of deployed.probes) {
+    const site = sites.get(item.siteId);
+    assertTripwire(site !== undefined, "deployed probe was not a legal site", item);
+    assertTripwire(
+      item.probe.candidateId === site.site_id &&
+        item.probe.serviceId === site.service_id &&
+        item.probe.file === site.file &&
+        item.probe.line === site.line &&
+        JSON.stringify(item.probe.watchPaths ?? []) ===
+          JSON.stringify(site.watch_paths),
+      "deployed probe location diverged from its canonical site",
+      { probe: item.probe, site },
+    );
+    assertTripwire(
+      typeof site.node_id === "string" &&
+        typeof site.function_id === "string" &&
+        site.traversal_ids.length > 0,
+      "canonical site lost graph or traversal provenance",
+      site,
+    );
+  }
+}
+
+function assertLegalAction(investigation, action) {
+  assertTripwire(
+    action !== undefined &&
+      investigation.actions.some(
+        (candidate) =>
+          candidate.action_id === action.action_id &&
+          candidate.kind === action.kind,
+      ),
+    "decision did not come from the current legal action menu",
+    { selected: action, legal: investigation.actions },
+  );
 }
 
 async function removeAll(handlers, deployedIds) {
@@ -379,15 +479,22 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
         },
       ],
     });
+    assertGraphAndFrontier(investigation);
     let totalProbes = 0;
     let failingExecutions = 0;
     let failingQuote;
-    const replay = async (label) => {
+    let correlatedOccurrences = 0;
+    let typedValues = 0;
+    let maximumDeferredFrontier = 0;
+    const appliedLegalActionKinds = new Set();
+    const replay = async (label, requireEveryProbe = false) => {
+      assertGraphAndFrontier(investigation);
       const deployed = await handlers.deploy_investigation_probes({
         repository_root: rideRoot,
         investigation_id: investigation.investigation_id,
         hit_limit: 1,
       });
+      assertCanonicalDeployment(investigation, deployed);
       totalProbes += deployed.probes.length;
       for (const { probe } of deployed.probes) deployedIds.add(probe.id);
       await waitForArmed(handlers, deployed);
@@ -416,7 +523,22 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
         throw new Error("semantic fault did not produce the inflated quote");
       }
       failingExecutions += 1;
-      await waitForSnapshots(handlers, deployed, [replayId]);
+      const snapshots = await waitForSnapshots(
+        handlers,
+        deployed,
+        [replayId],
+        requireEveryProbe,
+      );
+      assertTripwire(
+        snapshots.length > 0 &&
+          snapshots.every(
+            (event) =>
+              event.correlation?.quality === "exact-execution" &&
+              event.correlation?.traceId === replayId,
+          ),
+        "runtime captures lost the replay correlation identity",
+        snapshots.map((event) => event.correlation),
+      );
       const collected = await handlers.collect_investigation_evidence({
         repository_root: rideRoot,
         investigation_id: investigation.investigation_id,
@@ -424,6 +546,44 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
         wait_seconds: 4,
       });
       investigation = collected.investigation;
+      const occurrenceId = `trace:${replayId}`;
+      const selectedOccurrence = collected.occurrences.find(
+        (occurrence) => occurrence.occurrenceId === occurrenceId,
+      );
+      assertTripwire(
+        selectedOccurrence?.correlated === true,
+        "collector did not preserve the exact failing occurrence",
+        collected.occurrences,
+      );
+      const occurrenceDossiers = investigation.value_dossiers.filter(
+        (dossier) => dossier["occurrence_id"] === occurrenceId,
+      );
+      assertTripwire(
+        occurrenceDossiers.length > 0 &&
+          occurrenceDossiers.every(
+            (dossier) =>
+              typeof dossier["value"] === "object" &&
+              dossier["value"] !== null &&
+              typeof dossier["value"]["t"] === "string",
+          ),
+        "correlated occurrence did not produce typed values",
+        occurrenceDossiers,
+      );
+      const evidenceLog = [...investigation.decision_log]
+        .reverse()
+        .find((entry) => entry["kind"] === "EVIDENCE_RECORDED");
+      assertTripwire(
+        evidenceLog?.["occurrenceId"] === occurrenceId &&
+          evidenceLog["observationIds"].length > 0,
+        "evidence ledger lost occurrence or observation identity",
+        evidenceLog,
+      );
+      correlatedOccurrences += 1;
+      typedValues += occurrenceDossiers.length;
+      maximumDeferredFrontier = Math.max(
+        maximumDeferredFrontier,
+        Number(investigation.decision_context?.deferred?.count ?? 0),
+      );
     };
 
     await replay("initial");
@@ -467,6 +627,8 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
           `no useful unknown-first frontier: ${JSON.stringify(investigation.actions)}`,
         );
       }
+      assertLegalAction(investigation, next);
+      appliedLegalActionKinds.add(next.kind);
       investigation = await handlers.apply_investigation_decision({
         repository_root: rideRoot,
         investigation_id: investigation.investigation_id,
@@ -485,6 +647,8 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
         `unknown-first loop did not localize the surge region: ${JSON.stringify(investigation.actions)}`,
       );
     }
+    assertLegalAction(investigation, inspect);
+    appliedLegalActionKinds.add(inspect.kind);
     investigation = await handlers.apply_investigation_decision({
       repository_root: rideRoot,
       investigation_id: investigation.investigation_id,
@@ -534,6 +698,8 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
       (action) => action.kind === "CONFIRM_CANDIDATE",
     );
     if (confirm === undefined) throw new Error("candidate action missing");
+    assertLegalAction(investigation, confirm);
+    appliedLegalActionKinds.add(confirm.kind);
     investigation = await handlers.apply_investigation_decision({
       repository_root: rideRoot,
       investigation_id: investigation.investigation_id,
@@ -547,7 +713,17 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
         predictions,
       },
     });
-    await replay("confirm");
+    await replay("confirm", true);
+    assertTripwire(
+      investigation.candidate_mechanism?.status === "SUPPORTED" &&
+        investigation.candidate_mechanism.confirmation?.manifestation_seen ===
+          true &&
+        investigation.candidate_mechanism.confirmation?.predictions?.every(
+          (prediction) => prediction.matched === true,
+        ),
+      "fresh replay did not assign a supported candidate verdict",
+      investigation.candidate_mechanism,
+    );
     const complete = investigation.actions.find(
       (action) => action.kind === "COMPLETE_LOCALIZATION",
     );
@@ -564,6 +740,8 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
       .reverse()
       .find((entry) => entry["kind"] === "EVIDENCE_RECORDED");
     const evidenceRefs = evidenceLog?.["observationIds"] ?? [];
+    assertLegalAction(investigation, complete);
+    appliedLegalActionKinds.add(complete.kind);
     investigation = await handlers.apply_investigation_decision({
       repository_root: rideRoot,
       investigation_id: investigation.investigation_id,
@@ -574,6 +752,11 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
     if (investigation.status !== "LOCALIZED") {
       throw new Error(`expected LOCALIZED, got ${investigation.status}`);
     }
+    assertTripwire(
+      maximumDeferredFrontier > 0,
+      "unchosen frontier alternatives were not preserved as deferred work",
+      investigation.decision_context,
+    );
     return {
       class: 4,
       status: investigation.status,
@@ -583,6 +766,16 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
       totalProbes,
       judgmentBasis: "UNKNOWN_THEN_CONFIRMED_CANDIDATE",
       failingQuote,
+      tripwire: {
+        graphNodes: investigation.stats.graphNodes,
+        graphEdges: investigation.stats.graphEdges,
+        correlatedOccurrences,
+        typedValues,
+        maximumDeferredFrontier,
+        appliedLegalActionKinds: [...appliedLegalActionKinds].sort(),
+        canonicalDeployments: true,
+        terminalOutcome: "LOCALIZED",
+      },
       elapsedMs: Math.round(performance.now() - started),
     };
   } finally {

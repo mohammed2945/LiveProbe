@@ -1,0 +1,4 @@
+interface:
+  display_name: "LiveProbe Investigation"
+  short_description: "Trace incident values to runtime-confirmed causes"
+  default_prompt: "Use $liveprobe-investigation to localize this incident from an observability-derived starting criterion."

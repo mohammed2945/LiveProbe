@@ -9,6 +9,17 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 
+export const LIVEPROBE_AGENT_SKILL_VERSION = "liveprobe-investigation/v1.1";
+export const LIVEPROBE_DECISION_PROTOCOL = "liveprobe-adaptive-v2";
+export const INVESTIGATION_ACTION_KINDS = [
+  "FOLLOW_PATH",
+  "PROBE_REGION",
+  "INSPECT_MECHANISM",
+  "CONFIRM_CANDIDATE",
+  "COMPLETE_LOCALIZATION",
+  "HANDOFF_BOUNDARY",
+] as const;
+
 const serviceIdSchema = z.string().trim().min(1).max(200);
 const sourceFileSchema = z.string().trim().min(1).max(4_096);
 const commitHashSchema = z
@@ -54,26 +65,44 @@ export const McpConditionSchema = z
   .strict();
 
 const commonInputShape = {
-  service_id: serviceIdSchema.describe("Target service from list_services"),
+  service_id: serviceIdSchema.describe(
+    "Exact serviceId returned by list_services, for example pricing-api",
+  ),
   commit_hash: commitHashSchema.describe(
-    "User-supplied deployed commit SHA retained as audit metadata; not runtime proof",
+    "Exact deployed Git SHA supplied by observability or the operator, for example 9f41a7c2; audit metadata, not runtime proof",
   ),
   file: sourceFileSchema.describe(
-    "Source path suffix as known by the target runtime",
+    "Source path as reported by the target runtime, for example services/pricing/app.py",
   ),
-  line: z.number().int().positive().describe("One-based source line"),
+  line: z
+    .number()
+    .int()
+    .positive()
+    .describe("One-based executable source line, for example 74"),
   condition: McpConditionSchema.optional().describe(
     "Optional read-only post-capture condition; no target code is evaluated",
   ),
-  hit_limit: z.number().int().positive().optional(),
-  ttl_seconds: z.number().int().positive().optional().default(1_800),
+  hit_limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum captures before suspension, for example 1"),
+  ttl_seconds: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .default(1_800)
+    .describe("Seconds before automatic expiry, for example 300"),
   created_by: z
     .string()
     .trim()
     .min(1)
     .max(500)
     .optional()
-    .default("mcp:liveprobe"),
+    .default("mcp:liveprobe")
+    .describe("Audit actor label, for example codex:incident-42"),
 } as const;
 
 export const SetSnapshotProbeInputSchema = z
@@ -83,7 +112,9 @@ export const SetSnapshotProbeInputSchema = z
       .array(dotPathSchema)
       .max(100)
       .optional()
-      .describe("Extra dot paths to capture alongside local variables"),
+      .describe(
+        "Read-only variable paths visible at the line, for example [quote.total, user.tier]",
+      ),
   })
   .strict();
 
@@ -95,7 +126,7 @@ export const SetLogProbeInputSchema = z
       .min(1)
       .max(16_384)
       .describe(
-        "Log template with optional ${dot.path} placeholders resolved read-only",
+        "Text with read-only ${dot.path} placeholders, for example total=${quote.total}",
       ),
   })
   .strict();
@@ -108,7 +139,7 @@ export const SetMetricProbeInputSchema = z
   .object({
     ...commonInputShape,
     metric_path: dotPathSchema.describe(
-      "Dot path that resolves to the numeric value to aggregate",
+      "Numeric variable path visible at the line, for example quote.total",
     ),
   })
   .strict();
@@ -118,22 +149,37 @@ export const PingBrokerInputSchema = z.object({}).strict();
 export const GetSafetyOverviewInputSchema = z.object({}).strict();
 export const ListAuditEventsInputSchema = z
   .object({
-    limit: z.number().int().min(1).max(100).optional().default(50),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .default(50)
+      .describe("Maximum events to return, for example 25"),
     before: z
       .string()
       .datetime({ offset: true })
       .optional()
-      .describe("Return events strictly before this ISO-8601 timestamp"),
+      .describe(
+        "Return events before this cursor timestamp, for example 2026-07-28T18:30:00Z",
+      ),
   })
   .strict();
 export const ListProbesInputSchema = z
   .object({
-    service_id: serviceIdSchema.optional(),
+    service_id: serviceIdSchema
+      .optional()
+      .describe(
+        "Optional exact serviceId from list_services, for example pricing-api",
+      ),
   })
   .strict();
 export const GetProbeDataInputSchema = z
   .object({
-    probe_id: probeIdSchema,
+    probe_id: probeIdSchema.describe(
+      "Exact probe.id returned by a set/deploy/list tool, for example prb_01JAZM3Y6S8X2V4K9N7Q1T5WCE",
+    ),
     wait_seconds: z
       .number()
       .finite()
@@ -148,7 +194,9 @@ export const GetProbeDataInputSchema = z
   .strict();
 export const RemoveProbeInputSchema = z
   .object({
-    probe_id: probeIdSchema,
+    probe_id: probeIdSchema.describe(
+      "Exact probe.id returned by a set/deploy/list tool, for example prb_01JAZM3Y6S8X2V4K9N7Q1T5WCE",
+    ),
   })
   .strict();
 
@@ -157,30 +205,62 @@ const repositoryRootSchema = z
   .trim()
   .min(1)
   .max(4_096)
-  .describe("Local checkout root containing the deployed Python revision");
+  .describe(
+    "Absolute local Git checkout containing the deployed Python revision, for example /workspace/riderush",
+  );
 
 export const PrepareRepositoryAnalysisInputSchema = z
   .object({
     repository_root: repositoryRootSchema,
-    commit_hash: commitHashSchema,
+    commit_hash: commitHashSchema.describe(
+      "Exact deployed Git SHA to index, for example 9f41a7c2",
+    ),
   })
   .strict();
 
 export const AnalyzeProbeCandidatesInputSchema = z
   .object({
     repository_root: repositoryRootSchema,
-    commit_hash: commitHashSchema,
-    service_id: serviceIdSchema,
-    file: sourceFileSchema,
-    line: z.number().int().positive(),
-    watch_path: dotPathSchema.optional(),
-    expression: z.string().trim().min(1).max(4_096).optional(),
-    probe_budget: z.number().int().min(1).max(10).optional().default(5),
+    commit_hash: commitHashSchema.describe(
+      "Exact deployed Git SHA, for example 9f41a7c2",
+    ),
+    service_id: serviceIdSchema.describe(
+      "Exact serviceId returned by list_services, for example gateway-api",
+    ),
+    file: sourceFileSchema.describe(
+      "Repository-relative criterion file, for example services/gateway/app.py",
+    ),
+    line: z
+      .number()
+      .int()
+      .positive()
+      .describe("One-based criterion line, for example 83"),
+    watch_path: dotPathSchema
+      .optional()
+      .describe("Criterion value path, for example pricing.quote"),
+    expression: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4_096)
+      .optional()
+      .describe("Criterion source expression, for example pricing.quote(order)"),
+    probe_budget: z
+      .number()
+      .int()
+      .min(1)
+      .max(10)
+      .optional()
+      .default(5)
+      .describe("Maximum frontier sites per round, for example 5"),
     source_roots: z
       .array(z.string().trim().min(1).max(4_096))
       .max(50)
       .optional()
-      .default([]),
+      .default([])
+      .describe(
+        "Repository-relative Python source roots, for example [services]",
+      ),
   })
   .strict()
   .refine(
@@ -193,44 +273,103 @@ export const AnalyzeProbeCandidatesInputSchema = z
 
 const serviceMapEntrySchema = z
   .object({
-    source_root: z.string().trim().min(1).max(4_096),
-    service_id: serviceIdSchema,
+    source_root: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4_096)
+      .describe("Source prefix from prior analysis output, for example services/pricing"),
+    service_id: serviceIdSchema.describe(
+      "Exact runtime serviceId from list_services, for example pricing-api",
+    ),
   })
   .strict();
 
 export const DeployProbeFrontierInputSchema = z
   .object({
     repository_root: repositoryRootSchema,
-    plan_id: investigationIdSchema,
-    service_map: z.array(serviceMapEntrySchema).max(100).optional().default([]),
-    default_service_id: serviceIdSchema.optional(),
-    ttl_seconds: z.number().int().positive().optional().default(300),
-    hit_limit: z.number().int().positive().optional().default(1),
+    plan_id: investigationIdSchema.describe(
+      "Exact plan_id returned by analyze_probe_candidates",
+    ),
+    service_map: z
+      .array(serviceMapEntrySchema)
+      .max(100)
+      .optional()
+      .default([])
+      .describe("Maps analyzed source prefixes to list_services service IDs"),
+    default_service_id: serviceIdSchema
+      .optional()
+      .describe("Fallback exact serviceId from list_services"),
+    ttl_seconds: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .default(300)
+      .describe("Seconds before deployed frontier probes expire, for example 300"),
+    hit_limit: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .default(1)
+      .describe("Captures allowed per deployed site, normally 1"),
     created_by: z
       .string()
       .trim()
       .min(1)
       .max(500)
       .optional()
-      .default("mcp:liveprobe-analysis"),
+      .default("mcp:liveprobe-analysis")
+      .describe("Audit actor label, for example codex:incident-42"),
   })
   .strict();
 
 const candidateAssessmentSchema = z
   .object({
-    candidate_id: candidateIdSchema,
-    classification: z.enum(["good", "bad", "unknown"]),
-    occurrence_id: z.string().trim().min(1).max(500).optional(),
-    reason: z.string().trim().min(1).max(4_096).optional(),
+    candidate_id: candidateIdSchema.describe(
+      "Exact candidate_id returned by the current legacy frontier",
+    ),
+    classification: z
+      .enum(["good", "bad", "unknown"])
+      .describe("Verdict supported by captured evidence"),
+    occurrence_id: z
+      .string()
+      .trim()
+      .min(1)
+      .max(500)
+      .optional()
+      .describe("Exact correlated event occurrence ID, for example trace:replay-42"),
+    reason: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4_096)
+      .optional()
+      .describe("Short evidence-based rationale, for example total became negative"),
   })
   .strict();
 
 export const RefineProbeCandidatesInputSchema = z
   .object({
     repository_root: repositoryRootSchema,
-    plan_id: investigationIdSchema,
-    assessments: z.array(candidateAssessmentSchema).max(100).optional().default([]),
-    wait_seconds: z.number().finite().min(0).max(30).optional().default(0),
+    plan_id: investigationIdSchema.describe(
+      "Exact plan_id returned by analyze_probe_candidates",
+    ),
+    assessments: z
+      .array(candidateAssessmentSchema)
+      .max(100)
+      .optional()
+      .default([])
+      .describe("Assess only candidates from the current returned frontier"),
+    wait_seconds: z
+      .number()
+      .finite()
+      .min(0)
+      .max(30)
+      .optional()
+      .default(0)
+      .describe("Seconds to long-poll for capture data, for example 10"),
   })
   .strict();
 
@@ -250,38 +389,112 @@ const expectedTypeSchema = z.enum([
 ]);
 const serviceSelectionSchema = z
   .object({
-    source_root: z.string().trim().min(1).max(4_096),
-    service_id: serviceIdSchema,
+    source_root: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4_096)
+      .describe(
+        "Repository-relative source prefix, for example services/pricing",
+      ),
+    service_id: serviceIdSchema.describe(
+      "Exact runtime serviceId returned by list_services, for example pricing-api",
+    ),
   })
   .strict();
 
 export const StartProbeInvestigationInputSchema = z
   .object({
     repository_root: repositoryRootSchema,
-    commit_hash: commitHashSchema,
-    service_id: serviceIdSchema,
-    file: sourceFileSchema,
-    line: z.number().int().positive(),
-    symptom: z.string().trim().min(1).max(16_000),
-    watch_path: dotPathSchema.optional(),
-    expression: z.string().trim().min(1).max(4_096).optional(),
-    failure_class: failureClassSchema.optional().default("semantic"),
-    expected_type: expectedTypeSchema.optional(),
-    minimum: z.number().finite().optional(),
-    maximum: z.number().finite().optional(),
-    minimum_exclusive: z.boolean().optional().default(false),
-    maximum_exclusive: z.boolean().optional().default(false),
-    probe_budget: z.number().int().min(1).max(10).optional().default(5),
+    commit_hash: commitHashSchema.describe(
+      "Exact deployed Git SHA supplied by observability or the operator, for example 9f41a7c2",
+    ),
+    service_id: serviceIdSchema.describe(
+      "Starting exact serviceId returned by list_services, for example gateway-api",
+    ),
+    file: sourceFileSchema.describe(
+      "Repository-relative criterion file identified from observability, for example services/gateway/app.py",
+    ),
+    line: z
+      .number()
+      .int()
+      .positive()
+      .describe("One-based executable criterion line, for example 83"),
+    symptom: z
+      .string()
+      .trim()
+      .min(1)
+      .max(16_000)
+      .describe(
+        "Observed failure for the selected occurrence, for example fare total is negative on trace ride-42",
+      ),
+    watch_path: dotPathSchema
+      .optional()
+      .describe(
+        "Starting value path identified at the criterion, for example pricing.quote",
+      ),
+    expression: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4_096)
+      .optional()
+      .describe(
+        "Starting source expression when a dot path is unavailable, for example pricing.quote(order)",
+      ),
+    failure_class: failureClassSchema
+      .optional()
+      .default("semantic")
+      .describe(
+        "Mechanical oracle class; use semantic when correctness requires a pre-registered hypothesis",
+      ),
+    expected_type: expectedTypeSchema
+      .optional()
+      .describe("Expected runtime shape for type_shape, for example numeric"),
+    minimum: z
+      .number()
+      .finite()
+      .optional()
+      .describe("Inclusive lower domain bound, for example 0"),
+    maximum: z
+      .number()
+      .finite()
+      .optional()
+      .describe("Inclusive upper domain bound, for example 10000"),
+    minimum_exclusive: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Whether the minimum bound is strict"),
+    maximum_exclusive: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Whether the maximum bound is strict"),
+    probe_budget: z
+      .number()
+      .int()
+      .min(1)
+      .max(10)
+      .optional()
+      .default(5)
+      .describe("Maximum canonical probe sites per round, for example 5"),
     source_roots: z
       .array(z.string().trim().min(1).max(4_096))
       .max(50)
       .optional()
-      .default([]),
+      .default([])
+      .describe(
+        "Repository-relative Python source roots, for example [services]",
+      ),
     ownership_map: z
       .array(serviceSelectionSchema)
       .max(100)
       .optional()
-      .default([]),
+      .default([])
+      .describe(
+        "Source-root to runtime-service mappings using service IDs from list_services",
+      ),
   })
   .strict()
   .refine(
@@ -293,87 +506,211 @@ export const StartProbeInvestigationInputSchema = z
 export const GetInvestigationInputSchema = z
   .object({
     repository_root: repositoryRootSchema,
-    investigation_id: investigationIdSchema,
-    since_revision: z.number().int().nonnegative().optional(),
-    focus_traversal_id: z.string().trim().min(1).max(500).optional(),
+    investigation_id: investigationIdSchema.describe(
+      "Exact investigation_id returned by start_probe_investigation",
+    ),
+    since_revision: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe(
+        "A prior response revision; unchanged state may return a compact delta",
+      ),
+    focus_traversal_id: z
+      .string()
+      .trim()
+      .min(1)
+      .max(500)
+      .optional()
+      .describe(
+        "Exact traversal_id from graph.runtimeTraversals, or the value behind a decision_aliases.traversals alias; do not pass a short alias such as t1",
+      ),
+  })
+  .strict();
+
+export const GetInvestigationResultInputSchema = z
+  .object({
+    repository_root: repositoryRootSchema,
+    investigation_id: investigationIdSchema.describe(
+      "Exact investigation_id returned by start_probe_investigation",
+    ),
   })
   .strict();
 
 export const DeployInvestigationProbesInputSchema = z
   .object({
     repository_root: repositoryRootSchema,
-    investigation_id: investigationIdSchema,
+    investigation_id: investigationIdSchema.describe(
+      "Exact investigation_id returned by start_probe_investigation",
+    ),
     service_map: z
       .array(serviceSelectionSchema)
       .max(100)
       .optional()
-      .default([]),
-    default_service_id: serviceIdSchema.optional(),
-    ttl_seconds: z.number().int().positive().optional().default(300),
-    hit_limit: z.number().int().positive().optional().default(1),
+      .default([])
+      .describe(
+        "Compatibility-only field; persistent investigation bundles ignore overrides and use canonical site service IDs established by start ownership_map",
+      ),
+    default_service_id: serviceIdSchema
+      .optional()
+      .describe(
+        "Compatibility-only field ignored for persistent bundles; canonical site service IDs are authoritative",
+      ),
+    ttl_seconds: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .default(300)
+      .describe("Seconds before the current bundle expires, for example 300"),
+    hit_limit: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .default(1)
+      .describe("Captures per canonical site, normally 1 for a replay"),
     created_by: z
       .string()
       .trim()
       .min(1)
       .max(500)
       .optional()
-      .default("mcp:liveprobe-investigation"),
+      .default("mcp:liveprobe-investigation")
+      .describe("Audit actor label, for example codex:incident-42"),
   })
   .strict();
 
 const occurrenceSelectionSchema = z
   .object({
-    occurrence_id: z.string().trim().min(1).max(500),
+    occurrence_id: z
+      .string()
+      .trim()
+      .min(1)
+      .max(500)
+      .describe(
+        "Exact propagated identity for the failing replay, for example trace:investigation-semantic-fail-2",
+      ),
   })
   .strict();
 
 export const CollectInvestigationEvidenceInputSchema = z
   .object({
     repository_root: repositoryRootSchema,
-    investigation_id: investigationIdSchema,
+    investigation_id: investigationIdSchema.describe(
+      "Exact investigation_id returned by start_probe_investigation",
+    ),
     occurrences: z
       .array(occurrenceSelectionSchema)
       .max(1)
       .optional()
-      .default([]),
-    wait_seconds: z.number().finite().min(0).max(30).optional().default(0),
+      .default([])
+      .describe(
+        "Zero or one failing occurrence selected by exact propagated identity; never synthesize this ID",
+      ),
+    wait_seconds: z
+      .number()
+      .finite()
+      .min(0)
+      .max(30)
+      .optional()
+      .default(0)
+      .describe("Seconds to long-poll for matching captures, for example 10"),
   })
   .strict();
 
 const candidatePredictionSchema = z
   .object({
-    probe_candidate_id: z.string().trim().min(1).max(500),
-    watch_path: dotPathSchema,
-    operator: z.enum(["eq", "ne", "truthy", "falsy", "present"]),
-    expected_value: z.unknown().optional(),
+    probe_candidate_id: z
+      .string()
+      .trim()
+      .min(1)
+      .max(500)
+      .describe(
+        "Exact probe candidate ID supplied by the current mechanism_context",
+      ),
+    watch_path: dotPathSchema.describe(
+      "Exact watch path supplied for that probe candidate",
+    ),
+    operator: z
+      .enum(["eq", "ne", "truthy", "falsy", "present"])
+      .describe("Pre-registered comparison for the fresh confirmation replay"),
+    expected_value: z
+      .unknown()
+      .optional()
+      .describe("Expected JSON value when required by eq or ne"),
   })
   .strict();
 
 const candidateMechanismSchema = z
   .object({
-    statement: z.string().trim().min(1).max(4_000),
+    statement: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4_000)
+      .describe("Falsifiable mechanism statement, for example surge_poison is true"),
     anchor_node_ids: z
       .array(z.string().trim().min(1).max(500))
       .min(1)
-      .max(8),
-    traversal_id: z.string().trim().min(1).max(500),
-    predictions: z.array(candidatePredictionSchema).min(1).max(9),
+      .max(8)
+      .describe(
+        "Exact canonical node IDs supplied by mechanism_context.statements",
+      ),
+    traversal_id: z
+      .string()
+      .trim()
+      .min(1)
+      .max(500)
+      .describe("Exact traversal ID supplied by mechanism_context"),
+    predictions: z
+      .array(candidatePredictionSchema)
+      .min(1)
+      .max(9)
+      .describe(
+        "One or more pre-registered predictions using supplied mechanism probe candidates",
+      ),
   })
   .strict();
 
 export const ApplyInvestigationDecisionInputSchema = z
   .object({
     repository_root: repositoryRootSchema,
-    investigation_id: investigationIdSchema,
-    based_on_revision: z.number().int().positive(),
-    action_ids: z.array(z.string().trim().min(1)).max(2),
-    exploration_question: z.string().trim().min(1).max(1_000).optional(),
-    candidate_mechanism: candidateMechanismSchema.optional(),
+    investigation_id: investigationIdSchema.describe(
+      "Exact investigation_id returned by start_probe_investigation",
+    ),
+    based_on_revision: z
+      .number()
+      .int()
+      .positive()
+      .describe("Exact revision from the current investigation response"),
+    action_ids: z
+      .array(z.string().trim().min(1))
+      .max(2)
+      .describe(
+        "Zero to two exact action_id values from the current actions menu; never construct IDs",
+      ),
+    exploration_question: z
+      .string()
+      .trim()
+      .min(1)
+      .max(1_000)
+      .optional()
+      .describe("Optional question describing what the selected legal action tests"),
+    candidate_mechanism: candidateMechanismSchema
+      .optional()
+      .describe(
+        "Only for CONFIRM_CANDIDATE; all anchors, traversal, and probe candidates must come from mechanism_context",
+      ),
     evidence_refs: z
       .array(z.string().trim().min(1).max(500))
       .max(100)
       .optional()
-      .default([]),
+      .default([])
+      .describe(
+        "For completion, exact observation IDs from EVIDENCE_RECORDED decision_log events",
+      ),
   })
   .strict();
 
@@ -699,14 +1036,7 @@ const investigationBundleSchema = z
 const investigationActionSchema = z
   .object({
     action_id: z.string().min(1),
-    kind: z.enum([
-      "FOLLOW_PATH",
-      "PROBE_REGION",
-      "INSPECT_MECHANISM",
-      "CONFIRM_CANDIDATE",
-      "COMPLETE_LOCALIZATION",
-      "HANDOFF_BOUNDARY",
-    ]),
+    kind: z.enum(INVESTIGATION_ACTION_KINDS),
     label: z.string(),
     reason: z.string(),
     function_id: z.string().nullable().optional(),
@@ -1207,7 +1537,7 @@ export interface ToolHandlers {
     input: z.input<typeof ApplyInvestigationDecisionInputSchema>,
   ): Promise<InvestigationView>;
   get_investigation_result(
-    input: z.input<typeof GetInvestigationInputSchema>,
+    input: z.input<typeof GetInvestigationResultInputSchema>,
   ): Promise<unknown>;
 }
 
@@ -1900,7 +2230,7 @@ export function createToolHandlers(
       );
     },
     async get_investigation_result(rawInput) {
-      const input = GetInvestigationInputSchema.parse(rawInput);
+      const input = GetInvestigationResultInputSchema.parse(rawInput);
       return analyzer.run(input.repository_root, {
         command: "get_investigation_result",
         investigationId: input.investigation_id,
@@ -1952,13 +2282,43 @@ function toolErrorResult(error: unknown): {
       ];
     }
   } else if (error instanceof AnalyzerClientError) {
-    code = "analysis_failed";
     message = error.message;
-    checks = [
-      "Install Python 3.12 and the liveprobe-analysis package beside the MCP server.",
-      "Confirm repository_root is a Git checkout at commit_hash.",
-      "Set LIVEPROBE_ANALYZER_PYTHON when Python 3.12 is not on PATH.",
-    ];
+    const normalizedMessage = error.message.toLowerCase();
+    if (normalizedMessage.includes("stale investigation decision")) {
+      code = "stale_revision";
+      retryable = true;
+      checks = [
+        "Call get_investigation_context and copy its latest revision.",
+        "Choose only action_id values present in that refreshed actions menu.",
+      ];
+    } else if (
+      normalizedMessage.includes("not available") ||
+      normalizedMessage.includes("unknown action") ||
+      normalizedMessage.includes("illegal action")
+    ) {
+      code = "illegal_action";
+      checks = [
+        "Call get_investigation_context and select an exact current action_id.",
+        "Do not construct, repair, or reuse an action ID from an older revision.",
+      ];
+    } else if (
+      normalizedMessage.includes("budget") ||
+      normalizedMessage.includes("at most 2 actions") ||
+      normalizedMessage.includes("at most 9")
+    ) {
+      code = "budget_exceeded";
+      checks = [
+        "Choose a smaller current legal frontier or fewer confirmation predictions.",
+        "Use observability only to rank the returned legal options.",
+      ];
+    } else {
+      code = "analysis_failed";
+      checks = [
+        "Install Python 3.12 and the liveprobe-analysis package beside the MCP server.",
+        "Confirm repository_root is a Git checkout containing commit_hash.",
+        "Set LIVEPROBE_ANALYZER_PYTHON when Python 3.12 is not on PATH.",
+      ];
+    }
   } else if (error instanceof z.ZodError) {
     code = "invalid_tool_input";
     message = error.issues[0]?.message ?? "tool input is invalid";
@@ -2040,8 +2400,8 @@ function withEmptyStateGuidance(value: unknown): unknown {
   return value;
 }
 
-const DEPLOYED_COMMIT_GUIDANCE =
-  "Before creating this probe, if the deployed commit SHA is not already known, ask the user for it. When possible, validate that the revision exists in the local repository and inspect source at that exact revision before choosing file and line. commit_hash is user-supplied audit metadata, not runtime proof or runtime verification of the deployed code.";
+const MANUAL_PROBE_SCOPE =
+  "This is a manual diagnostic probe: supply a known service, deployed commit, and source location. Do not use it to deploy a persistent investigation bundle; use deploy_investigation_probes, whose canonical sites are authoritative.";
 
 export function createMcpServer(
   client: BrokerClient,
@@ -2057,7 +2417,7 @@ export function createMcpServer(
     "set_snapshot_probe",
     {
       title: "Set snapshot probe",
-      description: `${DEPLOYED_COMMIT_GUIDANCE} Use when you need local variables, selected watch paths, and a bounded stack from one source line. Snapshot probes default to one hit and never evaluate code in the target runtime.`,
+      description: `${MANUAL_PROBE_SCOPE} Creates a bounded snapshot of locals, selected watch paths, and stack frames at one line. Returns {probe}; copy probe.id into get_probe_data or remove_probe.`,
       inputSchema: SetSnapshotProbeInputSchema,
       annotations: { destructiveHint: false },
     },
@@ -2068,7 +2428,7 @@ export function createMcpServer(
     "set_log_probe",
     {
       title: "Set dynamic log probe",
-      description: `${DEPLOYED_COMMIT_GUIDANCE} Use to add a temporary diagnostic log at a source line without redeploying. \${dot.path} placeholders are resolved from captured data; no target-runtime expression is evaluated.`,
+      description: `${MANUAL_PROBE_SCOPE} Creates a temporary log whose \${dot.path} placeholders are read from captured variables without evaluating target code. Returns {probe}; copy probe.id into get_probe_data or remove_probe.`,
       inputSchema: SetLogProbeInputSchema,
       annotations: { destructiveHint: false },
     },
@@ -2078,7 +2438,7 @@ export function createMcpServer(
     "set_counter_probe",
     {
       title: "Set counter probe",
-      description: `${DEPLOYED_COMMIT_GUIDANCE} Use to measure how often a source line executes. Agents pre-aggregate hits, so this is preferable to snapshots on hot paths.`,
+      description: `${MANUAL_PROBE_SCOPE} Counts executions of one source line and pre-aggregates hot-path hits. Returns {probe}; copy probe.id into get_probe_data or remove_probe.`,
       inputSchema: SetCounterProbeInputSchema,
       annotations: { destructiveHint: false },
     },
@@ -2088,7 +2448,7 @@ export function createMcpServer(
     "set_metric_probe",
     {
       title: "Set metric probe",
-      description: `${DEPLOYED_COMMIT_GUIDANCE} Use to aggregate count, sum, min, max, and last for one numeric dot path at a source line. Values are resolved read-only and pre-aggregated by the runtime agent.`,
+      description: `${MANUAL_PROBE_SCOPE} Aggregates count, sum, min, max, and last for one numeric variable path without evaluating target code. Returns {probe}; copy probe.id into get_probe_data or remove_probe.`,
       inputSchema: SetMetricProbeInputSchema,
       annotations: { destructiveHint: false },
     },
@@ -2099,7 +2459,7 @@ export function createMcpServer(
     {
       title: "List live services",
       description:
-        "List services recently seen by the broker, including runtime SDK, heartbeat time, and safety state. Use this before placing a probe to confirm the service ID.",
+        "Returns {services:[{serviceId,sdk,commitSha,lastSeen,agentStatus}]} for runtimes recently seen by the broker. Copy serviceId values into probe or investigation service fields; an empty list means no runtime is currently registered.",
       inputSchema: ListServicesInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2110,7 +2470,7 @@ export function createMcpServer(
     {
       title: "Ping broker",
       description:
-        "Check cheap broker connectivity. Use this to distinguish broker auth/connectivity failures from empty service state.",
+        "Performs a cheap authenticated broker connectivity check and returns {ok:true}. It does not prove a target service is online; use list_services for service discovery.",
       inputSchema: PingBrokerInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2121,7 +2481,7 @@ export function createMcpServer(
     {
       title: "Get safety overview",
       description:
-        "Return broker-derived per-service safety state, online status, probe status counts, and caveats about runtime semantics.",
+        "Returns per-service online state, runtime-agent health, probe status counts, and capture-semantics caveats. It is read-only and does not replace list_services when an exact serviceId is needed.",
       inputSchema: GetSafetyOverviewInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2133,7 +2493,7 @@ export function createMcpServer(
     {
       title: "List audit events",
       description:
-        "List tenant-scoped probe and service-credential control events. This read-only tool requires the LiveProbe admin role and never returns bearer secrets or captured probe values.",
+        "Returns {events:[...]} for tenant-scoped probe and service-credential control actions, newest first. Requires the LiveProbe admin role; it never returns secrets or captured runtime values.",
       inputSchema: ListAuditEventsInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2144,7 +2504,7 @@ export function createMcpServer(
     {
       title: "List probes",
       description:
-        "List probe definitions and their latest status. Filter by service to diagnose armed, suspended, expired, line-not-found, or hit-limit states.",
+        "Returns {probes:[{probe,status}]} for current probe definitions and latest states, optionally filtered by an exact serviceId. Use returned probe.id with get_probe_data or remove_probe; this does not create or redeploy probes.",
       inputSchema: ListProbesInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2159,7 +2519,7 @@ export function createMcpServer(
     {
       title: "Get probe evidence",
       description:
-        "Read retained probe events. Set wait_seconds (up to 30) to long-poll until the first event arrives, avoiding repeated polling while waiting for a line to execute.",
+        "Returns {probe,status,events} for an exact probe.id from a set, deploy, or list response. wait_seconds may long-poll up to 30 seconds; empty events require checking arm state, reachability, runtime path, and replay correlation rather than assuming a value was absent.",
       inputSchema: GetProbeDataInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2174,7 +2534,7 @@ export function createMcpServer(
     {
       title: "Remove probe",
       description:
-        "Remove a probe when enough evidence has been collected. Deletion is idempotent and causes agents to uninstall it on their next poll.",
+        "Idempotently removes the exact probe.id returned by a prior tool; runtime agents uninstall it on their next poll. It removes one probe only and does not delete an investigation or its evidence ledger.",
       inputSchema: RemoveProbeInputSchema,
       annotations: { destructiveHint: true },
     },
@@ -2185,7 +2545,7 @@ export function createMcpServer(
     {
       title: "Prepare Python data-flow index",
       description:
-        "Incrementally cache function-local CFG, def-use, and hammock fragments for the checked-out deployed Python revision. The analyzer runs locally beside this MCP server, never in the target service.",
+        "Builds or refreshes the local CFG, def-use, call, and region index for repository_root at commit_hash and returns preparation statistics. The checkout must contain that exact deployed revision; this performs no runtime capture and must precede a new persistent investigation.",
       inputSchema: PrepareRepositoryAnalysisInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2197,7 +2557,7 @@ export function createMcpServer(
     {
       title: "Start runtime-guided Python investigation",
       description:
-        "Create a persistent, reversible causal investigation at an exact deployed Python revision. ownership_map establishes service transitions for runtime traversals while canonical source regions remain shared.",
+        `Creates a persistent investigation from an observability-derived service, file, line, value, and failure criterion at an exact deployed Python commit. Returns {investigation_id,revision,graph,probe_bundle,actions,decision_context}; actions and bundle sites are legal menus, not templates. Requires prepared analysis and must not be used for cold incident discovery. Skill ${LIVEPROBE_AGENT_SKILL_VERSION}; decision protocol ${LIVEPROBE_DECISION_PROTOCOL}.`,
       inputSchema: StartProbeInvestigationInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2209,7 +2569,7 @@ export function createMcpServer(
     {
       title: "Get bounded investigation context",
       description:
-        "Return a revisioned, source-free decision packet containing focused region deltas, runtime traversal breadcrumbs, new failing evidence, and legal frontier actions.",
+        "Returns the latest revisioned investigation view: phase/status, graph focus, correlated dossiers, immutable probe_bundle, legal actions, deferred-frontier counts, and mechanism context. Call it after start or any stale_revision/illegal_action rejection; copy revision and current action_id values exactly.",
       inputSchema: GetInvestigationInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2221,7 +2581,7 @@ export function createMcpServer(
     {
       title: "Deploy investigation probe bundle",
       description:
-        "Deploy the current immutable runtime-guided probe bundle to the authoritative service IDs carried by its traversal-aware probe sites.",
+        "Deploys every site in the investigation's current immutable probe_bundle and returns the created probes with canonical site metadata. The investigation must exist and expose a nonempty bundle; never substitute model-created file/line/watch paths. Use get_investigation_context first when the bundle may have changed.",
       inputSchema: DeployInvestigationProbesInputSchema,
       annotations: { destructiveHint: false },
     },
@@ -2233,7 +2593,7 @@ export function createMcpServer(
     {
       title: "Collect correlated investigation evidence",
       description:
-        "Group captures only by exact propagated occurrence identity and record one selected failing replay occurrence into the investigation ledger.",
+        "Reads deployed bundle captures, groups them by exact propagated occurrence identity, and records at most one selected failing replay in the investigation ledger. Call after deployment and replay; occurrence_id must be the real propagated ID such as trace:replay-42. Returns a revised view with typed value dossiers and evidence events; missing captures are not negative evidence.",
       inputSchema: CollectInvestigationEvidenceInputSchema,
       annotations: { readOnlyHint: false },
     },
@@ -2245,7 +2605,7 @@ export function createMcpServer(
     {
       title: "Apply AI-SRE investigation decision",
       description:
-        "Apply revision-scoped compiler-supplied frontier actions. Exploration needs no hypothesis; a structured candidate mechanism is accepted only for final confirmation.",
+        "Applies up to two exact legal actions from the current actions menu and returns the revised investigation view. based_on_revision must equal the current revision; stale_revision or illegal_action requires refreshing context, while budget_exceeded requires a smaller returned cut. Candidate anchors/predictions are accepted only with CONFIRM_CANDIDATE, and completion evidence_refs must be returned observation IDs.",
       inputSchema: ApplyInvestigationDecisionInputSchema,
       annotations: { readOnlyHint: false },
     },
@@ -2257,8 +2617,8 @@ export function createMcpServer(
     {
       title: "Get evidence-backed investigation result",
       description:
-        "Return terminal or in-progress status, confirmed candidate mechanism, coverage gaps, decisions, and performance statistics.",
-      inputSchema: GetInvestigationInputSchema,
+        "Returns the current or terminal status, confirmed mechanism or boundary/insufficient reason, evidence/decision history, coverage gaps, and performance statistics for an existing investigation. It is read-only and does not advance the loop; use get_investigation_context for the next legal actions.",
+      inputSchema: GetInvestigationResultInputSchema,
       annotations: { readOnlyHint: true },
     },
     async (input) =>
@@ -2269,7 +2629,7 @@ export function createMcpServer(
     {
       title: "Analyze deterministic probe candidates",
       description:
-        "Compute a demand-driven backward slice from a manifestation value, group it into hammock blocks, and return a bounded frontier of probeable locations with explicit uncertainty.",
+        "Legacy stateless workflow: computes a backward slice and bounded canonical frontier from a known Python criterion, returning plan_id and candidates. Use start_probe_investigation for new agent-driven work; continue here only when a client already implements the legacy analyze/deploy/refine protocol.",
       inputSchema: AnalyzeProbeCandidatesInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2281,7 +2641,7 @@ export function createMcpServer(
     {
       title: "Deploy deterministic probe frontier",
       description:
-        "Create ordinary bounded snapshot probes for the current analysis frontier. service_map maps source-directory prefixes to online runtime service IDs.",
+        "Legacy stateless workflow: deploys the exact current frontier for plan_id and returns created probes. plan_id and source mappings must come from analyze_probe_candidates and list_services; do not invent candidate locations. Use deploy_investigation_probes for persistent investigations.",
       inputSchema: DeployProbeFrontierInputSchema,
       annotations: { destructiveHint: false },
     },
@@ -2293,7 +2653,7 @@ export function createMcpServer(
     {
       title: "Refine probe candidates",
       description:
-        "Group investigation captures only by explicit occurrence correlation and, when assessments are supplied, prune the deterministic slice into the next frontier or a localized/insufficient verdict.",
+        "Legacy stateless workflow: groups captures by explicit occurrence identity, applies assessments only to current candidate IDs, and returns the next frontier or terminal verdict. Use collect_investigation_evidence plus apply_investigation_decision for persistent investigations.",
       inputSchema: RefineProbeCandidatesInputSchema,
       annotations: { readOnlyHint: false },
     },

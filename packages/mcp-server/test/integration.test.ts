@@ -939,11 +939,55 @@ describe("Phase 1 MCP and fake-agent integration", () => {
         expect(
           (tool.inputSchema as { required?: string[] }).required,
         ).toContain("commit_hash");
-        expect(tool.description).toContain("ask the user");
-        expect(tool.description).toContain("exists in the local repository");
-        expect(tool.description).toContain("exact revision");
-        expect(tool.description).toContain("user-supplied audit metadata");
-        expect(tool.description).toContain("not runtime proof");
+        expect(tool.description).toContain("manual diagnostic probe");
+        expect(tool.description).toContain(
+          "use deploy_investigation_probes",
+        );
+        expect(tool.description).toContain("Returns {probe}");
+        const properties = (
+          tool.inputSchema as {
+            properties?: Record<string, { description?: string }>;
+          }
+        ).properties;
+        expect(properties?.["service_id"]?.description).toContain(
+          "returned by list_services",
+        );
+        expect(properties?.["commit_hash"]?.description).toContain(
+          "for example",
+        );
+      }
+
+      const byName = new Map(tools.tools.map((tool) => [tool.name, tool]));
+      const startDescription =
+        byName.get("start_probe_investigation")?.description ?? "";
+      expect(startDescription).toContain("observability-derived");
+      expect(startDescription).toContain("legal menus, not templates");
+      expect(startDescription).toContain("must not be used for cold");
+      expect(startDescription).toContain("liveprobe-investigation/v1");
+      expect(startDescription).toContain("liveprobe-adaptive-v2");
+
+      const decisionDescription =
+        byName.get("apply_investigation_decision")?.description ?? "";
+      expect(decisionDescription).toContain("based_on_revision");
+      expect(decisionDescription).toContain("stale_revision");
+      expect(decisionDescription).toContain("illegal_action");
+      expect(decisionDescription).toContain("budget_exceeded");
+
+      const actionProperties = (
+        byName.get("apply_investigation_decision")?.inputSchema as {
+          properties?: Record<string, { description?: string }>;
+        }
+      ).properties;
+      expect(actionProperties?.["based_on_revision"]?.description).toContain(
+        "current investigation response",
+      );
+      expect(actionProperties?.["action_ids"]?.description).toContain(
+        "never construct IDs",
+      );
+
+      for (const tool of tools.tools) {
+        expect(tool.description?.length ?? 0).toBeGreaterThan(80);
+        expect(tool.description?.length ?? 0).toBeLessThan(1_000);
       }
     } finally {
       await client.close();
