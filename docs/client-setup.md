@@ -317,10 +317,10 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin liveprobe
 sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe
 ```
 
-**5. Get a credential and write the config.** Native agents use their own
-credential rather than your operator key, and it is shown once. The returned
-`apiKey` carries an `lp_native_` prefix, is stored only as a hash, and is
-restricted to the listed service IDs.
+**5. Get a credential.** Native agents use their own credential rather than
+your operator key, and it is shown once. The returned `apiKey` carries an
+`lp_native_` prefix, is stored only as a hash, and is restricted to the listed
+service IDs.
 
 ```sh
 umask 077
@@ -331,8 +331,8 @@ curl --fail --silent --show-error \
   "${BROKER_URL}/v1/native-credentials"
 ```
 
-Then `/etc/liveprobe/native-agent.json`. Use the real executable path, not a
-symlink or wrapper script:
+**6. Write the config.** Save this as `/etc/liveprobe/native-agent.json`. Use
+the real executable path, not a symlink or wrapper script.
 
 ```json
 {
@@ -355,7 +355,7 @@ non-secret metadata with `GET /v1/native-credentials`. These routes require the
 broker's PostgreSQL durable store and return `503 credential_store_unavailable`
 without it.
 
-**6. Start the loader, then the agent.**
+**7. Start the loader, then the agent.**
 
 ```sh
 # Loader first. The trailing paths are the allowlist -- it will attach to
@@ -375,7 +375,7 @@ Both are long-running host daemons, so in production run them under systemd
 with the loader ordered first, and load the credential from an
 `EnvironmentFile` only root can read.
 
-#### Verify
+#### 8. Verify
 
 ```sh
 curl --fail --silent \

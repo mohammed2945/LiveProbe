@@ -59,6 +59,137 @@ function Table({
   );
 }
 
+// Each language tab on the native page is a complete standalone path, so a
+// reader never has to leave their tab to find a step. Only the build step and
+// one config value actually differ, so the shared steps live here once and are
+// parameterized. Duplicating them in the two tabs would let them drift.
+function NativeSetupPath({
+  language,
+  buildStep,
+}: {
+  language: "rust" | "cpp";
+  buildStep: ReactNode;
+}) {
+  return (
+    <>
+      <h3>1. Check the kernel</h3>
+      <CodeBlock
+        language="shell"
+        code={`uname -m                                   # x86_64
+test -r /sys/kernel/btf/vmlinux && echo "BTF ok"
+mountpoint -q /sys/kernel/tracing ||
+  sudo mount -t tracefs tracefs /sys/kernel/tracing
+sudo test -e /sys/kernel/tracing/uprobe_events && echo "uprobes ok"`}
+      />
+      <p>
+        Most current distro kernels pass. Containers usually do not, so run the
+        agent on the host.
+      </p>
+
+      <h3>2. Build your service with debug info</h3>
+      {buildStep}
+
+      <h3>3. Install the agent</h3>
+      <p>
+        No published package yet — build both binaries from the repository on a
+        machine matching the target host. Needs Rust 1.88+.
+      </p>
+      <CodeBlock
+        language="shell"
+        code={`sudo apt-get install -y --no-install-recommends \\
+  build-essential pkg-config clang llvm lld bpftool \\
+  libbpf-dev libelf-dev zlib1g-dev dwarves
+
+make native-release
+sudo make native-install`}
+      />
+      <p>
+        Installs both binaries to <code>/usr/local/bin</code> and creates{" "}
+        <code>/etc/liveprobe</code>. Override with <code>NATIVE_PREFIX</code> or
+        stage a package with <code>DESTDIR</code>.
+      </p>
+
+      <h3>4. Create the unprivileged account</h3>
+      <CodeBlock
+        language="shell"
+        code={`sudo useradd --system --no-create-home --shell /usr/sbin/nologin liveprobe
+sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe`}
+      />
+
+      <h3>5. Get a credential</h3>
+      <p>
+        Native agents use their own credential, not your operator key. It is
+        shown once, and it only works for the services you list here.
+      </p>
+      <CodeBlock
+        language="shell"
+        code={`umask 077
+curl --fail --silent --show-error \\
+  -H "Authorization: Bearer $LIVEPROBE_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  --data '{"agentId":"native-host-1","allowedServiceIds":["my-service"],"label":"Prod host 1"}' \\
+  https://liveprobe.tryastrea.tech/v1/native-credentials`}
+      />
+
+      <h3>6. Write the config</h3>
+      <p>
+        Save this as <code>/etc/liveprobe/native-agent.json</code>. Use the real
+        executable path, not a symlink or wrapper script.
+      </p>
+      <CodeBlock
+        language="json"
+        code={`{
+  "agentId": "native-host-1",
+  "brokerUrl": "https://liveprobe.tryastrea.tech",
+  "loaderSocket": "/run/liveprobe/loader.sock",
+  "services": [
+    { "serviceId": "my-service", "language": "${language}", "executablePath": "/opt/app/bin/my-service" }
+  ],
+  "redactKeys": ["tenantSecret"],
+  "redactValues": [],
+  "symbolDirectories": ["/usr/lib/debug"],
+  "debuginfodUrl": null,
+  "symbolCacheDirectory": null
+}`}
+      />
+
+      <h3>7. Start the loader, then the agent</h3>
+      <CodeBlock
+        language="shell"
+        code={`# Loader first. The trailing paths are the allowlist -- it will
+# attach to nothing else, so add a service here to probe it.
+sudo /usr/local/bin/liveprobe-bpf-loader \\
+  /run/liveprobe/loader.sock \\
+  "$(id -u liveprobe)" "$(id -g liveprobe)" \\
+  /opt/app/bin/my-service
+
+# Then the agent, as the unprivileged account.
+sudo -u liveprobe env \\
+  LIVEPROBE_NATIVE_CREDENTIAL="lp_native_<secret>" \\
+  /usr/local/bin/liveprobe-native-agent /etc/liveprobe/native-agent.json`}
+      />
+      <p>
+        Both are long-running host daemons, so in production run them under
+        systemd with the loader ordered first, and load the credential from an{" "}
+        <code>EnvironmentFile</code> only root can read.
+      </p>
+
+      <h3>8. Verify</h3>
+      <CodeBlock
+        language="shell"
+        code={`curl --fail --silent \\
+  -H "Authorization: Bearer $LIVEPROBE_API_KEY" \\
+  https://liveprobe.tryastrea.tech/v1/services | jq '.'`}
+      />
+      <p>
+        Your <code>serviceId</code> appears once the agent registers and finds a
+        running process. Now place a probe from your MCP client and you are
+        done.
+      </p>
+    </>
+  );
+}
+
 const hostedMcpConfig = `{
   "mcpServers": {
     "liveprobe": {
@@ -976,7 +1107,6 @@ java --add-modules jdk.jdi \\
       { id: "how-it-works", label: "How it works" },
       { id: "debug-info", label: "Debug info you need" },
       { id: "setup", label: "Setup" },
-      { id: "verify", label: "Verify" },
       { id: "troubleshooting", label: "Troubleshooting" },
     ],
     content: (
@@ -1047,174 +1177,73 @@ java --add-modules jdk.jdi \\
 
         <h2 id="setup">Setup</h2>
         <p>
-          Linux x86-64 only. Roughly ten minutes on a fresh host.
+          Linux x86-64 only, and about ten minutes on a fresh host. Pick your
+          language — each tab is the complete path from nothing to a probe.
         </p>
-
-        <h3>1. Check the kernel</h3>
-        <CodeBlock
-          language="shell"
-          code={`uname -m                                   # x86_64
-test -r /sys/kernel/btf/vmlinux && echo "BTF ok"
-mountpoint -q /sys/kernel/tracing ||
-  sudo mount -t tracefs tracefs /sys/kernel/tracing
-sudo test -e /sys/kernel/tracing/uprobe_events && echo "uprobes ok"`}
-        />
-        <p>
-          Most current distro kernels pass. Containers usually do not, so run
-          the agent on the host.
-        </p>
-
-        <h3>2. Build your service with debug info</h3>
         <Tabs
           tabs={[
             {
               id: "rust",
               label: "Rust",
               content: (
-                <>
-                  <p>Keep debug info in your release profile:</p>
-                  <CodeBlock
-                    language="toml"
-                    code={`# Cargo.toml
+                <NativeSetupPath
+                  language="rust"
+                  buildStep={
+                    <>
+                      <p>Keep debug info in your release profile:</p>
+                      <CodeBlock
+                        language="toml"
+                        code={`# Cargo.toml
 [profile.release]
 debug = 2
 strip = false`}
-                  />
-                  <CodeBlock
-                    language="shell"
-                    code={`cargo build --release
+                      />
+                      <CodeBlock
+                        language="shell"
+                        code={`cargo build --release
 readelf --notes target/release/my-service | grep 'Build ID:'`}
-                  />
-                  <p>
-                    Cargo emits a build ID by default; <code>strip = false</code>{" "}
-                    is what keeps it and the DWARF in place. Use{" "}
-                    <code>&quot;language&quot;: &quot;rust&quot;</code> in step 5.
-                  </p>
-                </>
+                      />
+                      <p>
+                        Cargo emits a build ID by default;{" "}
+                        <code>strip = false</code> is what keeps it and the
+                        DWARF in place.
+                      </p>
+                    </>
+                  }
+                />
               ),
             },
             {
               id: "cpp",
               label: "C++",
               content: (
-                <>
-                  <p>
-                    Compile with <code>-g</code> and ask the linker for a build
-                    ID:
-                  </p>
-                  <CodeBlock
-                    language="shell"
-                    code={`g++ -std=c++20 -O2 -g -fno-omit-frame-pointer \\
+                <NativeSetupPath
+                  language="cpp"
+                  buildStep={
+                    <>
+                      <p>
+                        Compile with <code>-g</code> and ask the linker for a
+                        build ID:
+                      </p>
+                      <CodeBlock
+                        language="shell"
+                        code={`g++ -std=c++20 -O2 -g -fno-omit-frame-pointer \\
   -Wl,--build-id=sha1 main.cpp -o my-service
 
 readelf --notes my-service | grep 'Build ID:'`}
-                  />
-                  <p>
-                    <code>--build-id</code> is not always on by default, so pass
-                    it explicitly. Use{" "}
-                    <code>&quot;language&quot;: &quot;cpp&quot;</code> in step 5.
-                  </p>
-                </>
+                      />
+                      <p>
+                        <code>--build-id</code> is not always on by default, so
+                        pass it explicitly.
+                      </p>
+                    </>
+                  }
+                />
               ),
             },
           ]}
         />
 
-        <h3>3. Install the agent</h3>
-        <p>
-          No published package yet — build both binaries from the repository on
-          a machine matching the target host. Needs Rust 1.88+.
-        </p>
-        <CodeBlock
-          language="shell"
-          code={`sudo apt-get install -y --no-install-recommends \\
-  build-essential pkg-config clang llvm lld bpftool \\
-  libbpf-dev libelf-dev zlib1g-dev dwarves
-
-make native-release
-sudo make native-install`}
-        />
-        <p>
-          Installs both binaries to <code>/usr/local/bin</code> and creates{" "}
-          <code>/etc/liveprobe</code>. Override with <code>NATIVE_PREFIX</code>{" "}
-          or stage a package with <code>DESTDIR</code>.
-        </p>
-
-        <h3>4. Create the unprivileged account</h3>
-        <CodeBlock
-          language="shell"
-          code={`sudo useradd --system --no-create-home --shell /usr/sbin/nologin liveprobe
-sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe`}
-        />
-
-        <h3>5. Get a credential and write the config</h3>
-        <p>
-          Native agents use their own credential, not your operator key. It is
-          shown once.
-        </p>
-        <CodeBlock
-          language="shell"
-          code={`umask 077
-curl --fail --silent --show-error \\
-  -H "Authorization: Bearer $LIVEPROBE_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  --data '{"agentId":"native-host-1","allowedServiceIds":["my-service"],"label":"Prod host 1"}' \\
-  https://liveprobe.tryastrea.tech/v1/native-credentials`}
-        />
-        <p>
-          Then <code>/etc/liveprobe/native-agent.json</code>. Use the real
-          executable path, not a symlink or wrapper script:
-        </p>
-        <CodeBlock
-          language="json"
-          code={`{
-  "agentId": "native-host-1",
-  "brokerUrl": "https://liveprobe.tryastrea.tech",
-  "loaderSocket": "/run/liveprobe/loader.sock",
-  "services": [
-    { "serviceId": "my-service", "language": "rust", "executablePath": "/opt/app/bin/my-service" }
-  ],
-  "redactKeys": ["tenantSecret"],
-  "redactValues": [],
-  "symbolDirectories": ["/usr/lib/debug"],
-  "debuginfodUrl": null,
-  "symbolCacheDirectory": null
-}`}
-        />
-
-        <h3>6. Start the loader, then the agent</h3>
-        <CodeBlock
-          language="shell"
-          code={`# Loader first. The trailing paths are the allowlist -- it will
-# attach to nothing else, so add a service here to probe it.
-sudo /usr/local/bin/liveprobe-bpf-loader \\
-  /run/liveprobe/loader.sock \\
-  "$(id -u liveprobe)" "$(id -g liveprobe)" \\
-  /opt/app/bin/my-service
-
-# Then the agent, as the unprivileged account.
-sudo -u liveprobe env \\
-  LIVEPROBE_NATIVE_CREDENTIAL="lp_native_<secret>" \\
-  /usr/local/bin/liveprobe-native-agent /etc/liveprobe/native-agent.json`}
-        />
-        <p>
-          Both are long-running host daemons, so in production run them under
-          systemd with the loader ordered first, and load the credential from an
-          <code>EnvironmentFile</code> only root can read.
-        </p>
-
-        <h2 id="verify">Verify</h2>
-        <CodeBlock
-          language="shell"
-          code={`curl --fail --silent \\
-  -H "Authorization: Bearer $LIVEPROBE_API_KEY" \\
-  https://liveprobe.tryastrea.tech/v1/services | jq '.'`}
-        />
-        <p>
-          Your <code>serviceId</code> appears once the agent registers and finds
-          a running process. Now place a probe from your MCP client and you are
-          done.
-        </p>
 
         <h2 id="troubleshooting">Troubleshooting</h2>
         <Table

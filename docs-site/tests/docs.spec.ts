@@ -44,15 +44,47 @@ test("native setup tabs switch between Rust and C++", async ({ page }) => {
 
   const rustTab = page.getByRole("tab", { name: "Rust" });
   const cppTab = page.getByRole("tab", { name: "C++" });
+  const rustPanel = page.getByRole("tabpanel").filter({ hasText: "Cargo.toml" });
+  const cppPanel = page
+    .getByRole("tabpanel")
+    .filter({ hasText: "-Wl,--build-id=sha1" });
 
   // Rust is the default, so a reader who never touches the control still sees
   // a complete set of instructions rather than an empty panel.
   await expect(rustTab).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByText("[profile.release]")).toBeVisible();
-  await expect(page.getByText("-Wl,--build-id=sha1")).toBeHidden();
+  await expect(rustPanel).toBeVisible();
+  await expect(cppPanel).toBeHidden();
 
   await cppTab.click();
   await expect(cppTab).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByText("-Wl,--build-id=sha1")).toBeVisible();
-  await expect(page.getByText("[profile.release]")).toBeHidden();
+  await expect(cppPanel).toBeVisible();
+  await expect(rustPanel).toBeHidden();
+});
+
+test("each native tab is a standalone path, not just the build step", async ({
+  page,
+}) => {
+  await page.goto("/docs/native");
+
+  // The whole point of the tabs is that a reader never leaves their own tab to
+  // find a step, so every shared step has to be present in both panels.
+  const sharedSteps = [
+    "1. Check the kernel",
+    "3. Install the agent",
+    "4. Create the unprivileged account",
+    "5. Get a credential",
+    "6. Write the config",
+    "7. Start the loader, then the agent",
+    "8. Verify",
+  ];
+
+  for (const label of ["Rust", "C++"]) {
+    await page.getByRole("tab", { name: label }).click();
+    const panel = page.getByRole("tabpanel").filter({ visible: true });
+    for (const step of sharedSteps) {
+      await expect(
+        panel.getByRole("heading", { name: step, exact: true }),
+      ).toBeVisible();
+    }
+  }
 });
