@@ -280,6 +280,13 @@ unsupported-architecture
 `list_probes`, and MCP `get_probe_data`. Stale status generations cannot
 terminate a newer assignment.
 
+The PostgreSQL half of that was not true when this handoff was written.
+`probe_statuses` stored one column per field and had none for `probeVersion`,
+so it — along with `armedAt` and the rest of the native status metadata — was
+dropped on every restore. It holds from the merge onto main, which stores the
+status whole in a `jsonb` column and backfills existing rows; see the
+PostgreSQL restore tests in `packages/broker/test/broker.test.ts`.
+
 The final review found and fixed one P1 ingest-ordering issue: native status
 identity and required version fields are now validated for the complete batch
 before any event is appended. A rejected request cannot leave evidence in
@@ -425,7 +432,15 @@ make native-hot-burst-test
 git diff --check
 ```
 
-Final checkpoint results:
+Final checkpoint results.
+
+These record the 2026-07-24 branch checkpoint and are superseded by the merge
+onto main; the counts below no longer match. Two rows were wrong even then: the
+broker suite fails on any machine whose clock is past 2026-07-26, because a
+native ingest-ordering test pinned literal timestamps it needed to sort after,
+and the PostgreSQL restore did not preserve status metadata. Both are fixed on
+main. The Rust, eBPF, and privileged rows have not been re-verified since —
+they need Linux x86-64.
 
 | Check | Result |
 | --- | --- |
