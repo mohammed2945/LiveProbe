@@ -58,33 +58,6 @@ function Table({
   );
 }
 
-// Rust and C++ are separate pages so each one appears in the sidebar next to
-// the Python, Node, and JVM guides. They are close enough that a reader
-// sometimes wants the other, so this strip links between them without a trip
-// back to the sidebar. Plain anchors rather than a client component: both
-// pages are prerendered, so switching language is a navigation, not state.
-function LanguageSwitch({ current }: { current: "rust" | "cpp" }) {
-  const options = [
-    { id: "rust", label: "Rust", href: "/docs/rust" },
-    { id: "cpp", label: "C++", href: "/docs/cpp" },
-  ] as const;
-
-  return (
-    <nav className="tab-list" aria-label="Choose a language">
-      {options.map((option) => (
-        <a
-          key={option.id}
-          href={option.href}
-          className={option.id === current ? "tab is-active" : "tab"}
-          aria-current={option.id === current ? "page" : undefined}
-        >
-          {option.label}
-        </a>
-      ))}
-    </nav>
-  );
-}
-
 function NativeHowItWorks() {
   return (
     <>
@@ -1247,7 +1220,6 @@ java --add-modules jdk.jdi \\
     ],
     content: (
       <>
-        <LanguageSwitch current="rust" />
         <NativeHowItWorks />
         <NativeDebugInfo />
         <h2 id="setup">Setup</h2>
@@ -1297,7 +1269,6 @@ readelf --notes target/release/my-service | grep 'Build ID:'`}
     ],
     content: (
       <>
-        <LanguageSwitch current="cpp" />
         <NativeHowItWorks />
         <NativeDebugInfo />
         <h2 id="setup">Setup</h2>

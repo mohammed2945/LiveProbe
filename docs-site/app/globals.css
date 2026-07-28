@@ -736,47 +736,6 @@ tr:last-child td {
   display: none;
 }
 
-.tabs {
-  margin: 22px 0 26px;
-}
-
-.tab-list {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--border);
-}
-
-.tab {
-  padding: 8px 15px;
-  text-decoration: none;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.tab:hover {
-  color: var(--text);
-}
-
-.tab.is-active {
-  border-bottom-color: var(--accent);
-  color: var(--accent-strong);
-}
-
-.tab-panel > :first-child {
-  margin-top: 16px;
-}
-
-.tab-panel > :last-child {
-  margin-bottom: 0;
-}
-
 @media (max-width: 1180px) {
   :root {
     --toc-width: 0px;

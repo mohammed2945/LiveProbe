@@ -51,18 +51,14 @@ test("Rust and C++ each get their own sidebar entry", async ({ page }) => {
   await expect(nav.getByRole("link", { name: "C++", exact: true })).toBeVisible();
 });
 
-test("the language switch moves between the two pages", async ({ page }) => {
+test("each language page shows only its own toolchain", async ({ page }) => {
   await page.goto("/docs/rust");
   await expect(page.getByText("[profile.release]")).toBeVisible();
+  await expect(page.getByText("-Wl,--build-id=sha1")).toHaveCount(0);
 
-  await page
-    .getByRole("navigation", { name: "Choose a language" })
-    .getByRole("link", { name: "C++" })
-    .click();
-
-  await expect(page).toHaveURL(/\/docs\/cpp\/?$/);
+  await page.goto("/docs/cpp");
   await expect(page.getByText("-Wl,--build-id=sha1")).toBeVisible();
-  await expect(page.getByText("[profile.release]")).toBeHidden();
+  await expect(page.getByText("[profile.release]")).toHaveCount(0);
 });
 
 test.describe("each language page is a standalone path", () => {
