@@ -73,8 +73,7 @@ jobs:
                 process.stdout.write(m.repository?.url ?? "")' <<<"$manifest"
             )"
             if [[ "$actual_repository" != "$expected_repository" ]]; then
-              echo "::error::${tarball} declares repository.url \
-'${actual_repository}', expected '${expected_repository}' for provenance"
+              echo "::error::${tarball} declares repository.url '${actual_repository}', expected '${expected_repository}' for provenance"
               exit 1
             fi
           done
