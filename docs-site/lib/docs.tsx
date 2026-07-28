@@ -966,6 +966,140 @@ java --add-modules jdk.jdi \\
     ),
   },
   {
+    slug: "native",
+    title: "Native agent (Rust and C++)",
+    section: "Runtime SDKs",
+    description:
+      "Attach eBPF uprobes to a compiled Linux x86-64 executable without rebuilding it against a LiveProbe library.",
+    headings: [
+      { id: "requirements", label: "Requirements" },
+      { id: "privilege", label: "Privilege boundary" },
+      { id: "credential", label: "Create a native credential" },
+      { id: "configure", label: "Configure the agent" },
+      { id: "run", label: "Start the loader and agent" },
+      { id: "limitations", label: "Current limitations" },
+    ],
+    content: (
+      <>
+        <h2 id="requirements">Requirements</h2>
+        <p>
+          Compiled services are not instrumented by an in-process SDK. A
+          host-level agent attaches eBPF uprobes to the deployed executable, so
+          the service is unmodified and needs no rebuild against a LiveProbe
+          library. The install is per host rather than per application.
+        </p>
+        <p>
+          This backend is Linux x86-64 only. The kernel needs BTF, uprobes, BPF
+          ring buffers, and tracefs. The target executable must ship DWARF debug
+          information, either inside the binary or as a separate debug file
+          reachable through <code>symbolDirectories</code> or{" "}
+          <code>debuginfod</code>. Build with <code>debug = true</code> in Cargo
+          or <code>-g</code> for C++. Release optimization is supported, and
+          inlined code resolves to its inlined site.
+        </p>
+
+        <h2 id="privilege">Privilege boundary</h2>
+        <p>
+          Two processes run per host, and the split is the security boundary.
+          Only <code>liveprobe-bpf-loader</code> is privileged: it runs as root,
+          or with the smallest loader-only capability set the host permits. The
+          agent that talks to the broker runs as a dedicated unprivileged
+          account and reaches the loader over a root-owned Unix socket.
+        </p>
+        <Callout title="Never grant BPF privileges to the agent" warning>
+          <p>
+            The loader is the only BPF-privileged process. Giving{" "}
+            <code>CAP_BPF</code> or <code>CAP_SYS_ADMIN</code> to the agent or
+            to the application collapses the boundary that keeps a compromised
+            agent from loading arbitrary programs into the kernel.
+          </p>
+        </Callout>
+
+        <h2 id="credential">Create a native credential</h2>
+        <p>
+          Native agents authenticate with their own credential type rather than
+          the shared operator key. The plaintext key is returned exactly once,
+          carries an <code>lp_native_</code> prefix, is stored by the broker
+          only as a hash, and is restricted to the listed service IDs.
+        </p>
+        <CodeBlock
+          language="shell"
+          code={`umask 077
+curl --fail --silent --show-error \\
+  -H "Authorization: Bearer $LIVEPROBE_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  --data '{"agentId":"native-host-1","allowedServiceIds":["quotes-rust"],"label":"Prod host 1"}' \\
+  https://liveprobe.tryastrea.tech/v1/native-credentials \\
+  > native-credential.json`}
+        />
+        <p>
+          List non-secret metadata with <code>GET /v1/native-credentials</code>{" "}
+          and revoke with{" "}
+          <code>DELETE /v1/native-credentials/&lt;credential-id&gt;</code>. This
+          route requires the broker&apos;s PostgreSQL durable store and returns{" "}
+          <code>503 credential_store_unavailable</code> without it.
+        </p>
+
+        <h2 id="configure">Configure the agent</h2>
+        <p>
+          Describe each service by exact executable path in{" "}
+          <code>/etc/liveprobe/native-agent.json</code>. Every service needs a
+          language.
+        </p>
+        <CodeBlock
+          language="json"
+          code={`{
+  "agentId": "native-host-1",
+  "brokerUrl": "https://liveprobe.tryastrea.tech",
+  "loaderSocket": "/run/liveprobe/loader.sock",
+  "redactKeys": ["tenantSecret"],
+  "redactValues": [],
+  "services": [
+    { "serviceId": "quotes-rust", "language": "rust", "executablePath": "/opt/quotes/bin/quotes" },
+    { "serviceId": "pricing-cpp", "language": "cpp", "executablePath": "/opt/pricing/bin/pricing" }
+  ],
+  "symbolDirectories": ["/usr/lib/debug"],
+  "debuginfodUrl": null,
+  "symbolCacheDirectory": null
+}`}
+        />
+
+        <h2 id="run">Start the loader and agent</h2>
+        <p>
+          Start the loader first, passing the unprivileged account&apos;s IDs
+          and the exact allowlist of attachable executables. The loader attaches
+          to nothing outside that list.
+        </p>
+        <CodeBlock
+          language="shell"
+          code={`sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe
+sudo /usr/local/bin/liveprobe-bpf-loader \\
+  /run/liveprobe/loader.sock \\
+  "$(id -u liveprobe)" "$(id -g liveprobe)" \\
+  /opt/quotes/bin/quotes \\
+  /opt/pricing/bin/pricing`}
+        />
+        <p>Then start the agent as that unprivileged account:</p>
+        <CodeBlock
+          language="shell"
+          code={`sudo -u liveprobe env \\
+  LIVEPROBE_NATIVE_CREDENTIAL="$(secret-tool lookup service liveprobe-native-agent)" \\
+  /usr/local/bin/liveprobe-native-agent /etc/liveprobe/native-agent.json`}
+        />
+
+        <h2 id="limitations">Current limitations</h2>
+        <p>
+          Native probes are read-only: capture never writes to target memory,
+          and the loader forbids the BPF helper that would allow it. A probe
+          that reaches its configured limit latches detached rather than
+          silently re-arming, so a hot site stays off until it is placed again.
+          Values are bounded by the capture plan rather than by the language, so
+          deeply nested structures are truncated at the recorded boundary.
+        </p>
+      </>
+    ),
+  },
+  {
     slug: "source-locations",
     title: "Source locations and maps",
     section: "Runtime SDKs",
