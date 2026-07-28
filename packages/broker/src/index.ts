@@ -2523,6 +2523,16 @@ export class BrokerState {
     const defined = statuses.filter(
       (status): status is ProbeStatus => status !== undefined,
     );
+    /**
+     * The per-instance native statuses this derives from never carry armedAt —
+     * it is broker-derived, not agent-reported. Replacing the logical status
+     * with one of them verbatim would therefore drop armedAt the moment a
+     * native probe left `armed`, making "armed, then hit its limit"
+     * indistinguishable from "never armed" for native probes only.
+     */
+    const armedAt = this.deriveNativeArmedAt(probeId, defined);
+    const withArmedAt = (status: ProbeStatus): ProbeStatus =>
+      armedAt === undefined ? status : { ...status, armedAt };
     if (
       statuses.some((status) => status === undefined) ||
       defined.some((status) => status.status === "armed")
@@ -2533,13 +2543,36 @@ export class BrokerState {
           (left, right) =>
             Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
         )[0];
-      if (armed !== undefined) this.statuses.set(probeId, armed);
+      if (armed !== undefined) this.statuses.set(probeId, withArmedAt(armed));
       return;
     }
     const latest = defined.sort(
       (left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
     )[0];
-    if (latest !== undefined) this.statuses.set(probeId, latest);
+    if (latest !== undefined) this.statuses.set(probeId, withArmedAt(latest));
+  }
+
+  /**
+   * The first time this probe was seen armed on any instance. Once set it is
+   * carried forward, so a later reconciliation over instances that have since
+   * moved past `armed` cannot unset it.
+   */
+  private deriveNativeArmedAt(
+    probeId: string,
+    statuses: ProbeStatus[],
+  ): string | undefined {
+    const existing = this.statuses.get(probeId)?.armedAt;
+    if (existing !== undefined) return existing;
+    return statuses
+      .filter((status) => status.status === "armed")
+      .reduce<string | undefined>(
+        (earliest, status) =>
+          earliest === undefined ||
+          Date.parse(status.updatedAt) < Date.parse(earliest)
+            ? status.updatedAt
+            : earliest,
+        undefined,
+      );
   }
 
   private rebuildNativeServices(scope: ResourceScope): void {

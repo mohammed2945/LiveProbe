@@ -635,4 +635,86 @@ describe("scoped native integration", () => {
       await broker.close();
     }
   });
+
+  it("keeps armedAt on a native probe that arms and then hits its limit", async () => {
+    const broker = await buildBroker({ store: false });
+    try {
+      await broker.inject({
+        method: "POST",
+        url: "/v1/native/agents/register",
+        payload: {
+          agentId: "host-a",
+          hostname: "local",
+          backend: "native-ebpf",
+          architecture: "x86_64",
+          capabilities: ["uprobe", "count", "counter"],
+          agentVersion: "0.2.0",
+        },
+      });
+      await broker.inject({
+        method: "PUT",
+        url: "/v1/native/agents/host-a/instances",
+        payload: { instances: [instance] },
+      });
+      const probe = (await broker.inject({
+        method: "POST",
+        url: "/v1/probes",
+        payload: {
+          serviceId: "orders-native",
+          sourceCommit: "abcdef1",
+          type: "counter",
+          file: "src/main.rs",
+          line: 10,
+          createdBy: "test",
+        },
+      })).json<{ probe: { id: string; version: number } }>().probe;
+
+      const armedTs = new Date().toISOString();
+      const terminalTs = new Date(Date.parse(armedTs) + 60_000).toISOString();
+      const ingestStatus = (ts: string, status: string) => broker.inject({
+        method: "POST",
+        url: "/v1/native/ingest",
+        payload: {
+          agentId: "host-a",
+          serviceId: "orders-native",
+          instanceId: instance.instanceId,
+          buildId: instance.buildId,
+          backend: "native-ebpf",
+          agentStatus: { state: "green" },
+          events: [{
+            probeId: probe.id,
+            probeVersion: probe.version,
+            type: "status",
+            ts,
+            status,
+            agentId: "host-a",
+            instanceId: instance.instanceId,
+            buildId: instance.buildId,
+          }],
+        },
+      });
+
+      expect((await ingestStatus(armedTs, "armed")).statusCode).toBe(202);
+      expect((await broker.inject({
+        method: "GET",
+        url: `/v1/probes/${probe.id}/data`,
+      })).json()).toMatchObject({
+        status: { status: "armed", armedAt: armedTs },
+      });
+
+      // The per-instance native statuses this derives from never carry
+      // armedAt, so leaving `armed` must not take it with them.
+      expect(
+        (await ingestStatus(terminalTs, "hit-limit-reached")).statusCode,
+      ).toBe(202);
+      expect((await broker.inject({
+        method: "GET",
+        url: `/v1/probes/${probe.id}/data`,
+      })).json()).toMatchObject({
+        status: { status: "hit-limit-reached", armedAt: armedTs },
+      });
+    } finally {
+      await broker.close();
+    }
+  });
 });
