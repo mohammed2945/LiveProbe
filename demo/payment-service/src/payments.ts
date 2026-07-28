@@ -57,7 +57,7 @@ export class PaymentProcessor {
     let balance: number | null = null;
 
     try {
-      balance = await pool.getBalance(user.id); // LIVEPROBE_COUNTER_TARGET
+      balance = await pool.getBalance(user.id);
       const availableBalanceCents = balance ?? 0; // LIVEPROBE_SNAPSHOT_TARGET
 
       if (availableBalanceCents < amountCents) {

@@ -319,18 +319,8 @@ interface PhaseContext {
   serviceUrl: string;
   serviceId: string;
   service: ManagedChild;
-  /** Line the capturing probe sits on. */
-  captureLine: number;
-  /**
-   * Line the counter sits on, one statement earlier.
-   *
-   * The Node agent cannot arm two probes on the same line — V8 refuses a second
-   * `setBreakpointByUrl` at a location that already has a breakpoint — so these
-   * phases put the counter one line above the capturing probe. Both lines run
-   * once per payment and the hit budget is per agent rather than per line, so
-   * the totals and the limiting behaviour are unchanged.
-   */
-  counterLine: number;
+  /** The one line every probe in these phases sits on. */
+  line: number;
 }
 
 /** Counts the agent's reports of a batch the broker refused. */
@@ -355,13 +345,12 @@ async function counterExactnessPhase(
   const common = {
     serviceId: phase.serviceId,
     file: "src/payments.ts",
-    line: phase.captureLine,
+    line: phase.line,
     ttlSeconds: 120,
     createdBy: "e2e:payment-service",
   };
   const counterId = await createProbe(phase.brokerUrl, {
     ...common,
-    line: phase.counterLine,
     type: "counter",
     hitLimit: 10_000,
   });
@@ -418,11 +407,11 @@ async function counterExactnessPhase(
  */
 async function metricAndLogPhase(
   phase: PhaseContext,
-): Promise<{ samples: number; sum: number }> {
+): Promise<{ samples: number; sum: number; logs: number }> {
   const common = {
     serviceId: phase.serviceId,
     file: "src/payments.ts",
-    line: phase.captureLine,
+    line: phase.line,
     ttlSeconds: 120,
     createdBy: "e2e:payment-service",
   };
@@ -432,8 +421,16 @@ async function metricAndLogPhase(
     metricPath: "amountCents",
     hitLimit: 10_000,
   });
+  const logId = await createProbe(phase.brokerUrl, {
+    ...common,
+    type: "log",
+    template: "payment amount=${amountCents}",
+    logLevel: "warn",
+    hitLimit: 10_000,
+  });
   try {
     await waitArmed(phase.brokerUrl, metricId);
+    await waitArmed(phase.brokerUrl, logId);
     await burst(
       phase.serviceUrl,
       METRIC_AMOUNTS,
@@ -457,36 +454,6 @@ async function metricAndLogPhase(
     assert.equal(Math.min(...metrics.map((event) => event.min)), Math.min(...METRIC_AMOUNTS));
     assert.equal(Math.max(...metrics.map((event) => event.max)), Math.max(...METRIC_AMOUNTS));
 
-    return { samples, sum };
-  } finally {
-    await deleteProbe(phase.brokerUrl, metricId);
-  }
-}
-
-/**
- * Checks log rendering below the hit budget.
- *
- * This runs after the metric phase rather than beside it. Both have to capture,
- * and the Node agent cannot arm two probes at one location — but the counter
- * line is not an escape either: capturing at `payments.ts:60` fails with
- * `inspector-capture: Maximum call stack size exceeded`, while the line below
- * it captures fine. Only the counter, which reads nothing, can sit there.
- */
-async function logPhase(phase: PhaseContext): Promise<number> {
-  const logId = await createProbe(phase.brokerUrl, {
-    serviceId: phase.serviceId,
-    file: "src/payments.ts",
-    line: phase.captureLine,
-    ttlSeconds: 120,
-    createdBy: "e2e:payment-service",
-    type: "log",
-    template: "payment amount=${amountCents}",
-    logLevel: "warn",
-    hitLimit: 10_000,
-  });
-  try {
-    await waitArmed(phase.brokerUrl, logId);
-    await burst(phase.serviceUrl, METRIC_AMOUNTS, "log-burst", METRIC_SPACING_MS);
     const logs = await waitFor("one log event per request", 20_000, async () => {
       const events = await probeEvents<LogEvent>(phase.brokerUrl, logId, "log");
       return events.length >= METRIC_AMOUNTS.length ? events : null;
@@ -499,10 +466,82 @@ async function logPhase(phase: PhaseContext): Promise<number> {
       logs.every((event) => event.level === "warn"),
       "log level did not survive the round trip",
     );
-    return logs.length;
+    return { samples, sum, logs: logs.length };
   } finally {
     await deleteProbe(phase.brokerUrl, logId);
+    await deleteProbe(phase.brokerUrl, metricId);
   }
+}
+
+/**
+ * Runs a fixed over-budget burst against N log probes on one line.
+ *
+ * Returns the smallest number of captures any single probe managed, which is
+ * the quantity the per-capture budget is supposed to leave unchanged as N grows.
+ */
+async function captureCount(
+  phase: PhaseContext,
+  probeCount: number,
+): Promise<number> {
+  const probeIds: string[] = [];
+  for (let index = 0; index < probeCount; index += 1) {
+    probeIds.push(
+      await createProbe(phase.brokerUrl, {
+        serviceId: phase.serviceId,
+        file: "src/payments.ts",
+        line: phase.line,
+        ttlSeconds: 120,
+        createdBy: "e2e:payment-service",
+        type: "log",
+        template: `capture ${String(index)} \${amountCents}`,
+        hitLimit: 10_000,
+      }),
+    );
+  }
+  try {
+    for (const probeId of probeIds) await waitArmed(phase.brokerUrl, probeId);
+    // Let the bucket refill to capacity so both measurements start level.
+    await delay(1_500);
+    await burst(
+      phase.serviceUrl,
+      Array.from({ length: COUNTER_BURST }, () => 2_500),
+      `capture-${String(probeCount)}`,
+    );
+    // The agent flushes every two seconds; this is more than one flush of slack.
+    await delay(3_000);
+    const counts = await Promise.all(
+      probeIds.map(async (probeId) =>
+        (await probeEvents<LogEvent>(phase.brokerUrl, probeId, "log")).length,
+      ),
+    );
+    return Math.min(...counts);
+  } finally {
+    for (const probeId of probeIds) await deleteProbe(phase.brokerUrl, probeId);
+  }
+}
+
+/**
+ * Proves the budget is charged per pause rather than per probe.
+ *
+ * One paused event reads the frame once and shares it with every probe on the
+ * line, so three probes should each capture about as often as one probe does.
+ * Charging per probe instead would drain the bucket three times as fast and
+ * leave each probe with roughly a third. The threshold sits halfway between
+ * those outcomes because this is a timing measurement, not an exact one.
+ */
+async function perCaptureBudgetPhase(
+  phase: PhaseContext,
+): Promise<{ alone: number; together: number }> {
+  const alone = await captureCount(phase, 1);
+  assert.ok(alone > 0, "a single log probe captured nothing");
+  const together = await captureCount(phase, 3);
+  assert.ok(
+    together * 2 > alone,
+    `each of three probes on one line captured ${String(together)} hits ` +
+      `against ${String(alone)} for a probe on its own, which is the share a ` +
+      "per-probe budget would produce",
+  );
+  return { alone, together };
 }
 
 /**
@@ -521,13 +560,12 @@ async function ingestIsolationPhase(
   const common = {
     serviceId: phase.serviceId,
     file: "src/payments.ts",
-    line: phase.captureLine,
+    line: phase.line,
     ttlSeconds: 120,
     createdBy: "e2e:payment-service",
   };
   const counterId = await createProbe(phase.brokerUrl, {
     ...common,
-    line: phase.counterLine,
     type: "counter",
     hitLimit: 10_000,
   });
@@ -769,11 +807,7 @@ test(
         serviceUrl,
         serviceId,
         service,
-        captureLine: probeLine,
-        counterLine: await findProbeLine(
-          sourcePaymentsPath,
-          "LIVEPROBE_COUNTER_TARGET",
-        ),
+        line: probeLine,
       };
       const counters = await counterExactnessPhase(phase);
       context.diagnostic(
@@ -784,8 +818,12 @@ test(
       context.diagnostic(
         `metric: ${String(metrics.samples)} samples summing ${String(metrics.sum)}`,
       );
-      const logCount = await logPhase(phase);
-      context.diagnostic(`log: ${String(logCount)} rendered messages`);
+      context.diagnostic(`log: ${String(metrics.logs)} rendered messages`);
+      const budget = await perCaptureBudgetPhase(phase);
+      context.diagnostic(
+        `per-capture budget: 1 probe captured ${String(budget.alone)}, ` +
+          `3 probes captured at least ${String(budget.together)} each`,
+      );
       const isolation = await ingestIsolationPhase(phase);
       context.diagnostic(
         `ingest isolation: ${String(isolation.counterTotal)} counted through ` +

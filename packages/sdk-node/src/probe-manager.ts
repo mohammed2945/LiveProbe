@@ -33,6 +33,41 @@ interface InstalledProbe {
   scriptId: string;
 }
 
+/**
+ * One V8 breakpoint and every probe relying on it.
+ *
+ * V8 permits a single breakpoint per resolved location, so probes are not one
+ * to one with breakpoints: several probes on the same line share one, and the
+ * breakpoint is removed only when the last of them goes away. `keys` records
+ * every location key routed here — both the location a probe asked for and the
+ * location V8 resolved it to — so the registry can be cleaned up completely.
+ */
+interface BreakpointHolder {
+  breakpointId: string;
+  keys: Set<string>;
+  probeIds: Set<string>;
+}
+
+interface ResolvedLocation {
+  scriptId?: string;
+  lineNumber?: number;
+  columnNumber?: number;
+}
+
+/**
+ * Location key in V8's own coordinates: script id, zero-based line, column.
+ *
+ * Requested and resolved locations have to produce comparable keys, and V8
+ * reports resolved lines zero-based while probe definitions are one-based.
+ */
+function locationKey(
+  scriptId: string,
+  zeroBasedLine: number,
+  column: number,
+): string {
+  return `${scriptId}:${String(zeroBasedLine)}:${String(column)}`;
+}
+
 interface ProbeManagerOptions {
   inspector: Pick<
     InspectorClient,
@@ -77,7 +112,9 @@ export class ProbeManager {
   readonly #audit: (line: string) => void;
   readonly #desired = new Map<string, ProbeDefinition>();
   readonly #installed = new Map<string, InstalledProbe>();
-  readonly #byBreakpoint = new Map<string, string>();
+  readonly #byBreakpoint = new Map<string, BreakpointHolder>();
+  readonly #byLocation = new Map<string, BreakpointHolder>();
+  readonly #arming = new Map<string, Promise<BreakpointHolder | null>>();
   readonly #exhausted = new Map<string, string>();
   readonly #installing = new Set<string>();
   readonly #lastError = new Map<string, string>();
@@ -167,17 +204,28 @@ export class ProbeManager {
   }
 
   handlePaused(paused: PausedEvent): void {
-    const candidates = (paused.hitBreakpoints ?? [])
-      .map((breakpointId) => this.#byBreakpoint.get(breakpointId))
-      .map((probeId) => (probeId === undefined ? undefined : this.#installed.get(probeId)))
-      .filter(
-        (probe): probe is InstalledProbe =>
+    // One breakpoint can serve several probes, and one pause can report several
+    // breakpoints, so a probe is deduplicated by id rather than by position.
+    const seen = new Set<string>();
+    const candidates: InstalledProbe[] = [];
+    for (const breakpointId of paused.hitBreakpoints ?? []) {
+      const holder = this.#byBreakpoint.get(breakpointId);
+      if (holder === undefined) continue;
+      for (const probeId of holder.probeIds) {
+        if (seen.has(probeId)) continue;
+        seen.add(probeId);
+        const probe = this.#installed.get(probeId);
+        if (
           probe !== undefined &&
           probe.active &&
           !this.#suspended &&
           !this.#inspectorFailed &&
-          probe.hits + probe.pending < probe.definition.hitLimit,
-      );
+          probe.hits + probe.pending < probe.definition.hitLimit
+        ) {
+          candidates.push(probe);
+        }
+      }
+    }
 
     if (candidates.length === 0) {
       this.#resumeOnly();
@@ -298,13 +346,16 @@ export class ProbeManager {
     this.#suspended = true;
     this.#epoch += 1;
     const installed = [...this.#installed.values()];
+    const holders = this.#clearBreakpointRegistry();
     this.#installed.clear();
-    this.#byBreakpoint.clear();
     for (const probe of installed) {
       probe.active = false;
       probe.pending = 0;
       this.#status(probe.definition.id, "suspended", detail);
-      await this.#removeBreakpoint(probe.breakpointId);
+    }
+    // Removed per breakpoint, not per probe: probes sharing a line share one.
+    for (const holder of holders) {
+      await this.#removeBreakpoint(holder.breakpointId);
     }
   }
 
@@ -321,14 +372,27 @@ export class ProbeManager {
     this.#stopped = true;
     this.#epoch += 1;
     const installed = [...this.#installed.values()];
+    const holders = this.#clearBreakpointRegistry();
     this.#installed.clear();
-    this.#byBreakpoint.clear();
     this.#desired.clear();
     for (const probe of installed) {
       probe.active = false;
       probe.pending = 0;
     }
-    await Promise.all(installed.map((probe) => this.#removeBreakpoint(probe.breakpointId)));
+    await Promise.all(
+      [...holders].map((holder) => this.#removeBreakpoint(holder.breakpointId)),
+    );
+  }
+
+  /** Empties the breakpoint registry and returns the breakpoints it held. */
+  #clearBreakpointRegistry(): Set<BreakpointHolder> {
+    const holders = new Set(this.#byBreakpoint.values());
+    this.#byBreakpoint.clear();
+    this.#byLocation.clear();
+    for (const holder of holders) {
+      holder.probeIds.clear();
+    }
+    return holders;
   }
 
   async #ensureArmed(probe: ProbeDefinition): Promise<void> {
@@ -361,26 +425,13 @@ export class ProbeManager {
 
     this.#installing.add(probe.id);
     try {
-      const result = await new Promise<
-        { breakpointId: string; locations: readonly unknown[] } | undefined
-      >((resolve) => {
-        this.#inspector.setBreakpointByUrl(
-          {
-            lineNumber: targetLine - 1,
-            columnNumber: targetColumn,
-            url: script.url,
-          },
-          (error, response) => {
-            if (error !== null || response === undefined) {
-              this.#error(probe, `inspector-arm: ${error?.message ?? "empty response"}`);
-              resolve(undefined);
-              return;
-            }
-            resolve(response);
-          },
-        );
-      });
-      if (result === undefined) return;
+      const holder = await this.#acquireBreakpoint(
+        probe,
+        script,
+        targetLine,
+        targetColumn,
+      );
+      if (holder === null) return;
 
       const current = this.#desired.get(probe.id);
       if (
@@ -389,18 +440,14 @@ export class ProbeManager {
         this.#stopped ||
         this.#suspended
       ) {
-        await this.#removeBreakpoint(result.breakpointId);
-        return;
-      }
-      if (result.locations.length === 0) {
-        await this.#removeBreakpoint(result.breakpointId);
-        this.#error(probe, `line-not-found: ${probe.file}:${String(probe.line)}`);
+        holder.probeIds.delete(probe.id);
+        await this.#releaseHolder(holder);
         return;
       }
 
       const installed: InstalledProbe = {
         active: true,
-        breakpointId: result.breakpointId,
+        breakpointId: holder.breakpointId,
         definition: probe,
         fingerprint: probeFingerprint,
         hits: 0,
@@ -408,7 +455,6 @@ export class ProbeManager {
         scriptId: script.scriptId,
       };
       this.#installed.set(probe.id, installed);
-      this.#byBreakpoint.set(installed.breakpointId, probe.id);
       this.#lastError.delete(probe.id);
       this.#status(probe.id, "armed", `${probe.file}:${String(probe.line)}`);
       this.#audit(
@@ -429,6 +475,138 @@ export class ProbeManager {
         void this.#ensureArmed(current);
       }
     }
+  }
+
+  /**
+   * Claims the breakpoint for a location, creating it only if nothing has it.
+   *
+   * V8 refuses a second breakpoint at a location that already has one, so a
+   * probe joining a line another probe already covers must reuse that
+   * breakpoint rather than ask for its own. The returned holder already counts
+   * this probe: claiming has to be synchronous with the lookup, or a probe that
+   * aborts between the two could remove a breakpoint another probe just took.
+   *
+   * Returns null when the location could not be armed; the error has been
+   * reported by then.
+   */
+  async #acquireBreakpoint(
+    probe: ProbeDefinition,
+    script: { scriptId: string; url: string },
+    line: number,
+    column: number,
+  ): Promise<BreakpointHolder | null> {
+    const requested = locationKey(script.scriptId, line - 1, column);
+    const existing = this.#byLocation.get(requested);
+    if (existing !== undefined) {
+      existing.probeIds.add(probe.id);
+      return existing;
+    }
+
+    // Two probes arming the same new location concurrently would both miss the
+    // lookup above and both ask V8, and the loser would get the duplicate-
+    // location error. The second waits for the first instead.
+    const inFlight = this.#arming.get(requested);
+    if (inFlight !== undefined) {
+      await inFlight;
+      const settled = this.#byLocation.get(requested);
+      if (settled !== undefined) {
+        settled.probeIds.add(probe.id);
+        return settled;
+      }
+      // The arm that was in flight failed. Fall through and try for ourselves.
+    }
+
+    const attempt = this.#installBreakpoint(probe, script, line, column, requested);
+    this.#arming.set(requested, attempt);
+    try {
+      const holder = await attempt;
+      if (holder !== null) holder.probeIds.add(probe.id);
+      return holder;
+    } finally {
+      if (this.#arming.get(requested) === attempt) this.#arming.delete(requested);
+    }
+  }
+
+  async #installBreakpoint(
+    probe: ProbeDefinition,
+    script: { scriptId: string; url: string },
+    line: number,
+    column: number,
+    requested: string,
+  ): Promise<BreakpointHolder | null> {
+    const result = await new Promise<
+      { breakpointId: string; locations: readonly unknown[] } | undefined
+    >((resolve) => {
+      this.#inspector.setBreakpointByUrl(
+        {
+          lineNumber: line - 1,
+          columnNumber: column,
+          url: script.url,
+        },
+        (error, response) => {
+          if (error !== null || response === undefined) {
+            this.#error(probe, `inspector-arm: ${error?.message ?? "empty response"}`);
+            resolve(undefined);
+            return;
+          }
+          resolve(response);
+        },
+      );
+    });
+    if (result === undefined) return null;
+    if (result.locations.length === 0) {
+      await this.#removeBreakpoint(result.breakpointId);
+      this.#error(probe, `line-not-found: ${probe.file}:${String(probe.line)}`);
+      return null;
+    }
+
+    const holder: BreakpointHolder = {
+      breakpointId: result.breakpointId,
+      keys: new Set([requested]),
+      probeIds: new Set(),
+    };
+    this.#byBreakpoint.set(holder.breakpointId, holder);
+    this.#byLocation.set(requested, holder);
+    // V8 snaps a request onto the nearest executable position, so the location
+    // that ends up armed is not always the one asked for. Registering it too
+    // lets a later probe that names the resolved position directly share this
+    // breakpoint instead of colliding with it. Two requests that resolve to one
+    // position from different columns still collide, exactly as they do today.
+    const resolved = this.#resolvedKey(script.scriptId, result.locations[0]);
+    if (resolved !== null && !this.#byLocation.has(resolved)) {
+      holder.keys.add(resolved);
+      this.#byLocation.set(resolved, holder);
+    }
+    return holder;
+  }
+
+  #resolvedKey(fallbackScriptId: string, location: unknown): string | null {
+    if (location === null || typeof location !== "object") return null;
+    const { scriptId, lineNumber, columnNumber } = location as ResolvedLocation;
+    if (typeof lineNumber !== "number") return null;
+    return locationKey(
+      typeof scriptId === "string" ? scriptId : fallbackScriptId,
+      lineNumber,
+      typeof columnNumber === "number" ? columnNumber : 0,
+    );
+  }
+
+  /** Drops a probe's claim, removing the breakpoint once nothing holds it. */
+  async #releaseBreakpointFor(installed: InstalledProbe): Promise<Error | null> {
+    const holder = this.#byBreakpoint.get(installed.breakpointId);
+    if (holder === undefined) return null;
+    holder.probeIds.delete(installed.definition.id);
+    return this.#releaseHolder(holder);
+  }
+
+  async #releaseHolder(holder: BreakpointHolder): Promise<Error | null> {
+    if (holder.probeIds.size > 0) return null;
+    if (this.#byBreakpoint.get(holder.breakpointId) !== holder) return null;
+    this.#byBreakpoint.delete(holder.breakpointId);
+    for (const key of holder.keys) {
+      if (this.#byLocation.get(key) === holder) this.#byLocation.delete(key);
+    }
+    return this.#removeBreakpoint(holder.breakpointId);
   }
 
   #resumeOnly(): void {
@@ -505,7 +683,10 @@ export class ProbeManager {
     this.#epoch += 1;
     const installed = [...this.#installed.values()];
     this.#installed.clear();
-    this.#byBreakpoint.clear();
+    // The session is about to be abandoned, so nothing is removed — but the
+    // location index has to go with it, or a later arm would hand out a
+    // breakpoint id belonging to a disconnected session.
+    this.#clearBreakpointRegistry();
     for (const probe of installed) {
       probe.active = false;
       probe.pending = 0;
@@ -679,14 +860,14 @@ export class ProbeManager {
     installed.active = false;
     installed.pending = 0;
     this.#installed.delete(installed.definition.id);
-    this.#byBreakpoint.delete(installed.breakpointId);
     this.#exhausted.set(installed.definition.id, installed.fingerprint);
     this.#status(installed.definition.id, "hit-limit-reached");
     this.#audit(
       `[liveprobe] PROBE HIT LIMIT ${safeAuditText(installed.definition.file)}:` +
         String(installed.definition.line),
     );
-    const error = await this.#removeBreakpoint(installed.breakpointId);
+    // Retiring this probe must not disarm another probe still sharing the line.
+    const error = await this.#releaseBreakpointFor(installed);
     if (error !== null) {
       this.#error(installed.definition, `inspector-remove: ${error.message}`);
     }
@@ -696,8 +877,7 @@ export class ProbeManager {
     installed.active = false;
     installed.pending = 0;
     this.#installed.delete(installed.definition.id);
-    this.#byBreakpoint.delete(installed.breakpointId);
-    await this.#removeBreakpoint(installed.breakpointId);
+    await this.#releaseBreakpointFor(installed);
     this.#audit(
       `[liveprobe] ${auditAction} ${safeAuditText(installed.definition.file)}:` +
         String(installed.definition.line),

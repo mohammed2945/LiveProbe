@@ -746,3 +746,175 @@ describe("ProbeManager counter and metric reporting", () => {
     expect((status as { detail?: string }).detail).toMatch(/^invalid-metric: missing \* 2/u);
   });
 });
+
+/**
+ * An inspector that enforces V8's real constraint: one breakpoint per resolved
+ * location, and an error on any attempt to add a second. Without this the
+ * sharing under test is invisible, because a permissive fake accepts the
+ * duplicate request the agent is supposed to avoid making.
+ */
+function createSharedLineInspector(commands: string[]) {
+  const base = createInspector(commands);
+  const live = new Map<string, string>();
+  let sequence = 0;
+  return {
+    ...base,
+    setBreakpointByUrl(
+      params: { lineNumber: number; columnNumber?: number; url: string },
+      callback: (error: Error | null, result?: SetBreakpointResult) => void,
+    ) {
+      const column = params.columnNumber ?? 0;
+      const key = `${String(params.lineNumber)}:${String(column)}`;
+      commands.push(`set:${String(params.lineNumber + 1)}`);
+      if (live.has(key)) {
+        callback(new Error("Breakpoint at specified location already exists."));
+        return;
+      }
+      sequence += 1;
+      const breakpointId = `bp-${String(sequence)}`;
+      live.set(key, breakpointId);
+      callback(null, {
+        breakpointId,
+        locations: [
+          {
+            scriptId: "script-1",
+            lineNumber: params.lineNumber,
+            columnNumber: column,
+          },
+        ],
+      });
+    },
+    removeBreakpoint(
+      params: { breakpointId: string },
+      callback: (error: Error | null) => void,
+    ) {
+      commands.push(`remove:${params.breakpointId}`);
+      for (const [key, id] of [...live]) {
+        if (id === params.breakpointId) live.delete(key);
+      }
+      callback(null);
+    },
+  };
+}
+
+function counterProbe(id: string, overrides: Partial<ProbeDefinition> = {}) {
+  return probe({
+    id,
+    type: "counter",
+    hitLimit: 100,
+    watchPaths: undefined,
+    ...overrides,
+  });
+}
+
+/**
+ * Drains the aggregates into a lookup. Flushing is destructive, so every probe
+ * of interest has to be read from one flush rather than one flush each.
+ */
+function counterDeltas(aggregates: AggregateBuffer): Record<string, number> {
+  const deltas: Record<string, number> = {};
+  for (const event of aggregates.flush()) {
+    if (event.type === "counter") deltas[event.probeId] = event.delta;
+  }
+  return deltas;
+}
+
+describe("ProbeManager breakpoint sharing", () => {
+  it("arms several probes on one line from a single breakpoint", async () => {
+    const commands: string[] = [];
+    const { manager, audit } = setup(createSharedLineInspector(commands) as never);
+
+    await manager.reconcile([counterProbe("prb_a"), counterProbe("prb_b")]);
+
+    expect(commands.filter((command) => command === "set:10")).toHaveLength(1);
+    expect(audit.filter((line) => line.includes("PROBE ARMED"))).toHaveLength(2);
+    expect(audit.some((line) => line.includes("inspector-arm"))).toBe(false);
+  });
+
+  it("delivers one pause to every probe sharing the breakpoint", async () => {
+    const commands: string[] = [];
+    const { manager, aggregates } = setup(
+      createSharedLineInspector(commands) as never,
+    );
+    await manager.reconcile([counterProbe("prb_a"), counterProbe("prb_b")]);
+
+    manager.handlePaused(paused(["bp-1"]));
+    await nextImmediate();
+
+    expect(counterDeltas(aggregates)).toEqual({ prb_a: 1, prb_b: 1 });
+  });
+
+  it("charges the hit budget once per pause, not once per probe", async () => {
+    const commands: string[] = [];
+    // A single token: two probes on the line must not need two of them.
+    const { manager, aggregates } = setup(
+      createSharedLineInspector(commands) as never,
+      new TokenBucket(1, () => 0),
+    );
+    await manager.reconcile([
+      counterProbe("prb_a", { type: "log", template: "hit" }),
+      counterProbe("prb_b", { type: "log", template: "hit" }),
+    ]);
+
+    manager.handlePaused(paused(["bp-1"]));
+    await nextImmediate();
+
+    expect(commands.filter((command) => command === "resume")).toHaveLength(1);
+  });
+
+  it("keeps the breakpoint while another probe still needs it", async () => {
+    const commands: string[] = [];
+    const { manager } = setup(createSharedLineInspector(commands) as never);
+    await manager.reconcile([counterProbe("prb_a"), counterProbe("prb_b")]);
+    commands.length = 0;
+
+    await manager.reconcile([counterProbe("prb_a")]);
+    expect(commands.some((command) => command.startsWith("remove:"))).toBe(false);
+
+    await manager.reconcile([]);
+    expect(commands.filter((command) => command === "remove:bp-1")).toHaveLength(1);
+  });
+
+  it("does not disarm a line when one of its probes hits its limit", async () => {
+    const commands: string[] = [];
+    const { manager, aggregates } = setup(
+      createSharedLineInspector(commands) as never,
+    );
+    await manager.reconcile([
+      counterProbe("prb_short", { hitLimit: 1 }),
+      counterProbe("prb_long"),
+    ]);
+    commands.length = 0;
+
+    manager.handlePaused(paused(["bp-1"]));
+    await nextImmediate();
+    expect(counterDeltas(aggregates)).toEqual({ prb_short: 1, prb_long: 1 });
+    expect(commands.some((command) => command.startsWith("remove:"))).toBe(false);
+
+    // The surviving probe still fires: retiring its neighbour left the shared
+    // breakpoint in place.
+    manager.handlePaused(paused(["bp-1"]));
+    await nextImmediate();
+    expect(counterDeltas(aggregates)).toEqual({ prb_long: 1 });
+  });
+
+  it("gives probes on different lines their own breakpoints", async () => {
+    const commands: string[] = [];
+    const { manager, aggregates } = setup(
+      createSharedLineInspector(commands) as never,
+    );
+
+    await manager.reconcile([
+      counterProbe("prb_a"),
+      counterProbe("prb_b", { line: 20 }),
+    ]);
+
+    expect(commands.filter((command) => command.startsWith("set:"))).toEqual([
+      "set:10",
+      "set:20",
+    ]);
+    manager.handlePaused(paused(["bp-2"]));
+    await nextImmediate();
+    expect(counterDeltas(aggregates)).toEqual({ prb_b: 1 });
+  });
+});
