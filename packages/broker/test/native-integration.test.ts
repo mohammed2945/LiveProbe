@@ -636,6 +636,96 @@ describe("scoped native integration", () => {
     }
   });
 
+  it("does not let a later armed status resurrect a suspended probe", async () => {
+    const broker = await buildBroker({ store: false });
+    try {
+      await broker.inject({
+        method: "POST",
+        url: "/v1/native/agents/register",
+        payload: {
+          agentId: "host-a",
+          hostname: "local",
+          backend: "native-ebpf",
+          architecture: "x86_64",
+          capabilities: ["uprobe", "count", "counter"],
+          agentVersion: "0.2.0",
+        },
+      });
+      await broker.inject({
+        method: "PUT",
+        url: "/v1/native/agents/host-a/instances",
+        payload: { instances: [instance] },
+      });
+      const probe = (await broker.inject({
+        method: "POST",
+        url: "/v1/probes",
+        payload: {
+          serviceId: "orders-native",
+          sourceCommit: "abcdef1",
+          type: "counter",
+          file: "src/main.rs",
+          line: 10,
+          createdBy: "test",
+        },
+      })).json<{ probe: { id: string; version: number } }>().probe;
+
+      const base = Date.now();
+      const ingestStatus = (offsetMs: number, status: string) => broker.inject({
+        method: "POST",
+        url: "/v1/native/ingest",
+        payload: {
+          agentId: "host-a",
+          serviceId: "orders-native",
+          instanceId: instance.instanceId,
+          buildId: instance.buildId,
+          backend: "native-ebpf",
+          agentStatus: { state: "green" },
+          events: [{
+            probeId: probe.id,
+            probeVersion: probe.version,
+            type: "status",
+            ts: new Date(base + offsetMs).toISOString(),
+            status,
+            ...(status === "suspended"
+              ? { reasonCode: "raw-hit-budget-exceeded" as const }
+              : {}),
+            agentId: "host-a",
+            instanceId: instance.instanceId,
+            buildId: instance.buildId,
+          }],
+        },
+      });
+
+      expect((await ingestStatus(0, "armed")).statusCode).toBe(202);
+      expect((await ingestStatus(100, "suspended")).statusCode).toBe(202);
+      const assignedAfterSuspend = (await broker.inject({
+        method: "GET",
+        url: "/v1/native/agents/host-a/assignments?since=0",
+      })).json<{ assignments: Array<{ probes: Array<{ id: string }> }> }>();
+      expect(assignedAfterSuspend.assignments.flatMap((a) => a.probes))
+        .not.toContainEqual(expect.objectContaining({ id: probe.id }));
+
+      // The agent re-attaches the detached site under a fresh generation and
+      // reports armed again, newer than the suspension. Honouring it would put
+      // the probe back into desired state and restart the detach/re-arm loop.
+      expect((await ingestStatus(200, "armed")).statusCode).toBe(202);
+      const assignedAfterRearm = (await broker.inject({
+        method: "GET",
+        url: "/v1/native/agents/host-a/assignments?since=0",
+      })).json<{ assignments: Array<{ probes: Array<{ id: string }> }> }>();
+      expect(assignedAfterRearm.assignments.flatMap((a) => a.probes))
+        .not.toContainEqual(expect.objectContaining({ id: probe.id }));
+      expect((await broker.inject({
+        method: "GET",
+        url: `/v1/probes/${probe.id}/data`,
+      })).json()).toMatchObject({
+        status: { status: "suspended", reasonCode: "raw-hit-budget-exceeded" },
+      });
+    } finally {
+      await broker.close();
+    }
+  });
+
   it("keeps armedAt on a native probe that arms and then hits its limit", async () => {
     const broker = await buildBroker({ store: false });
     try {

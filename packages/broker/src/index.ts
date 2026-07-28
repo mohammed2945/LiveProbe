@@ -1968,6 +1968,26 @@ export class BrokerState {
         ) {
           continue;
         }
+        /**
+         * Terminal state latches for a generation. An agent that detaches a
+         * site re-attaches the same probe under a fresh generation and reports
+         * `armed` again with a newer timestamp; without this that newer status
+         * overwrites the terminal one, the probe returns to desired state, the
+         * agent re-attaches, and the two flap indefinitely. Observed as a real
+         * detach/re-arm loop under a hot burst, where the raw-hit supervisor
+         * suspended a probe three times in 400ms and it ended up armed.
+         *
+         * Only the timestamp order was guarded before, which stops a stale
+         * status from terminating a newer assignment but not a newer status
+         * from resurrecting a terminated one.
+         */
+        if (
+          previous !== undefined &&
+          nativeStatusEndsAssignment(previous.status) &&
+          !nativeStatusEndsAssignment(status)
+        ) {
+          continue;
+        }
         this.nativeStatuses.set(
           statusKey,
           { status, updatedAt: ts, ...metadata },

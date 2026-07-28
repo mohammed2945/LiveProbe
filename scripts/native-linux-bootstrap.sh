@@ -42,7 +42,7 @@ packages=(
   git curl ca-certificates build-essential gcc g++ make cmake ninja-build
   pkg-config clang llvm lld bpftool libbpf-dev libelf-dev zlib1g-dev
   linux-tools-common linux-tools-generic linux-headers-generic dwarves pahole
-  bpftrace jq unzip file binutils elfutils xz-utils
+  bpftrace jq unzip file binutils elfutils xz-utils rustfmt
   openjdk-17-jdk maven postgresql-client rustc cargo
 )
 "${SUDO[@]}" apt-get install -y --no-install-recommends "${packages[@]}"
