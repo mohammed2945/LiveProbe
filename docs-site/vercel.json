@@ -1,0 +1,30 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist/client",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/docs/quickstart",
+      "permanent": false
+    },
+    {
+      "source": "/docs",
+      "destination": "/docs/quickstart",
+      "permanent": false
+    }
+  ],
+  "headers": [
+    {
+      "source": "/_next/static/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    }
+  ]
+}
