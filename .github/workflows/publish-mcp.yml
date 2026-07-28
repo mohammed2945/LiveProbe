@@ -17,9 +17,6 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: packages/mcp-server
     steps:
       - uses: actions/checkout@v4
 
@@ -32,20 +29,55 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - name: Install package build dependencies
+      # Run from the workspace root rather than packages/mcp-server: the MCP
+      # package now reaches the protocol package through the workspace and
+      # cannot be built from its own directory alone.
+      - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build package
-        run: npm run build
+        run: pnpm --filter @doomslayer2945/liveprobe-mcp run build
 
       - name: Test package
-        run: npm test
+        run: pnpm --filter @doomslayer2945/liveprobe-mcp run test
 
+      # pnpm, never npm. `npm pack` and `npm publish` copy `workspace:*` into
+      # the published manifest verbatim, and every install of that tarball then
+      # fails with EUNSUPPORTEDPROTOCOL. Only pnpm resolves the workspace
+      # protocol to a real version. The grep makes that failure impossible to
+      # publish rather than merely unlikely.
       - name: Inspect publish contents
-        run: npm pack --dry-run
+        run: |
+          pnpm --filter @doomslayer2945/liveprobe-protocol pack --pack-destination /tmp
+          pnpm --filter @doomslayer2945/liveprobe-mcp pack --pack-destination /tmp
+          tar -xzOf /tmp/doomslayer2945-liveprobe-mcp-*.tgz package/package.json \
+            > /tmp/mcp-manifest.json
+          cat /tmp/mcp-manifest.json
+          if grep -q '"workspace:' /tmp/mcp-manifest.json; then
+            echo "::error::published manifest still contains a workspace: specifier"
+            exit 1
+          fi
 
-      - name: Publish to npm
+      # The protocol package must exist on the registry before the MCP package
+      # that declares a hard dependency on it. Skipped when that exact version
+      # is already published, so re-running this workflow stays safe.
+      - name: Publish protocol to npm
         if: ${{ !inputs.dry_run }}
-        run: npm publish --access public --provenance
+        run: |
+          version="$(node -p "require('./packages/protocol/package.json').version")"
+          if npm view "@doomslayer2945/liveprobe-protocol@${version}" version >/dev/null 2>&1; then
+            echo "@doomslayer2945/liveprobe-protocol@${version} is already published"
+          else
+            pnpm --filter @doomslayer2945/liveprobe-protocol publish \
+              --access public --provenance --no-git-checks
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish MCP to npm
+        if: ${{ !inputs.dry_run }}
+        run: |
+          pnpm --filter @doomslayer2945/liveprobe-mcp publish \
+            --access public --provenance --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
