@@ -2,6 +2,11 @@
   "name": "@doomslayer2945/liveprobe-protocol",
   "version": "0.4.0",
   "description": "Canonical LiveProbe broker, MCP, managed-runtime, and native-eBPF wire contract",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mohammed2945/LiveProbe.git",
+    "directory": "packages/protocol"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

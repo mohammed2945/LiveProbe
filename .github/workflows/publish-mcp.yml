@@ -58,6 +58,27 @@ jobs:
             exit 1
           fi
 
+          # --provenance makes npm verify that the manifest's repository.url
+          # matches the repository the workflow signed from, and it rejects the
+          # upload with a 422 when the field is missing. That happens after the
+          # tarball is uploaded, so without this check a release fails halfway
+          # through and can leave the protocol package published while the MCP
+          # package that depends on it is not.
+          expected_repository="https://github.com/${GITHUB_REPOSITORY}.git"
+          for tarball in /tmp/doomslayer2945-liveprobe-protocol-*.tgz \
+            /tmp/doomslayer2945-liveprobe-mcp-*.tgz; do
+            manifest="$(tar -xzOf "$tarball" package/package.json)"
+            actual_repository="$(
+              node -e 'const m=JSON.parse(require("fs").readFileSync(0,"utf8"));
+                process.stdout.write(m.repository?.url ?? "")' <<<"$manifest"
+            )"
+            if [[ "$actual_repository" != "$expected_repository" ]]; then
+              echo "::error::${tarball} declares repository.url \
+'${actual_repository}', expected '${expected_repository}' for provenance"
+              exit 1
+            fi
+          done
+
       # The protocol package must exist on the registry before the MCP package
       # that declares a hard dependency on it. Skipped when that exact version
       # is already published, so re-running this workflow stays safe.
