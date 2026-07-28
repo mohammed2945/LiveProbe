@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { CodeBlock } from "@/components/code-block";
+import { Tabs } from "@/components/tabs";
 
 export type DocPage = {
   slug: string;
@@ -967,145 +968,189 @@ java --add-modules jdk.jdi \\
   },
   {
     slug: "native",
-    title: "Native agent (Rust and C++)",
+    title: "Rust and C++",
     section: "Runtime SDKs",
     description:
-      "Attach eBPF uprobes to a compiled Linux x86-64 executable without rebuilding it against a LiveProbe library.",
+      "Attach eBPF uprobes to a compiled Linux x86-64 service. No SDK, no rebuild against a LiveProbe library.",
     headings: [
-      { id: "how-it-differs", label: "How this differs" },
-      { id: "host-check", label: "1. Check the host" },
-      { id: "build", label: "2. Build your service" },
-      { id: "install", label: "3. Install the binaries" },
-      { id: "account", label: "4. Create the account" },
-      { id: "credential", label: "5. Credential and config" },
-      { id: "run", label: "6. Start loader and agent" },
-      { id: "verify", label: "7. Verify" },
+      { id: "how-it-works", label: "How it works" },
+      { id: "debug-info", label: "Debug info you need" },
+      { id: "setup", label: "Setup" },
+      { id: "verify", label: "Verify" },
       { id: "troubleshooting", label: "Troubleshooting" },
     ],
     content: (
       <>
-        <h2 id="how-it-differs">How this differs</h2>
+        <h2 id="how-it-works">How it works</h2>
         <p>
-          Unlike the Node, Python, and JVM guides, there is no package to add to
-          your build. A host-level agent attaches eBPF uprobes to the
-          already-deployed executable, so the service is unmodified and never
-          links against LiveProbe. The install is <strong>per host, not per
-          application</strong>, and covers every compiled service on that
-          machine.
+          There is no package to add to your build. A host-level agent attaches
+          eBPF uprobes to the binary you already deployed, so your service is
+          untouched and never links against LiveProbe.
         </p>
         <p>
-          Two processes run per host, and the split between them is the security
-          boundary. Only <code>liveprobe-bpf-loader</code> is privileged: it runs
-          as root, or with the smallest loader-only capability set the host
-          permits. The agent that talks to the broker runs as a dedicated
-          unprivileged account and reaches the loader over a root-owned Unix
-          socket.
+          That makes this a <strong>per-host install</strong>, not a per-service
+          dependency. Set it up once on a machine and it covers every compiled
+          service running there.
         </p>
-        <Callout title="Never grant BPF privileges to the agent" warning>
+        <p>Two processes run per host:</p>
+        <Table
+          headers={["Process", "Runs as", "Job"]}
+          rows={[
+            [
+              <code key="l">liveprobe-bpf-loader</code>,
+              "root",
+              "Loads the BPF program and attaches uprobes. The only privileged part.",
+            ],
+            [
+              <code key="a">liveprobe-native-agent</code>,
+              <code key="u">liveprobe</code>,
+              "Talks to the broker, streams evidence. No BPF privileges.",
+            ],
+          ]}
+        />
+        <Callout title="Never give the agent BPF privileges" warning>
           <p>
-            The loader is the only BPF-privileged process. Giving{" "}
-            <code>CAP_BPF</code> or <code>CAP_SYS_ADMIN</code> to the agent or
-            to the application collapses the boundary that keeps a compromised
-            agent from loading arbitrary programs into the kernel.
+            The loader is the only process that should hold{" "}
+            <code>CAP_BPF</code> or <code>CAP_SYS_ADMIN</code>. They talk over a
+            root-owned Unix socket, and that split is what stops a compromised
+            agent from loading arbitrary kernel programs.
           </p>
         </Callout>
 
-        <h2 id="host-check">1. Check the host</h2>
+        <h2 id="debug-info">Debug info you need</h2>
         <p>
-          This backend is Linux x86-64 only. The kernel must expose BTF,
-          tracefs, and uprobes:
+          Probes are placed at source lines, so the binary has to explain itself
+          to the agent. Two things must survive your build:
         </p>
+        <Table
+          headers={["What", "Why", "Check"]}
+          rows={[
+            [
+              "DWARF",
+              "Maps source lines to addresses, and names local variables.",
+              <code key="1">readelf --sections app | grep debug_info</code>,
+            ],
+            [
+              "GNU build ID",
+              "Identifies which exact binary is running.",
+              <code key="2">readelf --notes app | grep &apos;Build ID:&apos;</code>,
+            ],
+          ]}
+        />
+        <p>
+          A stripped binary cannot be probed. Optimized release builds are fine
+          — inlined code resolves to its inlined site. If you ship stripped
+          binaries, keep the separate debug files and point{" "}
+          <code>symbolDirectories</code> at them, or serve them from a{" "}
+          <code>debuginfod</code>.
+        </p>
+
+        <h2 id="setup">Setup</h2>
+        <p>
+          Linux x86-64 only. Roughly ten minutes on a fresh host.
+        </p>
+
+        <h3>1. Check the kernel</h3>
         <CodeBlock
           language="shell"
-          code={`uname -m                                  # expect x86_64
+          code={`uname -m                                   # x86_64
 test -r /sys/kernel/btf/vmlinux && echo "BTF ok"
 mountpoint -q /sys/kernel/tracing ||
   sudo mount -t tracefs tracefs /sys/kernel/tracing
 sudo test -e /sys/kernel/tracing/uprobe_events && echo "uprobes ok"`}
         />
         <p>
-          Most current distribution kernels satisfy this. Containers usually do
-          not: they commonly lack <code>uprobe_events</code> and a writable
-          tracefs, so the agent runs on the host rather than beside your service
-          in a container.
+          Most current distro kernels pass. Containers usually do not, so run
+          the agent on the host.
         </p>
 
-        <h2 id="build">2. Build your service</h2>
-        <p>
-          Probes are placed at source lines, so the executable must carry DWARF
-          debug information and a GNU build ID. The build ID is how the agent
-          recognises which binary it is looking at, and a stripped binary cannot
-          be probed. Optimized release builds are supported, and inlined code
-          resolves to its inlined site.
-        </p>
-        <CodeBlock
-          language="toml"
-          code={`# Cargo.toml
+        <h3>2. Build your service with debug info</h3>
+        <Tabs
+          tabs={[
+            {
+              id: "rust",
+              label: "Rust",
+              content: (
+                <>
+                  <p>Keep debug info in your release profile:</p>
+                  <CodeBlock
+                    language="toml"
+                    code={`# Cargo.toml
 [profile.release]
 debug = 2
 strip = false`}
-        />
-        <CodeBlock
-          language="shell"
-          code={`g++ -std=c++20 -O2 -g -fno-omit-frame-pointer \\
-  -Wl,--build-id=sha1 main.cpp -o my-service`}
-        />
-        <p>Verify both requirements on the artefact you actually deploy:</p>
-        <CodeBlock
-          language="shell"
-          code={`readelf --notes ./my-service | grep 'Build ID:'
-readelf --sections ./my-service | grep -q debug_info && echo "DWARF ok"`}
-        />
-        <p>
-          If you ship stripped binaries, keep the separate debug files and point{" "}
-          <code>symbolDirectories</code> at them in step 5, or serve them from a{" "}
-          <code>debuginfod</code>.
-        </p>
+                  />
+                  <CodeBlock
+                    language="shell"
+                    code={`cargo build --release
+readelf --notes target/release/my-service | grep 'Build ID:'`}
+                  />
+                  <p>
+                    Cargo emits a build ID by default; <code>strip = false</code>{" "}
+                    is what keeps it and the DWARF in place. Use{" "}
+                    <code>&quot;language&quot;: &quot;rust&quot;</code> in step 5.
+                  </p>
+                </>
+              ),
+            },
+            {
+              id: "cpp",
+              label: "C++",
+              content: (
+                <>
+                  <p>
+                    Compile with <code>-g</code> and ask the linker for a build
+                    ID:
+                  </p>
+                  <CodeBlock
+                    language="shell"
+                    code={`g++ -std=c++20 -O2 -g -fno-omit-frame-pointer \\
+  -Wl,--build-id=sha1 main.cpp -o my-service
 
-        <h2 id="install">3. Install the binaries</h2>
+readelf --notes my-service | grep 'Build ID:'`}
+                  />
+                  <p>
+                    <code>--build-id</code> is not always on by default, so pass
+                    it explicitly. Use{" "}
+                    <code>&quot;language&quot;: &quot;cpp&quot;</code> in step 5.
+                  </p>
+                </>
+              ),
+            },
+          ]}
+        />
+
+        <h3>3. Install the agent</h3>
         <p>
-          There is no published package yet; build the two binaries from the
-          repository on a machine matching the target host. On Debian or Ubuntu
-          the build needs Rust 1.88 or newer plus:
+          No published package yet — build both binaries from the repository on
+          a machine matching the target host. Needs Rust 1.88+.
         </p>
         <CodeBlock
           language="shell"
           code={`sudo apt-get install -y --no-install-recommends \\
   build-essential pkg-config clang llvm lld bpftool \\
-  libbpf-dev libelf-dev zlib1g-dev dwarves`}
-        />
-        <CodeBlock
-          language="shell"
-          code={`make native-release
+  libbpf-dev libelf-dev zlib1g-dev dwarves
+
+make native-release
 sudo make native-install`}
         />
         <p>
-          That installs <code>liveprobe-native-agent</code> and{" "}
-          <code>liveprobe-bpf-loader</code> into <code>/usr/local/bin</code> and
-          creates <code>/etc/liveprobe</code> and <code>/run/liveprobe</code>.
-          Override the prefix with <code>NATIVE_PREFIX</code>, or stage a
-          package with <code>DESTDIR</code>. No separate BPF object is
-          installed; it is embedded in the loader.
+          Installs both binaries to <code>/usr/local/bin</code> and creates{" "}
+          <code>/etc/liveprobe</code>. Override with <code>NATIVE_PREFIX</code>{" "}
+          or stage a package with <code>DESTDIR</code>.
         </p>
 
-        <h2 id="account">4. Create the account</h2>
-        <p>
-          The agent must not be able to load BPF programs, so give it its own
-          account with no login shell. The loader is told this account&apos;s
-          IDs in step 6 and will only hand the socket to it.
-        </p>
+        <h3>4. Create the unprivileged account</h3>
         <CodeBlock
           language="shell"
           code={`sudo useradd --system --no-create-home --shell /usr/sbin/nologin liveprobe
 sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe`}
         />
 
-        <h2 id="credential">5. Credential and config</h2>
+        <h3>5. Get a credential and write the config</h3>
         <p>
-          Native agents authenticate with their own credential type rather than
-          the shared operator key. The plaintext key is returned exactly once,
-          carries an <code>lp_native_</code> prefix, is stored by the broker
-          only as a hash, and is restricted to the listed service IDs.
+          Native agents use their own credential, not your operator key. It is
+          shown once.
         </p>
         <CodeBlock
           language="shell"
@@ -1113,24 +1158,12 @@ sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe`}
 curl --fail --silent --show-error \\
   -H "Authorization: Bearer $LIVEPROBE_API_KEY" \\
   -H "Content-Type: application/json" \\
-  --data '{"agentId":"native-host-1","allowedServiceIds":["quotes-rust"],"label":"Prod host 1"}' \\
-  https://liveprobe.tryastrea.tech/v1/native-credentials \\
-  > native-credential.json`}
+  --data '{"agentId":"native-host-1","allowedServiceIds":["my-service"],"label":"Prod host 1"}' \\
+  https://liveprobe.tryastrea.tech/v1/native-credentials`}
         />
         <p>
-          List non-secret metadata with <code>GET /v1/native-credentials</code>{" "}
-          and revoke with{" "}
-          <code>DELETE /v1/native-credentials/&lt;credential-id&gt;</code>. This
-          route requires the broker&apos;s PostgreSQL durable store and returns{" "}
-          <code>503 credential_store_unavailable</code> without it.
-        </p>
-
-        <p>
-          Describe each service by exact executable path in{" "}
-          <code>/etc/liveprobe/native-agent.json</code>. Every service needs a
-          language, and these paths must match the loader allowlist in step 6
-          exactly. Use the same <code>serviceId</code> values your team already
-          uses elsewhere; they are what you name in the MCP tools.
+          Then <code>/etc/liveprobe/native-agent.json</code>. Use the real
+          executable path, not a symlink or wrapper script:
         </p>
         <CodeBlock
           language="json"
@@ -1138,53 +1171,39 @@ curl --fail --silent --show-error \\
   "agentId": "native-host-1",
   "brokerUrl": "https://liveprobe.tryastrea.tech",
   "loaderSocket": "/run/liveprobe/loader.sock",
+  "services": [
+    { "serviceId": "my-service", "language": "rust", "executablePath": "/opt/app/bin/my-service" }
+  ],
   "redactKeys": ["tenantSecret"],
   "redactValues": [],
-  "services": [
-    { "serviceId": "quotes-rust", "language": "rust", "executablePath": "/opt/quotes/bin/quotes" },
-    { "serviceId": "pricing-cpp", "language": "cpp", "executablePath": "/opt/pricing/bin/pricing" }
-  ],
   "symbolDirectories": ["/usr/lib/debug"],
   "debuginfodUrl": null,
   "symbolCacheDirectory": null
 }`}
         />
 
-        <h2 id="run">6. Start loader and agent</h2>
-        <p>
-          Start the loader first. It takes the socket path, the unprivileged
-          account&apos;s UID and GID, and then the exact allowlist of attachable
-          executables. It attaches to nothing outside that list, so adding a
-          service later means restarting the loader with the new path included.
-        </p>
+        <h3>6. Start the loader, then the agent</h3>
         <CodeBlock
           language="shell"
-          code={`sudo /usr/local/bin/liveprobe-bpf-loader \\
+          code={`# Loader first. The trailing paths are the allowlist -- it will
+# attach to nothing else, so add a service here to probe it.
+sudo /usr/local/bin/liveprobe-bpf-loader \\
   /run/liveprobe/loader.sock \\
   "$(id -u liveprobe)" "$(id -g liveprobe)" \\
-  /opt/quotes/bin/quotes \\
-  /opt/pricing/bin/pricing`}
-        />
-        <p>
-          Then start the agent as that account, passing the credential from step
-          5:
-        </p>
-        <CodeBlock
-          language="shell"
-          code={`sudo -u liveprobe env \\
+  /opt/app/bin/my-service
+
+# Then the agent, as the unprivileged account.
+sudo -u liveprobe env \\
   LIVEPROBE_NATIVE_CREDENTIAL="lp_native_<secret>" \\
   /usr/local/bin/liveprobe-native-agent /etc/liveprobe/native-agent.json`}
         />
         <p>
-          Both are long-running host daemons rather than something tied to your
-          application&apos;s lifecycle, so in production run them under systemd
-          with the loader ordered before the agent. Keep the credential out of
-          the unit file by loading it from an <code>EnvironmentFile</code> that
-          only root can read.
+          Both are long-running host daemons, so in production run them under
+          systemd with the loader ordered first, and load the credential from an
+          <code>EnvironmentFile</code> only root can read.
         </p>
 
-        <h2 id="verify">7. Verify</h2>
-        <p>Ask the broker what it can see, using your operator key:</p>
+        <h2 id="verify">Verify</h2>
         <CodeBlock
           language="shell"
           code={`curl --fail --silent \\
@@ -1192,30 +1211,41 @@ curl --fail --silent --show-error \\
   https://liveprobe.tryastrea.tech/v1/services | jq '.'`}
         />
         <p>
-          Your <code>serviceId</code> values appear once the agent has
-          registered and discovered a running instance. If a service is missing,
-          the agent is running but has not found a process matching that{" "}
-          <code>executablePath</code> — confirm the service is actually running
-          and that the path matches the real binary, not a symlink or a wrapper
-          script.
+          Your <code>serviceId</code> appears once the agent registers and finds
+          a running process. Now place a probe from your MCP client and you are
+          done.
         </p>
 
         <h2 id="troubleshooting">Troubleshooting</h2>
         <Table
-          headers={["Symptom", "Cause"]}
+          headers={["Symptom", "Fix"]}
           rows={[
-            [<code key="a">id: &apos;liveprobe&apos;: no such user</code>, "Step 4 was skipped."],
-            ["Agent starts, service never appears", "No running process matches executablePath, or the path differs from the loader allowlist."],
-            ["Probe stays pending and never arms", "The binary has no DWARF for that source line; it was stripped, or built without -g / debug = 2."],
-            ["Loader refuses a path", "The executable was not in the allowlist the loader was started with."],
-            ["Permission denied on the socket", "/run/liveprobe ownership does not match the UID/GID passed to the loader."],
+            [
+              <code key="a">no such user: liveprobe</code>,
+              "Run step 4.",
+            ],
+            [
+              "Service never appears",
+              "No running process matches executablePath, or it differs from the loader allowlist.",
+            ],
+            [
+              "Probe stays pending",
+              "No DWARF for that line. The binary was stripped or built without -g / debug = 2.",
+            ],
+            [
+              "Loader refuses a path",
+              "That executable was not in the allowlist the loader started with.",
+            ],
+            [
+              "Permission denied on the socket",
+              "/run/liveprobe ownership does not match the UID/GID passed to the loader.",
+            ],
           ]}
         />
         <p>
           Native probes are read-only: capture never writes to target memory,
-          and the loader forbids the BPF helper that would allow it. A probe
-          that reaches its configured limit latches detached rather than
-          silently re-arming, so a hot site stays off until it is placed again.
+          and a probe that hits its limit detaches instead of silently
+          re-arming.
         </p>
       </>
     ),
