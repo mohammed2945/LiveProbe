@@ -17,17 +17,27 @@ import {
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const compiledCli = join(packageRoot, "dist", "cli.js");
 const toolNames = [
+  "analyze_probe_candidates",
+  "apply_investigation_decision",
+  "collect_investigation_evidence",
+  "deploy_investigation_probes",
+  "deploy_probe_frontier",
+  "get_investigation_context",
+  "get_investigation_result",
   "get_probe_data",
   "get_safety_overview",
   "list_audit_events",
   "list_probes",
   "list_services",
   "ping_broker",
+  "prepare_repository_analysis",
+  "refine_probe_candidates",
   "remove_probe",
   "set_counter_probe",
   "set_log_probe",
   "set_metric_probe",
   "set_snapshot_probe",
+  "start_probe_investigation",
 ];
 
 describe("liveprobe-mcp CLI", () => {
@@ -84,7 +94,7 @@ describe("liveprobe-mcp CLI", () => {
 
 describe("published tarball", () => {
   it(
-    "installs the packed CLI and lists exactly the ten MCP tools over stdio",
+    "installs the packed CLI and lists exactly the twenty-one MCP tools over stdio",
     async () => {
       const temporaryRoot = mkdtempSync(join(tmpdir(), "liveprobe-mcp-"));
       try {

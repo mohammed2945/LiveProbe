@@ -1192,6 +1192,88 @@ describe("broker validation and storage", () => {
     expect(events[499]).toMatchObject({ delta: 501 });
   });
 
+  it("drops scoped late events for deleted probes without rejecting current events", async () => {
+    let now = Date.parse("2026-07-24T12:00:00.000Z");
+    const persistedProbeIds: string[][] = [];
+    const broker = await buildBroker({
+      clock: () => now,
+      deletedProbeIngestGraceMs: 1_000,
+      store: {
+        async restore() {},
+        async persist() {},
+        async persistIngest(_state, input) {
+          persistedProbeIds.push(input.events.map((event) => event.probeId));
+        },
+      },
+    });
+    openBrokers.push(broker);
+    const deletedProbe = createCounter(broker.liveprobeState);
+    const currentProbe = createCounter(broker.liveprobeState);
+    expect(broker.liveprobeState.deleteProbe(deletedProbe.id)).toBe(true);
+
+    const response = await broker.inject({
+      method: "POST",
+      url: "/v1/ingest",
+      payload: {
+        serviceId: "orders",
+        sdk: "node",
+        commitSha: "abcdef1234567890",
+        commitSource: "config",
+        agentStatus: { state: "green" },
+        events: [
+          {
+            probeId: deletedProbe.id,
+            type: "counter",
+            ts: new Date(now).toISOString(),
+            delta: 1,
+          },
+          {
+            probeId: currentProbe.id,
+            type: "counter",
+            ts: new Date(now).toISOString(),
+            delta: 2,
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ accepted: 1 });
+    expect(persistedProbeIds).toEqual([[currentProbe.id]]);
+    expect(broker.liveprobeState.getEvents(deletedProbe.id)).toEqual([]);
+    expect(broker.liveprobeState.getEvents(currentProbe.id)).toMatchObject([
+      { delta: 2 },
+    ]);
+
+    now += 1_001;
+    const expiredGrace = await broker.inject({
+      method: "POST",
+      url: "/v1/ingest",
+      payload: {
+        serviceId: "orders",
+        sdk: "node",
+        commitSha: "abcdef1234567890",
+        commitSource: "config",
+        agentStatus: { state: "green" },
+        events: [
+          {
+            probeId: deletedProbe.id,
+            type: "counter",
+            ts: new Date(now).toISOString(),
+            delta: 3,
+          },
+        ],
+      },
+    });
+    expect(expiredGrace.statusCode).toBe(400);
+    expect(expiredGrace.json()).toMatchObject({
+      error: {
+        code: "invalid_request",
+        message: `event references unknown probe ${deletedProbe.id}`,
+      },
+    });
+  });
+
   it("cleans long-poll listeners on activity, timeout, abort, and disposal", async () => {
     const state = new BrokerState();
     const probe = createCounter(state);

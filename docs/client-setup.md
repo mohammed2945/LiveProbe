@@ -265,7 +265,7 @@ A useful first prompt is:
 
 ## 4. Use the MCP tools
 
-The server exposes eleven tools:
+The server exposes fifteen tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -280,6 +280,10 @@ The server exposes eleven tools:
 | `list_probes` | Inspect probe definitions and status. |
 | `get_probe_data` | Read retained evidence, optionally long-polling for it. |
 | `remove_probe` | Remove a probe and uninstall it on the next agent poll. |
+| `prepare_repository_analysis` | Incrementally index the deployed Python checkout beside the MCP server. |
+| `analyze_probe_candidates` | Backward-slice a manifestation value and return a bounded hammock-aware frontier. |
+| `deploy_probe_frontier` | Map source roots to service IDs and create bounded snapshot probes for the frontier. |
+| `refine_probe_candidates` | Group only explicitly correlated captures and deterministically compute the next round. |
 
 Before creating a probe:
 
@@ -291,6 +295,13 @@ Before creating a probe:
 5. Prefer a one-hit snapshot or a counter on hot code. Keep the default TTL or
    make it shorter.
 6. Read the evidence and call `remove_probe` when finished.
+
+For deterministic Python investigations, install `liveprobe-analysis` on the
+machine running the MCP server, call the four analysis tools in the order shown
+above, and configure `liveprobe.instrument_fastapi(app)` in each FastAPI
+service. Existing OpenTelemetry/W3C IDs are reused; otherwise LiveProbe creates
+and propagates a lightweight W3C identity through httpx. Captures with no
+explicit identity are never timestamp-joined.
 
 Example investigation prompt:
 

@@ -26,6 +26,9 @@ export interface ProbeDefinition {
   ttlSeconds: number;
   version: number;
   createdBy: string;
+  investigationId?: string;
+  candidateId?: string;
+  round?: number;
 }
 
 export interface SerializerConfig {

@@ -17,6 +17,7 @@ __pycache__/
 htmlcov/
 .venv/
 *.egg-info/
+.liveprobe/
 
 # Java
 java/bridge/build/
@@ -30,3 +31,4 @@ target/
 .DS_Store
 *.log
 backups/
+demo/ride-analysis/results/

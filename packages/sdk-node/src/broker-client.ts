@@ -94,6 +94,19 @@ function parseProbe(value: unknown, serviceId: string): ProbeDefinition {
   ) {
     throw new Error("broker returned invalid watch paths");
   }
+  if (
+    (value["investigationId"] !== undefined &&
+      (typeof value["investigationId"] !== "string" ||
+        value["investigationId"].length === 0)) ||
+    (value["candidateId"] !== undefined &&
+      (typeof value["candidateId"] !== "string" ||
+        value["candidateId"].length === 0)) ||
+    (value["round"] !== undefined &&
+      (!Number.isSafeInteger(value["round"]) ||
+        (value["round"] as number) <= 0))
+  ) {
+    throw new Error("broker returned invalid investigation metadata");
+  }
   const runtimeFields = [
     value["runtimeLocation"],
     value["runtimeLine"],

@@ -158,11 +158,12 @@ MCP client (replace `/absolute/path/to/LightProbe`):
 }
 ```
 
-The server exposes eleven tools: service/probe listing, four probe setters,
-retained-data retrieval, removal, authenticated connectivity, a safety
-overview, and admin-only audit-event listing. Creating or removing a probe
-changes diagnostic instrumentation even though it does not intentionally
-change application variables.
+The server exposes 21 tools: the eleven service/probe/control tools, the
+legacy four-step frontier workflow, and six persistent runtime-guided
+investigation tools. The Python analysis package runs beside the MCP server,
+caches compact summaries for every function, and materializes detailed graph
+fragments only along selected investigation paths. Target applications only
+run the lightweight probe SDK.
 
 ### Diagnostic workflow
 
@@ -178,10 +179,25 @@ change application variables.
    git show "${DEPLOYED_COMMIT}:path/to/source-file"
    ```
 
-4. Pass the 7-64 character hexadecimal SHA as `commit_hash` to any MCP
-   set-probe tool. The MCP server normalizes it, retains it as probe audit
-   metadata, and warns when it differs from the commit reported by the agent.
-5. Read the evidence and remove the probe when finished.
+4. Run `prepare_repository_analysis`, then `start_probe_investigation` with the
+   manifestation line, tracked value, symptom, and failure class.
+5. Deploy the initial bounded bundle with
+   `deploy_investigation_probes`, then invoke the replay callback for the same
+   failing request. Do not wait for a naturally occurring follow-up failure.
+6. Use `collect_investigation_evidence`. Semantic values remain explicitly
+   `UNKNOWN`; configured type and range predicates are evaluated mechanically.
+7. Read `get_investigation_context` and select only supplied action IDs with
+   `apply_investigation_decision`. Following one path never deletes the others.
+   Compact source appears only when inspecting a concrete mechanism.
+8. When sufficiently localized, submit one candidate mechanism and predicted
+   observations. Complete only after a later failing replay satisfies those
+   predictions and reaches the manifestation in the same occurrence. Use
+   `get_investigation_result` for the durable verdict and audit trail, then
+   remove probes.
+
+The controlled RideRush comparison of normal Codex, PRAXIS-style hierarchy
+traversal, raw ReAct + LiveProbe, and graph + LiveProbe is documented in
+[`demo/ride-analysis/FOUR_METHOD_BENCHMARK.md`](demo/ride-analysis/FOUR_METHOD_BENCHMARK.md).
 
 The agent-reported commit and operator-provided commit are metadata, not
 cryptographic proof that the target bytecode exactly matches that revision.
@@ -191,6 +207,9 @@ cryptographic proof that the target bytecode exactly matches that revision.
 | Variable | Used by | Purpose |
 | --- | --- | --- |
 | `LIVEPROBE_API_KEY` | broker, MCP, agents | Shared break-glass admin key, or an agent's per-service key in that agent process. |
+| `LIVEPROBE_ANALYZER_PYTHON` | MCP | Python 3.12 executable used for operator-side deterministic analysis. |
+| `LIVEPROBE_ANALYZER_PYTHONPATH` | MCP development | Source path for an unpackaged `liveprobe-analysis` checkout. |
+| `LIVEPROBE_ANALYSIS_CACHE` | analyzer | Optional operator-side cache directory for revision-aware graph fragments and plans. |
 | `LIVEPROBE_API_KEYS` | broker | One or two comma-separated shared admin keys during rotation; the first is primary. |
 | `CLERK_SECRET_KEY` | broker | Optional Clerk backend secret used to retrieve cached JWKS and verify human session tokens. |
 | `CLERK_PUBLISHABLE_KEY` | broker | Clerk `pk_live_...` key used to validate OAuth access tokens for the remote MCP endpoint. |

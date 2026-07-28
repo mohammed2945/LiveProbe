@@ -61,10 +61,36 @@ Add this server to your Cursor MCP configuration:
 }
 ```
 
-The package exposes eleven tools: four probe setters, `list_services`,
-`list_probes`, `get_probe_data`, `remove_probe`, `ping_broker`, and
-`get_safety_overview`, plus admin-only `list_audit_events`. Tool failures return
-structured JSON guidance for bad credentials, insufficient roles, unknown
-services, missing probes, and an unreachable broker.
+The package exposes 21 tools. The original probe/control surface and legacy
+frontier workflow remain available. The runtime-guided investigation workflow
+adds `start_probe_investigation`, `get_investigation_context`,
+`deploy_investigation_probes`, `collect_investigation_evidence`,
+`apply_investigation_decision`, and `get_investigation_result`.
+
+The analysis commands run the separate operator-side `liveprobe-analysis`
+Python package; target services never build or retain source graphs. The MCP
+server does not call a model. An AI SRE reads the bounded investigation packet,
+and selects only revision-scoped action IDs supplied by the analyzer.
+Exploration requires no hypothesis. A structured candidate mechanism with
+validated anchors and predicted probe observations is accepted only for the
+final confirmation replay.
+
+`start_probe_investigation` accepts `ownership_map` entries mapping source
+roots to deployed service IDs. The analyzer keeps canonical source regions
+owner-neutral and carries those service IDs in separate runtime traversal
+records. Probe bundles therefore contain an authoritative `service_id` and
+their contributing `traversal_ids`; deployment does not infer a target service
+from the probe file path.
+
+For a source checkout:
+
+```sh
+python3.12 -m pip install ./python/analyzer
+```
+
+Set `LIVEPROBE_ANALYZER_PYTHON` when `python3.12` is not on the MCP server's
+PATH. Set `LIVEPROBE_ANALYZER_PYTHONPATH` only for an unpackaged development
+checkout. Tool failures return structured guidance for analysis, credentials,
+roles, unknown services, missing probes, and broker connectivity.
 
 Run `npx -y @doomslayer2945/liveprobe-mcp@0.1.1 --help` for CLI options.

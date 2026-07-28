@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import itertools
 import json
 import math
 import os
@@ -19,6 +20,7 @@ from datetime import UTC, datetime
 from types import CodeType, FrameType
 from typing import IO, Any, Mapping
 
+from .correlation import current_correlation, default_service_instance
 from .serializer import SerializerConfig, render_node, serialize
 
 _MISSING = object()
@@ -178,6 +180,9 @@ class Probe:
     watch_paths: tuple[str, ...] = ()
     template: str | None = None
     metric_path: str | None = None
+    investigation_id: str | None = None
+    candidate_id: str | None = None
+    round: int | None = None
 
     @classmethod
     def parse(cls, raw: object, expected_service: str) -> Probe:
@@ -214,12 +219,29 @@ class Probe:
             raise ValueError("watchPaths must contain non-empty strings")
         template = dict.get(raw, "template")
         metric_path = dict.get(raw, "metricPath")
+        investigation_id = dict.get(raw, "investigationId")
+        candidate_id = dict.get(raw, "candidateId")
+        round_number = dict.get(raw, "round")
         if kind == "log" and not isinstance(template, str):
             raise ValueError("log probes require template")
         if kind == "metric" and (
             not isinstance(metric_path, str) or not metric_path
         ):
             raise ValueError("metric probes require metricPath")
+        if investigation_id is not None and (
+            not isinstance(investigation_id, str) or not investigation_id
+        ):
+            raise ValueError("investigationId must be a non-empty string")
+        if candidate_id is not None and (
+            not isinstance(candidate_id, str) or not candidate_id
+        ):
+            raise ValueError("candidateId must be a non-empty string")
+        if round_number is not None and (
+            isinstance(round_number, bool)
+            or not isinstance(round_number, int)
+            or round_number <= 0
+        ):
+            raise ValueError("round must be a positive integer")
 
         return cls(
             probe_id=probe_id,
@@ -235,6 +257,9 @@ class Probe:
             watch_paths=tuple(watch_paths_raw),
             template=template if isinstance(template, str) else None,
             metric_path=metric_path if isinstance(metric_path, str) else None,
+            investigation_id=investigation_id,
+            candidate_id=candidate_id,
+            round=round_number,
         )
 
 
@@ -311,8 +336,10 @@ class StackEntry:
 class RawHit:
     candidates: tuple[ProbeCandidate, ...]
     variables: dict[str, object]
+    frozen_watches: dict[str, dict[str, dict[str, Any]]]
     stack: tuple[StackEntry, ...]
     timestamp_ns: int
+    correlation: dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,6 +485,7 @@ class LiveProbe:
         api_key: str | None = None,
         commit_sha: str | None = None,
         environment: str | None = None,
+        service_instance: str | None = None,
         redact_keys: list[str] | tuple[str, ...] | None = None,
         redact_values: list[str] | tuple[str, ...] | None = None,
         limits: Mapping[str, object] | None = None,
@@ -480,6 +508,7 @@ class LiveProbe:
         self.api_key = api_key if api_key is not None else _env("LIVEPROBE_API_KEY")
         self.commit_sha, self.commit_source = _resolve_commit_sha(commit_sha)
         self.environment = environment
+        self.service_instance = service_instance or default_service_instance()
         self.limits = Limits.from_mapping(limits)
         self.serializer_config = SerializerConfig.from_mapping(
             serializer_config,
@@ -516,6 +545,7 @@ class LiveProbe:
         self._frame_depth_hint: int | None = None
         self._frame_hint_lock = threading.Lock()
         self._dropped_hits = 0
+        self._local_hit_sequence = itertools.count(1)
 
         self._hit_bucket = TokenBucket(
             self.limits.hits_per_sec, self.limits.hits_per_sec
@@ -697,12 +727,41 @@ class LiveProbe:
                 return None
 
             variables = dict(frame.f_locals)
+            frozen_watches = {
+                capture.state.probe.probe_id: {
+                    path: self._serialize_path(variables, path)
+                    for path in capture.state.probe.watch_paths
+                }
+                for capture in captures
+                if capture.state.probe.kind == "snapshot"
+            }
             stack = self._capture_stack(frame)
+            correlation_context = current_correlation()
+            local_hit_sequence = next(self._local_hit_sequence)
+            correlation = (
+                {
+                    "source": "none",
+                    "quality": "absent",
+                    "localHitSequence": local_hit_sequence,
+                    **(
+                        {}
+                        if self.service_instance is None
+                        else {"serviceInstance": self.service_instance}
+                    ),
+                }
+                if correlation_context is None
+                else correlation_context.event_payload(
+                    local_hit_sequence=local_hit_sequence,
+                    service_instance=self.service_instance,
+                )
+            )
             hit = RawHit(
                 candidates=tuple(captures),
                 variables=variables,
+                frozen_watches=frozen_watches,
                 stack=stack,
                 timestamp_ns=time.time_ns(),
+                correlation=correlation,
             )
             try:
                 self._raw_queue.put_nowait(hit)
@@ -1037,18 +1096,27 @@ class LiveProbe:
             counter_delta = 0
             metric_sample: int | float | None = None
             if probe.kind == "snapshot":
-                watches = {
-                    path: self._serialize_path(hit.variables, path)
-                    for path in probe.watch_paths
-                }
+                watches = hit.frozen_watches.get(probe.probe_id, {})
                 event = {
                     "probeId": probe.probe_id,
                     "type": "snapshot",
                     "ts": timestamp,
+                    "correlation": hit.correlation,
                     "variables": serialize(
                         hit.variables, self.serializer_config
                     ),
                     "watches": watches,
+                    "capture": {
+                        "watchValues": "callback-frozen",
+                        "status": (
+                            "truncated"
+                            if any(
+                                self._contains_truncation(value)
+                                for value in watches.values()
+                            )
+                            else "complete"
+                        ),
+                    },
                     "stack": [
                         {"fn": entry.fn, "file": entry.file, "line": entry.line}
                         for entry in hit.stack
@@ -1062,6 +1130,7 @@ class LiveProbe:
                     "probeId": probe.probe_id,
                     "type": "log",
                     "ts": timestamp,
+                    "correlation": hit.correlation,
                     "message": log_message,
                     "level": "info",
                 }
@@ -1138,6 +1207,20 @@ class LiveProbe:
             self.serializer_config,
             root_key=key,
         )
+
+    def _contains_truncation(self, value: object) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if value.get("t") == "truncated":
+            return True
+        children = value.get("c")
+        if isinstance(children, dict):
+            if any(self._contains_truncation(child) for child in children.values()):
+                return True
+        elif isinstance(children, list):
+            if any(self._contains_truncation(child) for child in children):
+                return True
+        return self._contains_truncation(value.get("m"))
 
     def _probe_error_once(self, state: ProbeState, detail: str) -> None:
         with state.lock:
@@ -1255,9 +1338,14 @@ class LiveProbe:
             if error.code == 400:
                 self._remove_selected_events(selected)
                 self._dropped_hits += len(selected)
+                try:
+                    rejection = error.read(512).decode("utf-8", "replace")
+                except (OSError, ValueError):
+                    rejection = ""
+                detail = f": {rejection}" if rejection else ""
                 self._audit(
                     f"BROKER FLUSH REJECTED HTTP 400; "
-                    f"dropped {len(selected)} event(s)"
+                    f"dropped {len(selected)} event(s){detail}"
                 )
             else:
                 self._audit(f"BROKER FLUSH ERROR HTTP {error.code}")

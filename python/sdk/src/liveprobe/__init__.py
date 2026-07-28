@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from typing import IO, Mapping
 
+from .correlation import CorrelationContext, instrument_fastapi
 from .runtime import LiveProbe
 from .serializer import (
     SanitizedNode,
@@ -16,10 +17,12 @@ from .serializer import (
 __version__ = "0.1.1"
 __all__ = [
     "LiveProbe",
+    "CorrelationContext",
     "SanitizedNode",
     "SerializerConfig",
     "materialize_fixture",
     "serialize",
+    "instrument_fastapi",
     "start",
     "stop",
 ]
@@ -35,6 +38,7 @@ def start(
     api_key: str | None = None,
     commit_sha: str | None = None,
     environment: str | None = None,
+    service_instance: str | None = None,
     redact_keys: list[str] | tuple[str, ...] | None = None,
     redact_values: list[str] | tuple[str, ...] | None = None,
     limits: Mapping[str, object] | None = None,
@@ -62,6 +66,7 @@ def start(
             api_key=api_key,
             commit_sha=commit_sha,
             environment=environment,
+            service_instance=service_instance,
             redact_keys=redact_keys,
             redact_values=redact_values,
             limits=limits,

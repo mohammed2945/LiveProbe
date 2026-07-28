@@ -97,6 +97,7 @@ const DEFAULT_TTL_SECONDS = 1_800;
 const DEFAULT_RING_CAPACITY = 500;
 const DEFAULT_TTL_SWEEP_INTERVAL_MS = 10_000;
 const DEFAULT_SNAPSHOT_INTERVAL_MS = 15_000;
+const DEFAULT_DELETED_PROBE_INGEST_GRACE_MS = 60_000;
 const SOURCE_MAP_BODY_LIMIT_BYTES = 32 * 1024 * 1024;
 const SOURCE_MAP_COMMITS_PER_SERVICE = 5;
 
@@ -104,6 +105,12 @@ const serviceIdSchema = z.string().trim().min(1).max(200);
 const probeIdSchema = z
   .string()
   .regex(/^prb_[0-9A-HJKMNP-TV-Z]{26}$/, "invalid probe id");
+const investigationIdSchema = z
+  .string()
+  .regex(/^inv_[0-9a-f]{24}$/, "invalid investigation id");
+const candidateIdSchema = z
+  .string()
+  .regex(/^cand_[0-9a-f]{24}$/, "invalid candidate id");
 const sourceFileSchema = z.string().trim().min(1).max(4_096);
 const sourceCommitSchema = z
   .string()
@@ -159,6 +166,9 @@ const createCommonShape = {
   condition: ConditionSchema.optional(),
   ttlSeconds: z.number().int().positive().default(DEFAULT_TTL_SECONDS),
   createdBy: z.string().trim().min(1).max(500),
+  investigationId: investigationIdSchema.optional(),
+  candidateId: candidateIdSchema.optional(),
+  round: z.number().int().positive().optional(),
 } as const;
 
 export const CreateProbeSchema = z.discriminatedUnion("type", [
@@ -209,6 +219,9 @@ const definitionCommonShape = {
   hitLimit: z.number().int().positive(),
   version: z.number().int().positive(),
   createdBy: z.string().trim().min(1).max(500),
+  investigationId: investigationIdSchema.optional(),
+  candidateId: candidateIdSchema.optional(),
+  round: z.number().int().positive().optional(),
 } as const;
 
 export const ProbeDefinitionSchema = z.discriminatedUnion("type", [
@@ -336,6 +349,23 @@ export const StatusNameSchema = z.enum([
 const eventCommonShape = {
   probeId: probeIdSchema,
   ts: timestampSchema,
+  correlation: z
+    .object({
+      traceId: z.string().min(1).max(128).optional(),
+      spanId: z.string().min(1).max(64).optional(),
+      source: z.enum([
+        "otel",
+        "liveprobe-w3c",
+        "legacy-x-trace-id",
+        "controlled-replay",
+        "none",
+      ]),
+      quality: z.enum(["exact-execution", "durable-entity", "absent"]),
+      serviceInstance: z.string().min(1).max(500).optional(),
+      localHitSequence: z.number().int().nonnegative(),
+    })
+    .strict()
+    .optional(),
 } as const;
 
 export const ProbeEventSchema = z.discriminatedUnion("type", [
@@ -345,6 +375,13 @@ export const ProbeEventSchema = z.discriminatedUnion("type", [
       type: z.literal("snapshot"),
       variables: SerializedNodeSchema,
       watches: z.record(z.string(), SerializedNodeSchema),
+      capture: z
+        .object({
+          watchValues: z.literal("callback-frozen"),
+          status: z.enum(["complete", "truncated"]),
+        })
+        .strict()
+        .optional(),
       stack: z.array(stackFrameSchema).max(8),
     })
     .strict(),
@@ -440,6 +477,13 @@ interface StoredProbe {
   expired: boolean;
 }
 
+interface DeletedProbeTombstone {
+  scope: ResourceScope;
+  serviceId: string;
+  probeType: ProbeDefinition["type"];
+  expiresAt: number;
+}
+
 type ActivityReason = "activity" | "timeout" | "aborted";
 type ActivityListener = (reason: ActivityReason) => void;
 
@@ -447,6 +491,7 @@ export interface BrokerStateOptions {
   clock?: () => number;
   idGenerator?: (now: number) => string;
   ringCapacity?: number;
+  deletedProbeIngestGraceMs?: number;
 }
 
 export interface PersistenceOptions {
@@ -515,6 +560,7 @@ export interface BuildBrokerOptions {
   clock?: () => number;
   idGenerator?: (now: number) => string;
   ringCapacity?: number;
+  deletedProbeIngestGraceMs?: number;
   ttlSweepIntervalMs?: number;
   persistence?: PersistenceOptions | false;
   remoteMcp?: RemoteMcpOptions;
@@ -881,6 +927,10 @@ function sameResourceScope(
 
 export class BrokerState {
   private readonly probes = new Map<string, StoredProbe>();
+  private readonly deletedProbeTombstones = new Map<
+    string,
+    DeletedProbeTombstone
+  >();
   private readonly serviceVersions = new Map<string, ScopedServiceVersion>();
   private readonly events = new Map<string, ProbeEvent[]>();
   private readonly services = new Map<string, ScopedServiceRecord>();
@@ -891,13 +941,25 @@ export class BrokerState {
   private readonly clock: () => number;
   private readonly idGenerator: (now: number) => string;
   private readonly ringCapacity: number;
+  private readonly deletedProbeIngestGraceMs: number;
 
   public constructor(options: BrokerStateOptions = {}) {
     this.clock = options.clock ?? Date.now;
     this.idGenerator = options.idGenerator ?? createProbeId;
     this.ringCapacity = options.ringCapacity ?? DEFAULT_RING_CAPACITY;
+    this.deletedProbeIngestGraceMs =
+      options.deletedProbeIngestGraceMs ??
+      DEFAULT_DELETED_PROBE_INGEST_GRACE_MS;
     if (!Number.isInteger(this.ringCapacity) || this.ringCapacity <= 0) {
       throw new RangeError("ringCapacity must be a positive integer");
+    }
+    if (
+      !Number.isInteger(this.deletedProbeIngestGraceMs) ||
+      this.deletedProbeIngestGraceMs < 0
+    ) {
+      throw new RangeError(
+        "deletedProbeIngestGraceMs must be a non-negative integer",
+      );
     }
   }
 
@@ -914,8 +976,13 @@ export class BrokerState {
     scope: ResourceScope = DEFAULT_RESOURCE_SCOPE,
   ): ProbeDefinition {
     const now = this.now();
+    this.pruneDeletedProbeTombstones(now);
     let id = this.idGenerator(now);
-    for (let attempt = 0; this.probes.has(id); attempt += 1) {
+    for (
+      let attempt = 0;
+      this.probes.has(id) || this.deletedProbeTombstones.has(id);
+      attempt += 1
+    ) {
       if (attempt >= 10) {
         throw new Error("probe id generator repeatedly produced collisions");
       }
@@ -945,6 +1012,14 @@ export class BrokerState {
     }
     if (!stored.expired) {
       this.incrementServiceVersion(stored.probe.serviceId, stored.scope);
+    }
+    if (this.deletedProbeIngestGraceMs > 0) {
+      this.deletedProbeTombstones.set(id, {
+        scope: resourceScope(stored.scope),
+        serviceId: stored.probe.serviceId,
+        probeType: stored.probe.type,
+        expiresAt: this.now() + this.deletedProbeIngestGraceMs,
+      });
     }
     this.probes.delete(id);
     this.events.delete(id);
@@ -1157,16 +1232,38 @@ export class BrokerState {
   }
 
   public ingest(
-    input: z.infer<typeof IngestSchema>,
+    input: IngestInput,
     scope: ResourceScope = DEFAULT_RESOURCE_SCOPE,
   ): number {
+    return this.ingestBatch(input, scope).accepted;
+  }
+
+  public ingestBatch(
+    input: IngestInput,
+    scope: ResourceScope = DEFAULT_RESOURCE_SCOPE,
+  ): { accepted: number; acceptedInput: IngestInput } {
     this.expireDueProbes();
+    this.pruneDeletedProbeTombstones();
+    const acceptedEvents: ProbeEvent[] = [];
     for (const event of input.events) {
       const stored = this.probes.get(event.probeId);
-      if (
-        stored === undefined ||
-        !sameResourceScope(stored.scope, scope)
-      ) {
+      if (stored === undefined) {
+        const tombstone = this.deletedProbeTombstones.get(event.probeId);
+        if (
+          tombstone !== undefined &&
+          sameResourceScope(tombstone.scope, scope) &&
+          tombstone.serviceId === input.serviceId &&
+          (event.type === "status" || event.type === tombstone.probeType)
+        ) {
+          continue;
+        }
+        throw new BrokerHttpError(
+          400,
+          "invalid_request",
+          `event references unknown probe ${event.probeId}`,
+        );
+      }
+      if (!sameResourceScope(stored.scope, scope)) {
         throw new BrokerHttpError(
           400,
           "invalid_request",
@@ -1198,6 +1295,7 @@ export class BrokerState {
           "metric sum is inconsistent with count, min, and max",
         );
       }
+      acceptedEvents.push(event);
     }
 
     this.touchService(
@@ -1208,7 +1306,7 @@ export class BrokerState {
       input.commitSource,
       scope,
     );
-    for (const event of input.events) {
+    for (const event of acceptedEvents) {
       this.appendEvent(event);
       if (event.type === "status") {
         const status: ProbeStatus = {
@@ -1219,7 +1317,13 @@ export class BrokerState {
         this.statuses.set(event.probeId, status);
       }
     }
-    return input.events.length;
+    return {
+      accepted: acceptedEvents.length,
+      acceptedInput:
+        acceptedEvents.length === input.events.length
+          ? input
+          : { ...input, events: acceptedEvents },
+    };
   }
 
   public listServices(
@@ -1478,6 +1582,7 @@ export class BrokerState {
   private replaceWithSnapshot(parsed: BrokerSnapshot): void {
 
     this.probes.clear();
+    this.deletedProbeTombstones.clear();
     this.serviceVersions.clear();
     this.events.clear();
     this.services.clear();
@@ -1577,6 +1682,14 @@ export class BrokerState {
 
   private serviceKey(scope: ResourceScope, serviceId: string): string {
     return `${resourceScopeKey(scope)}\u0000${serviceId}`;
+  }
+
+  private pruneDeletedProbeTombstones(now = this.now()): void {
+    for (const [probeId, tombstone] of this.deletedProbeTombstones) {
+      if (tombstone.expiresAt <= now) {
+        this.deletedProbeTombstones.delete(probeId);
+      }
+    }
   }
 
   private sourceMapKey(
@@ -1782,6 +1895,12 @@ export async function buildBroker(
       ...(options.ringCapacity === undefined
         ? {}
         : { ringCapacity: options.ringCapacity }),
+      ...(options.deletedProbeIngestGraceMs === undefined
+        ? {}
+        : {
+            deletedProbeIngestGraceMs:
+              options.deletedProbeIngestGraceMs,
+          }),
     });
   const store: BrokerStore | false =
     options.store ??
@@ -2434,16 +2553,16 @@ export async function buildBroker(
     emptyQuerySchema.parse(request.query);
     const input = IngestSchema.parse(request.body);
     const principal = requireServiceAccess(request, input.serviceId);
-    const accepted = await mutateDurably(
-      () => state.ingest(input, principal),
-      async () => {
+    const result = await mutateDurably(
+      () => state.ingestBatch(input, principal),
+      async ({ acceptedInput }) => {
         if (store === false) return;
         await (store.persistIngest === undefined
           ? store.persist(state)
-          : store.persistIngest(state, input, principal));
+          : store.persistIngest(state, acceptedInput, principal));
       },
     );
-    return reply.status(202).send({ accepted });
+    return reply.status(202).send({ accepted: result.accepted });
   });
 
   app.get("/v1/probes/:id/data", async (request, reply) => {

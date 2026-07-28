@@ -9,6 +9,11 @@ from typing import Any
 
 import pytest
 
+from liveprobe.correlation import (
+    CorrelationContext,
+    reset_correlation,
+    set_correlation,
+)
 from liveprobe.runtime import (
     Condition,
     LiveProbe,
@@ -80,6 +85,12 @@ def concurrent_condition_target(
     assert user["tier"] == tier
 
 
+def mutate_after_capture(agent: LiveProbe) -> None:
+    payload = {"amount": 23.1}
+    agent._on_line(mutate_after_capture.__code__, 702)
+    payload["amount"] = 2310
+
+
 def test_dot_resolution_is_static_and_conditions_are_strict() -> None:
     class Dangerous:
         def __init__(self) -> None:
@@ -127,6 +138,8 @@ def test_callback_verifies_frame_and_builds_snapshot(fake_monitoring: Any) -> No
             "user.apiToken": {"t": "redacted"},
         }
         assert snapshot["stack"][0]["fn"] == "trigger"
+        assert snapshot["correlation"]["source"] == "none"
+        assert snapshot["correlation"]["quality"] == "absent"
         assert any(
             event.get("status") == "hit-limit-reached"
             for event in agent._events
@@ -135,6 +148,82 @@ def test_callback_verifies_frame_and_builds_snapshot(fake_monitoring: Any) -> No
         assert fake_monitoring.restart_count >= 2
         assert "[liveprobe] PROBE ARMED" in output.getvalue()
         assert "[liveprobe] PROBE HIT LIMIT" in output.getvalue()
+    finally:
+        agent._uninstall_monitoring()
+
+
+def test_callback_captures_request_identity_before_background_processing(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring)
+    agent._install_monitoring()
+    agent._reconcile(
+        [
+            probe(
+                "prb_correlated",
+                "snapshot",
+                investigationId="inv_" + ("a" * 24),
+                candidateId="cand_" + ("b" * 24),
+                round=2,
+            )
+        ]
+    )
+    context = CorrelationContext(
+        trace_id="1" * 32,
+        span_id="2" * 16,
+        source="liveprobe-w3c",
+    )
+    token = set_correlation(context)
+    try:
+        trigger(agent)
+    finally:
+        reset_correlation(token)
+    try:
+        agent._drain_queue()
+        snapshot = next(
+            event for event in agent._events if event["type"] == "snapshot"
+        )
+        assert snapshot["correlation"] == {
+            "traceId": "1" * 32,
+            "spanId": "2" * 16,
+            "source": "liveprobe-w3c",
+            "quality": "exact-execution",
+            "localHitSequence": 1,
+        }
+        assert agent._states["prb_correlated"].probe.round == 2
+    finally:
+        agent._uninstall_monitoring()
+
+
+def test_snapshot_watch_values_are_frozen_in_the_callback(
+    fake_monitoring: Any,
+) -> None:
+    agent = make_agent(fake_monitoring)
+    agent._install_monitoring()
+    try:
+        agent._reconcile(
+            [
+                probe(
+                    "prb_frozen",
+                    "snapshot",
+                    line=702,
+                    watchPaths=["payload.amount"],
+                )
+            ]
+        )
+        mutate_after_capture(agent)
+        agent._drain_queue()
+        snapshot = next(
+            event for event in agent._events if event["type"] == "snapshot"
+        )
+        assert snapshot["watches"]["payload.amount"] == {
+            "t": "num",
+            "v": 23.1,
+        }
+        assert snapshot["capture"] == {
+            "watchValues": "callback-frozen",
+            "status": "complete",
+        }
     finally:
         agent._uninstall_monitoring()
 

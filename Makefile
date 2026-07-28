@@ -14,11 +14,14 @@ endif
 GCP_LOGS_ARGS ?= --tail=200
 
 .PHONY: \
-	test fixtures-test typescript-test python-test java-test demo-unit-test \
+	test fixtures-test typescript-test python-test python-analysis-test java-test demo-unit-test \
 	gcp-deploy-test \
 	payment-deps python-demo-deps payment-test inventory-test \
 	build typescript-build payment-build java-build inventory-build \
-	redaction-audit readonly-audit bench \
+	redaction-audit readonly-audit bench ride-analysis-bench ride-analysis-scale \
+	python-probe-bundle-bench ride-analysis-e2e ride-analysis-tracks \
+	ride-investigation-e2e ride-runtime-model-track ride-adaptive-comparison \
+	ride-four-method-benchmark ride-four-method-benchmark-codex \
 	e2e-node e2e-python e2e-jvm \
 	demo-prerequisites demo demo-down \
 	gcp-demo-prerequisites gcp-demo-up gcp-demo-status gcp-demo-logs gcp-demo-down \
@@ -35,6 +38,9 @@ typescript-test:
 
 python-test:
 	cd python/sdk && sh ../../scripts/python312.sh -m pytest
+
+python-analysis-test:
+	cd python/analyzer && sh ../../scripts/python312.sh -m pytest
 
 java-test:
 	sh scripts/java17.sh $(MAKE) -C java/bridge test
@@ -93,6 +99,62 @@ readonly-audit:
 bench:
 	pnpm --filter @doomslayer2945/liveprobe-node run bench
 	sh scripts/python312.sh python/sdk/benchmarks/monitoring_overhead.py
+
+python-probe-bundle-bench:
+	PYTHONPATH=python/sdk/src sh scripts/python312.sh \
+		python/sdk/benchmarks/probe_bundle_overhead.py \
+		--assert-max-p99-ms 5
+
+ride-analysis-bench:
+	PYTHONPATH=python/analyzer/src sh scripts/python312.sh \
+		python/analyzer/benchmarks/ride_sharing.py \
+		--repository ../ride_sharing_probe_demo
+
+ride-analysis-e2e:
+	npm --prefix packages/mcp-server run build
+	npm --prefix packages/broker run build
+	node demo/ride-analysis/e2e.mjs
+
+ride-investigation-e2e:
+	npm --prefix packages/mcp-server run build
+	npm --prefix packages/broker run build
+	node demo/ride-analysis/e2e-investigation.mjs
+
+ride-four-method-benchmark:
+	npm --prefix packages/mcp-server run build
+	npm --prefix packages/broker run build
+	node demo/ride-analysis/four-method-benchmark.mjs \
+		--decision-mode=oracle \
+		--repetitions=1
+
+ride-four-method-benchmark-codex:
+	npm --prefix packages/mcp-server run build
+	npm --prefix packages/broker run build
+	node demo/ride-analysis/four-method-benchmark.mjs \
+		--decision-mode=codex \
+		--repetitions=3
+
+ride-analysis-scale:
+	PYTHONPATH=python/analyzer/src sh scripts/python312.sh \
+		python/analyzer/benchmarks/scale_corpus.py \
+		--functions 1000 5000 10000
+
+ride-analysis-tracks:
+	PYTHONPATH=python/analyzer/src sh scripts/python312.sh \
+		python/analyzer/experiments/ride_sharing_tracks.py \
+		--repository ../ride_sharing_probe_demo
+
+ride-runtime-model-track:
+	@echo "Historical schema-14 experiment; the supported runtime workflow is: make ride-investigation-e2e"
+	PYTHONPATH=python/analyzer/src sh scripts/python312.sh \
+		python/analyzer/experiments/runtime_guided_model.py \
+		--repository ../ride_sharing_probe_demo
+
+ride-adaptive-comparison:
+	@echo "Historical matched passing/failing comparison; the supported runtime workflow is: make ride-investigation-e2e"
+	npm --prefix packages/mcp-server run build
+	npm --prefix packages/broker run build
+	node demo/ride-analysis/adaptive-comparison.mjs --decision-mode=oracle
 
 e2e-node: payment-deps
 	pnpm --filter @doomslayer2945/liveprobe-node run build
