@@ -898,6 +898,33 @@ describe("ProbeManager breakpoint sharing", () => {
     expect(counterDeltas(aggregates)).toEqual({ prb_long: 1 });
   });
 
+  it("removes a shared breakpoint once on shutdown, not once per probe", async () => {
+    const commands: string[] = [];
+    const { manager } = setup(createSharedLineInspector(commands) as never);
+    await manager.reconcile([counterProbe("prb_a"), counterProbe("prb_b")]);
+    commands.length = 0;
+
+    await manager.stop();
+
+    // Removing per probe would ask V8 to drop the same breakpoint twice.
+    expect(commands.filter((command) => command.startsWith("remove:"))).toEqual([
+      "remove:bp-1",
+    ]);
+  });
+
+  it("removes a shared breakpoint once when suspending", async () => {
+    const commands: string[] = [];
+    const { manager } = setup(createSharedLineInspector(commands) as never);
+    await manager.reconcile([counterProbe("prb_a"), counterProbe("prb_b")]);
+    commands.length = 0;
+
+    await manager.suspendAll("event loop lag");
+
+    expect(commands.filter((command) => command.startsWith("remove:"))).toEqual([
+      "remove:bp-1",
+    ]);
+  });
+
   it("gives probes on different lines their own breakpoints", async () => {
     const commands: string[] = [];
     const { manager, aggregates } = setup(
