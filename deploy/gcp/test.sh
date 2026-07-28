@@ -45,7 +45,7 @@ node -e '
   const server = config.mcpServers?.liveprobe;
   const expected = [
     "-y",
-    "@doomslayer2945/liveprobe-mcp@0.3.0",
+    "@doomslayer2945/liveprobe-mcp@0.4.0",
     "--broker-url",
     "http://203.0.113.11:80",
   ];

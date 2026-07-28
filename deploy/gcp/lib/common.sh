@@ -289,7 +289,7 @@ const config = {
       command: "npx",
       args: [
         "-y",
-        "@doomslayer2945/liveprobe-mcp@0.3.0",
+        "@doomslayer2945/liveprobe-mcp@0.4.0",
         "--broker-url",
         brokerUrl,
       ],

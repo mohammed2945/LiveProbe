@@ -41,7 +41,7 @@ Application ports are bound to VM loopback. JDWP stays on a Docker
 - `gcloud`, authenticated to an account that can manage Compute Engine
 - Node.js 20+ and npm on the operator machine
 - A clean Git working tree containing the revision to deploy
-- Published `@doomslayer2945/liveprobe-mcp@0.3.0`
+- Published `@doomslayer2945/liveprobe-mcp@0.4.0`
 - A strong `LIVEPROBE_API_KEY` retained by the operator
 - A separate 64-character hex `POSTGRES_PASSWORD` retained by the operator
 - For Clerk auth: a Clerk backend secret key and the exact frontend origin
@@ -50,7 +50,7 @@ Application ports are bound to VM loopback. JDWP stays on a Docker
 ```sh
 gcloud auth login
 gcloud config set project "<PROJECT_ID>"
-npm view @doomslayer2945/liveprobe-mcp@0.3.0 version
+npm view @doomslayer2945/liveprobe-mcp@0.4.0 version
 git status --short
 ```
 
@@ -256,7 +256,7 @@ Use the exact JSON printed by `deploy.sh`. Its shape is:
       "command": "npx",
       "args": [
         "-y",
-        "@doomslayer2945/liveprobe-mcp@0.3.0",
+        "@doomslayer2945/liveprobe-mcp@0.4.0",
         "--broker-url",
         "https://probe.example.com"
       ],

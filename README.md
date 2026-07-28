@@ -9,10 +9,10 @@ C++ use the Linux native-eBPF backend documented in
 
 This repository is a development prototype, not a production observability
 service. Published client packages are
-`@doomslayer2945/liveprobe-mcp@0.3.0`,
+`@doomslayer2945/liveprobe-mcp@0.4.0`,
 `@doomslayer2945/liveprobe-node@0.3.0`, `liveprobe==0.3.0`, and
 `io.liveprobe:liveprobe-bridge:0.3.0`. The MCP package depends on
-`@doomslayer2945/liveprobe-protocol@0.3.0`, the shared wire contract, which
+`@doomslayer2945/liveprobe-protocol@0.4.0`, the shared wire contract, which
 must be published before it.
 
 For application teams connecting to an existing broker, start with the
@@ -307,7 +307,7 @@ gcloud config set project "<PROJECT_ID>"
 The deployer rejects tracked modifications and untracked files because it
 archives the clean local `HEAD`. Commit every intended change, confirm
 `git status --short` is empty, make sure
-`@doomslayer2945/liveprobe-mcp@0.3.0` is available from npm, set a strong
+`@doomslayer2945/liveprobe-mcp@0.4.0` is available from npm, set a strong
 shared key and database password for first-time Secret Manager initialization,
 and deploy:
 
@@ -428,16 +428,23 @@ managed load balancer; local and pre-activation HTTP must remain on a trusted
 network. The internal Compose network reduces JVM diagnostic exposure but is
 not a substitute for production network policy.
 
-Postgres schema version 8 uses tenant/project/environment keys for durable
+Postgres schema version 9 uses tenant/project/environment keys for durable
 runtime records. Existing records are assigned to the
 `internal/default/default` scope during migration. Clerk organization scopes
-are provisioned transactionally on first authenticated use.
+are provisioned transactionally on first authenticated use. Version 9 adds a
+`probe_statuses.value` JSONB column so a restored probe status keeps its native
+backend metadata instead of only the three scalar columns; the migration
+backfills that column from the existing scalars, so an upgrade preserves
+recorded status and needs no operator action.
 
-For the `0.3.0` rollout, deploy the broker before publishing or deploying the
-`0.3.0` agents and MCP package. The new broker accepts legacy agents, but older
-strict brokers do not recognize structured safety reports. During a rolling
-agent update, advanced probes remain gated until every replica that heartbeated
-in the last 45 seconds reports the needed capability.
+For the `0.4.0` rollout, deploy the broker before publishing the MCP and
+protocol packages. The managed-language agents are unchanged and stay at
+`0.3.0`; only `@doomslayer2945/liveprobe-mcp` and
+`@doomslayer2945/liveprobe-protocol` move to `0.4.0`. The new broker accepts
+legacy agents, but older strict brokers do not recognize structured safety
+reports. During a rolling agent update, advanced probes remain gated until
+every replica that heartbeated in the last 45 seconds reports the needed
+capability.
 
 ## Benchmarks
 

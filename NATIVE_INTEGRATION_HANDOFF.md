@@ -34,8 +34,8 @@ scope.
   checkpoint. No package was published and no branch or release was pushed.
 - Native-capable source components are unreleased on this branch:
   - `@liveprobe/broker` remains private at `0.0.0`;
-  - `@doomslayer2945/liveprobe-mcp` is prepared as `0.3.0`;
-  - `@doomslayer2945/liveprobe-protocol` is `0.3.0`;
+  - `@doomslayer2945/liveprobe-mcp` is prepared as `0.4.0`;
+  - `@doomslayer2945/liveprobe-protocol` is `0.4.0`;
   - `liveprobe-native-agent`;
   - `liveprobe-bpf-loader`; and
   - `liveprobe-native-protocol`.

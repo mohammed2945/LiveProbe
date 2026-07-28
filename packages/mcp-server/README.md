@@ -28,7 +28,7 @@ the tenant boundary.
 
 ```sh
 LIVEPROBE_API_KEY="your-shared-key" \
-  npx -y @doomslayer2945/liveprobe-mcp@0.3.0 \
+  npx -y @doomslayer2945/liveprobe-mcp@0.4.0 \
   --broker-url http://HOST:7070
 ```
 
@@ -49,7 +49,7 @@ Add this server to your Cursor MCP configuration:
       "command": "npx",
       "args": [
         "-y",
-        "@doomslayer2945/liveprobe-mcp@0.3.0",
+        "@doomslayer2945/liveprobe-mcp@0.4.0",
         "--broker-url",
         "http://HOST:7070"
       ],
@@ -85,4 +85,4 @@ audit metadata; a native `buildId` identifies the executable actually observed
 by the host agent. MCP creates only logical probes and never registers agents,
 constructs physical sites, or communicates with the BPF loader.
 
-Run `npx -y @doomslayer2945/liveprobe-mcp@0.3.0 --help` for CLI options.
+Run `npx -y @doomslayer2945/liveprobe-mcp@0.4.0 --help` for CLI options.

@@ -61,6 +61,11 @@ Install the agent that matches the target service. Use a stable, unique
 `serviceId` for each deployable service, such as `payments-api` or
 `billing-worker`.
 
+Node.js, Python, and the JVM use an in-process agent installed as a normal
+dependency. Rust and C++ instead use a host-level eBPF agent that attaches to
+the deployed executable, so those services are not rebuilt against a LiveProbe
+library and the install is per host rather than per application.
+
 ### Node.js 20+
 
 Install the published ESM package:
@@ -210,6 +215,95 @@ to the public internet. JVM probes use source-path suffix matching and require
 the target's `LineNumberTable`; local capture also requires its
 `LocalVariableTable`.
 
+### Rust and C++ on Linux x86-64
+
+Compiled services are not instrumented by an in-process SDK. A host-level
+native agent attaches uprobes to the deployed executable through eBPF, so the
+service itself is unmodified and needs no rebuild against a LiveProbe library.
+
+This backend is Linux x86-64 only. The host kernel needs BTF, uprobes, BPF ring
+buffers, and tracefs. The target executable must ship DWARF debug information,
+either inside the binary or as a separate debug file found through
+`symbolDirectories` or `debuginfod`. Build with `debug = true` (Cargo) or `-g`
+(C++); release optimization is supported, and inlined code resolves to its
+inlined site.
+
+Two processes run per host, and the split is the security boundary. Only
+`liveprobe-bpf-loader` is privileged; it runs as root, or with the smallest
+loader-only capability set the host permits. The agent that talks to the broker
+runs as a dedicated unprivileged account and reaches the loader over a
+root-owned Unix socket. Never grant BPF privileges to the agent or to the
+application. Build and install the two binaries with `make native-release`
+followed by `make native-install`; see
+[native eBPF development](native-ebpf-development.md) for the full build,
+packaging, and verification path.
+
+Native agents authenticate with their own credential type rather than the
+shared operator key. An operator mints one per host, and it is returned exactly
+once:
+
+```sh
+umask 077
+curl --fail --silent --show-error \
+  -H "Authorization: Bearer ${LIVEPROBE_API_KEY}" \
+  -H "Content-Type: application/json" \
+  --data '{"agentId":"native-host-1","allowedServiceIds":["quotes-rust","pricing-cpp"],"label":"Prod host 1"}' \
+  "${BROKER_URL}/v1/native-credentials" \
+  > native-credential.json
+```
+
+The returned `apiKey` carries an `lp_native_` prefix, is stored by the broker
+only as a hash, and is restricted to the listed service IDs. Revoke it with
+`DELETE /v1/native-credentials/<credential-id>`; list non-secret metadata with
+`GET /v1/native-credentials`. This route requires the broker's PostgreSQL
+durable store and returns `503 credential_store_unavailable` without it.
+
+Describe each service by exact executable path in the agent configuration at
+`/etc/liveprobe/native-agent.json`:
+
+```json
+{
+  "agentId": "native-host-1",
+  "brokerUrl": "https://liveprobe.tryastrea.tech",
+  "loaderSocket": "/run/liveprobe/loader.sock",
+  "redactKeys": ["tenantSecret"],
+  "redactValues": [],
+  "services": [
+    { "serviceId": "quotes-rust", "language": "rust", "executablePath": "/opt/quotes/bin/quotes" },
+    { "serviceId": "pricing-cpp", "language": "cpp", "executablePath": "/opt/pricing/bin/pricing" }
+  ],
+  "symbolDirectories": ["/usr/lib/debug"],
+  "debuginfodUrl": null,
+  "symbolCacheDirectory": null
+}
+```
+
+Start the loader first, passing the unprivileged account's IDs and the exact
+allowlist of attachable executables. The loader attaches to nothing outside
+that list:
+
+```sh
+sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe
+sudo /usr/local/bin/liveprobe-bpf-loader \
+  /run/liveprobe/loader.sock \
+  "$(id -u liveprobe)" "$(id -g liveprobe)" \
+  /opt/quotes/bin/quotes \
+  /opt/pricing/bin/pricing
+```
+
+Then start the agent as that unprivileged account:
+
+```sh
+sudo -u liveprobe env \
+  LIVEPROBE_NATIVE_CREDENTIAL="$(secret-tool lookup service liveprobe-native-agent)" \
+  /usr/local/bin/liveprobe-native-agent /etc/liveprobe/native-agent.json
+```
+
+The agent registers, reports discovered instances, reconciles desired probe
+state, and retries transient failures with bounded jittered backoff. Native
+probes are read-only: capture never writes to target memory, and a probe that
+reaches its configured limit latches detached rather than silently re-arming.
+
 ## 3. Configure the MCP tools
 
 For the hosted service, no SDK package or API key is needed for MCP. Add:
@@ -236,7 +330,7 @@ package does not need to be installed globally.
 Confirm that npm can resolve it:
 
 ```sh
-npx -y @doomslayer2945/liveprobe-mcp@0.3.0 --help
+npx -y @doomslayer2945/liveprobe-mcp@0.4.0 --help
 ```
 
 For Cursor or another client that accepts the common `mcpServers` JSON shape,
@@ -249,7 +343,7 @@ add this configuration:
       "command": "npx",
       "args": [
         "-y",
-        "@doomslayer2945/liveprobe-mcp@0.3.0",
+        "@doomslayer2945/liveprobe-mcp@0.4.0",
         "--broker-url",
         "https://liveprobe.tryastrea.tech"
       ],

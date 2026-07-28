@@ -432,7 +432,7 @@ Do not create a probe yet.`}
         <CodeBlock
           language="shell"
           code={`LIVEPROBE_API_KEY="<operator-key>" \\
-npx -y @doomslayer2945/liveprobe-mcp@0.3.0 \\
+npx -y @doomslayer2945/liveprobe-mcp@0.4.0 \\
   --broker-url https://liveprobe.tryastrea.tech`}
         />
         <CodeBlock
@@ -443,7 +443,7 @@ npx -y @doomslayer2945/liveprobe-mcp@0.3.0 \\
       "command": "npx",
       "args": [
         "-y",
-        "@doomslayer2945/liveprobe-mcp@0.3.0",
+        "@doomslayer2945/liveprobe-mcp@0.4.0",
         "--broker-url",
         "https://liveprobe.tryastrea.tech"
       ],

@@ -185,7 +185,7 @@ describe("published tarball", () => {
         };
         expect(installedPackageJson).toMatchObject({
           name: "@doomslayer2945/liveprobe-mcp",
-          version: "0.3.0",
+          version: "0.4.0",
         });
         // A `workspace:` specifier that survives into the published manifest
         // is uninstallable for everyone outside this repository, and the
@@ -194,7 +194,7 @@ describe("published tarball", () => {
           Object.values(installedPackageJson.dependencies ?? {}),
         ).not.toContainEqual(expect.stringContaining("workspace:"));
         expect(installedPackageJson.dependencies).toMatchObject({
-          "@doomslayer2945/liveprobe-protocol": "0.3.0",
+          "@doomslayer2945/liveprobe-protocol": "0.4.0",
         });
 
         const transport = new StdioClientTransport({
