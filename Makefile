@@ -144,12 +144,12 @@ native-install: native-release
 		"$(DESTDIR)$(NATIVE_PREFIX)/bin/liveprobe-bpf-loader"
 
 native-e2e-rust: native-release native-demo
-	pnpm --filter @liveprobe/protocol build
+	pnpm --filter @doomslayer2945/liveprobe-protocol build
 	pnpm --filter @liveprobe/broker build
 	node scripts/native-e2e.mjs rust
 
 native-e2e-cpp: native-release native-demo
-	pnpm --filter @liveprobe/protocol build
+	pnpm --filter @doomslayer2945/liveprobe-protocol build
 	pnpm --filter @liveprobe/broker build
 	node scripts/native-e2e.mjs cpp
 
