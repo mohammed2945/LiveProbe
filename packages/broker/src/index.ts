@@ -25,7 +25,7 @@ import {
   type NativeAgentRegistration,
   type NativeIngestEnvelope,
   type NativeInstance,
-} from "@liveprobe/protocol";
+} from "@doomslayer2945/liveprobe-protocol";
 import { z, ZodError } from "zod";
 
 import type {

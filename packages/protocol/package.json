@@ -1,6 +1,6 @@
 {
-  "name": "@liveprobe/protocol",
-  "version": "0.2.0",
+  "name": "@doomslayer2945/liveprobe-protocol",
+  "version": "0.3.0",
   "description": "Canonical LiveProbe broker, MCP, managed-runtime, and native-eBPF wire contract",
   "type": "module",
   "main": "./dist/index.js",

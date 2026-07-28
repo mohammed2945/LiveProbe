@@ -26,12 +26,12 @@ importers:
       '@doomslayer2945/liveprobe-mcp':
         specifier: workspace:*
         version: link:../mcp-server
+      '@doomslayer2945/liveprobe-protocol':
+        specifier: workspace:*
+        version: link:../protocol
       '@jridgewell/trace-mapping':
         specifier: ^0.3.31
         version: 0.3.31
-      '@liveprobe/protocol':
-        specifier: workspace:*
-        version: link:../protocol
       fastify:
         specifier: ^5.10.0
         version: 5.10.0
@@ -57,7 +57,7 @@ importers:
 
   packages/mcp-server:
     dependencies:
-      '@liveprobe/protocol':
+      '@doomslayer2945/liveprobe-protocol':
         specifier: workspace:*
         version: link:../protocol
       '@modelcontextprotocol/sdk':

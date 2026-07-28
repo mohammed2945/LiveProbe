@@ -100,19 +100,32 @@ describe("published tarball", () => {
     async () => {
       const temporaryRoot = mkdtempSync(join(tmpdir(), "liveprobe-mcp-"));
       try {
-        const packOutput = execFileSync(
-          "npm",
-          ["pack", "--json", "--pack-destination", temporaryRoot],
-          { cwd: packageRoot, encoding: "utf8" },
-        );
-        const packResults = JSON.parse(packOutput) as Array<{
-          filename: string;
-          files: Array<{ path: string }>;
-        }>;
-        const packResult = packResults[0];
-        if (packResult === undefined) {
-          throw new Error("npm pack did not return a tarball");
-        }
+        // Deliberately pnpm and not npm. This package depends on
+        // @doomslayer2945/liveprobe-protocol through the workspace, and only
+        // pnpm rewrites `workspace:*` to a real version when it packs. `npm
+        // pack` would ship that specifier verbatim and every install of the
+        // published tarball would fail on an unsupported URL type.
+        const pack = (filter: string) => {
+          const output = execFileSync(
+            "pnpm",
+            [
+              "--filter",
+              filter,
+              "pack",
+              "--json",
+              "--pack-destination",
+              temporaryRoot,
+            ],
+            { cwd: packageRoot, encoding: "utf8" },
+          );
+          return JSON.parse(output) as {
+            filename: string;
+            files: Array<{ path: string }>;
+          };
+        };
+
+        const protocolResult = pack("@doomslayer2945/liveprobe-protocol");
+        const packResult = pack("@doomslayer2945/liveprobe-mcp");
 
         const packedPaths = packResult.files.map(({ path }) => path).sort();
         expect(packedPaths).toContain("README.md");
@@ -129,8 +142,16 @@ describe("published tarball", () => {
           ),
         ).toEqual([]);
 
-        const tarballPath = join(temporaryRoot, packResult.filename);
+        const tarballPath = resolve(temporaryRoot, packResult.filename);
+        const protocolTarballPath = resolve(
+          temporaryRoot,
+          protocolResult.filename,
+        );
         const installRoot = join(temporaryRoot, "installed");
+        // The protocol tarball stands in for the registry copy. Publishing it
+        // before the MCP package is a real release-ordering constraint, not a
+        // test artefact: the MCP tarball declares a hard version dependency on
+        // it.
         execFileSync(
           "npm",
           [
@@ -140,6 +161,7 @@ describe("published tarball", () => {
             "--no-fund",
             "--prefix",
             installRoot,
+            protocolTarballPath,
             tarballPath,
           ],
           { encoding: "utf8" },
@@ -156,10 +178,23 @@ describe("published tarball", () => {
             ),
             "utf8",
           ),
-        ) as { name?: string; version?: string };
+        ) as {
+          name?: string;
+          version?: string;
+          dependencies?: Record<string, string>;
+        };
         expect(installedPackageJson).toMatchObject({
           name: "@doomslayer2945/liveprobe-mcp",
           version: "0.3.0",
+        });
+        // A `workspace:` specifier that survives into the published manifest
+        // is uninstallable for everyone outside this repository, and the
+        // failure only shows up after publishing.
+        expect(
+          Object.values(installedPackageJson.dependencies ?? {}),
+        ).not.toContainEqual(expect.stringContaining("workspace:"));
+        expect(installedPackageJson.dependencies).toMatchObject({
+          "@doomslayer2945/liveprobe-protocol": "0.3.0",
         });
 
         const transport = new StdioClientTransport({

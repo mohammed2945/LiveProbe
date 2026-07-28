@@ -18,9 +18,6 @@
     "dist",
     "README.md"
   ],
-  "bundledDependencies": [
-    "@liveprobe/protocol"
-  ],
   "engines": {
     "node": ">=20"
   },
@@ -28,13 +25,13 @@
     "access": "public"
   },
   "scripts": {
-    "build": "pnpm --filter @liveprobe/protocol run build && tsc --project tsconfig.json",
+    "build": "pnpm --filter @doomslayer2945/liveprobe-protocol run build && tsc --project tsconfig.json",
     "start": "node dist/cli.js",
     "test": "npm run build && vitest run --passWithNoTests",
-    "typecheck": "pnpm --filter @liveprobe/protocol run build && tsc --project tsconfig.json --noEmit && tsc --project tsconfig.test.json"
+    "typecheck": "pnpm --filter @doomslayer2945/liveprobe-protocol run build && tsc --project tsconfig.json --noEmit && tsc --project tsconfig.test.json"
   },
   "dependencies": {
-    "@liveprobe/protocol": "workspace:*",
+    "@doomslayer2945/liveprobe-protocol": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
   },

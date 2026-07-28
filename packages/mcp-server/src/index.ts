@@ -10,7 +10,7 @@ import {
   ProbeDefinitionSchema,
   RuntimeBackendSchema,
   RuntimeLanguageSchema,
-} from "@liveprobe/protocol";
+} from "@doomslayer2945/liveprobe-protocol";
 import { z } from "zod";
 
 const serviceIdSchema = z.string().trim().min(1).max(200);

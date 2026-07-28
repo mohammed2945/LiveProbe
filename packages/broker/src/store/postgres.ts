@@ -1,5 +1,5 @@
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
-import type { NativeIngestEnvelope } from "@liveprobe/protocol";
+import type { NativeIngestEnvelope } from "@doomslayer2945/liveprobe-protocol";
 
 import type {
   AuditEventRecord,

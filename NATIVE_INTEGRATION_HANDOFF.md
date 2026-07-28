@@ -35,7 +35,7 @@ scope.
 - Native-capable source components are unreleased on this branch:
   - `@liveprobe/broker` remains private at `0.0.0`;
   - `@doomslayer2945/liveprobe-mcp` is prepared as `0.3.0`;
-  - `@liveprobe/protocol` is `0.2.0`;
+  - `@doomslayer2945/liveprobe-protocol` is `0.3.0`;
   - `liveprobe-native-agent`;
   - `liveprobe-bpf-loader`; and
   - `liveprobe-native-protocol`.
@@ -230,7 +230,7 @@ test uses MCP to create probes.
 
 ### Shared broker/MCP status contract
 
-`@liveprobe/protocol` is the canonical shared wire contract for broker, MCP,
+`@doomslayer2945/liveprobe-protocol` is the canonical shared wire contract for broker, MCP,
 managed-runtime, and native-eBPF traffic. Broker, MCP, TypeScript, and Rust
 contract tests fail if their accepted reason codes or fields drift.
 
