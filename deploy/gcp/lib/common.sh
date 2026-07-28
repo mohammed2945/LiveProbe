@@ -311,6 +311,20 @@ print_cursor_mcp_json() {
   print_broker_mcp_json "http://${ip}:${port}" "$api_key"
 }
 
+# The Clerk MCP OAuth redirect needs the public hostname. An activated
+# deployment already persists that hostname in VM metadata, but reading
+# metadata is a network call and load_gcp_config must stay offline: every
+# script is required to reject an unsafe target before touching GCP at all,
+# which recovery-drill.sh asserts against an empty command log. So the presence
+# check lives here and runs after load_persisted_https_domain, rather than
+# inside load_gcp_config where it would have forced operators to re-supply a
+# domain the deployment had already recorded.
+require_clerk_https_domain() {
+  [[ "${CLERK_MCP_OAUTH:-false}" == "true" ]] || return 0
+  [[ -n "$HTTPS_DOMAIN" ]] ||
+    die "Clerk MCP OAuth requires HTTPS_DOMAIN"
+}
+
 load_persisted_https_domain() {
   local metadata_json
   local persisted_domain
@@ -427,6 +441,9 @@ load_gcp_config() {
   CLERK_FRONTEND_API_URL="${CLERK_FRONTEND_API_URL:-}"
   CLERK_AUTHORIZED_PARTIES="${CLERK_AUTHORIZED_PARTIES:-}"
   CLERK_AUDIENCE="${CLERK_AUDIENCE:-}"
+  # Set once the Clerk MCP OAuth inputs validate, and read back by
+  # require_clerk_https_domain after the persisted domain is resolved.
+  CLERK_MCP_OAUTH=false
   HTTPS_DOMAIN="${HTTPS_DOMAIN:-}"
   HTTPS_IP_NAME="${HTTPS_IP_NAME:-${VM_NAME}-https-ip}"
   HTTPS_INSTANCE_GROUP="${HTTPS_INSTANCE_GROUP:-${VM_NAME}-https-backend}"
@@ -474,10 +491,9 @@ load_gcp_config() {
     if [[ -n "$CLERK_PUBLISHABLE_KEY" || -n "$CLERK_FRONTEND_API_URL" ]]; then
       [[ -n "$CLERK_PUBLISHABLE_KEY" && -n "$CLERK_FRONTEND_API_URL" ]] ||
         die "CLERK_PUBLISHABLE_KEY and CLERK_FRONTEND_API_URL must be set together"
-      [[ -n "$HTTPS_DOMAIN" ]] ||
-        die "Clerk MCP OAuth requires HTTPS_DOMAIN"
       validate_clerk_publishable_key "$CLERK_PUBLISHABLE_KEY"
       validate_https_origin "CLERK_FRONTEND_API_URL" "$CLERK_FRONTEND_API_URL"
+      CLERK_MCP_OAUTH=true
     fi
     if [[ "$SECRETS_BACKEND" == "environment" ]]; then
       [[ -n "$CLERK_SECRET_KEY" ]] ||

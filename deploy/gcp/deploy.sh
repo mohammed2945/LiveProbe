@@ -19,6 +19,7 @@ validate_commit "$DEPLOY_COMMIT"
 
 load_gcp_config
 load_persisted_https_domain
+require_clerk_https_domain
 if [[ "$SECRETS_BACKEND" == "secret-manager" ]]; then
   PROJECT_ID="$PROJECT_ID" \
   REGION="$REGION" \

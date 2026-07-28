@@ -1155,4 +1155,66 @@ if PROJECT_ID=lightprobe-test \
   fail "firewall refresh accepted 0.0.0.0 as a client address"
 fi
 
+# load_gcp_config must stay offline. Every script depends on it to reject a bad
+# target before touching GCP, which the recovery-drill cases above assert with
+# an empty command log. Resolving the persisted HTTPS domain from VM metadata
+# inside it would break that invariant, so this pins it directly.
+: >"$mock_log"
+PROJECT_ID=lightprobe-test \
+ZONE=us-central1-a \
+VM_NAME=lp-test \
+HTTPS_DOMAIN='' \
+GCLOUD_BIN="$mock_gcloud" \
+MOCK_GCLOUD_LOG="$mock_log" \
+MOCK_PERSISTED_HTTPS_DOMAIN=probe.example.com \
+  bash -c 'source "$0"; load_gcp_config' "${SCRIPT_DIR}/lib/common.sh" >/dev/null ||
+  fail "load_gcp_config rejected a valid configuration"
+[[ ! -s "$mock_log" ]] ||
+  fail "load_gcp_config contacted gcloud"
+
+# A Clerk-enabled redeploy of an already-activated host must not make the
+# operator re-supply the domain the deployment persisted for them.
+: >"$mock_log"
+resolved_https_domain="$(
+  PROJECT_ID=lightprobe-test \
+  ZONE=us-central1-a \
+  VM_NAME=lp-test \
+  HTTPS_DOMAIN='' \
+  CLERK_AUTHORIZED_PARTIES=https://probe.example.com \
+  CLERK_PUBLISHABLE_KEY=pk_live_Y2xlcmsucHJvYmUuZXhhbXBsZS5jb20k \
+  CLERK_FRONTEND_API_URL=https://clerk.probe.example.com \
+  GCLOUD_BIN="$mock_gcloud" \
+  MOCK_GCLOUD_LOG="$mock_log" \
+  MOCK_PERSISTED_HTTPS_DOMAIN=probe.example.com \
+    bash -c '
+      source "$0"
+      load_gcp_config
+      load_persisted_https_domain
+      require_clerk_https_domain
+      printf "%s" "$HTTPS_DOMAIN"
+    ' "${SCRIPT_DIR}/lib/common.sh"
+)" ||
+  fail "Clerk deploy rejected a persisted HTTPS domain"
+[[ "$resolved_https_domain" == "probe.example.com" ]] ||
+  fail "persisted HTTPS domain was not recovered: ${resolved_https_domain:-<empty>}"
+
+# The check still has to fire when there is genuinely no domain to recover.
+if PROJECT_ID=lightprobe-test \
+  ZONE=us-central1-a \
+  VM_NAME=lp-test \
+  HTTPS_DOMAIN='' \
+  CLERK_AUTHORIZED_PARTIES=https://probe.example.com \
+  CLERK_PUBLISHABLE_KEY=pk_live_Y2xlcmsucHJvYmUuZXhhbXBsZS5jb20k \
+  CLERK_FRONTEND_API_URL=https://clerk.probe.example.com \
+  GCLOUD_BIN="$mock_gcloud" \
+  MOCK_GCLOUD_LOG="$mock_log" \
+    bash -c '
+      source "$0"
+      load_gcp_config
+      load_persisted_https_domain
+      require_clerk_https_domain
+    ' "${SCRIPT_DIR}/lib/common.sh" >/dev/null 2>&1; then
+  fail "Clerk MCP OAuth was accepted without an HTTPS domain"
+fi
+
 printf 'GCP deployment tests passed\n'
