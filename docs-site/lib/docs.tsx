@@ -972,39 +972,34 @@ java --add-modules jdk.jdi \\
     description:
       "Attach eBPF uprobes to a compiled Linux x86-64 executable without rebuilding it against a LiveProbe library.",
     headings: [
-      { id: "requirements", label: "Requirements" },
-      { id: "privilege", label: "Privilege boundary" },
-      { id: "credential", label: "Create a native credential" },
-      { id: "configure", label: "Configure the agent" },
-      { id: "run", label: "Start the loader and agent" },
-      { id: "limitations", label: "Current limitations" },
+      { id: "how-it-differs", label: "How this differs" },
+      { id: "host-check", label: "1. Check the host" },
+      { id: "build", label: "2. Build your service" },
+      { id: "install", label: "3. Install the binaries" },
+      { id: "account", label: "4. Create the account" },
+      { id: "credential", label: "5. Credential and config" },
+      { id: "run", label: "6. Start loader and agent" },
+      { id: "verify", label: "7. Verify" },
+      { id: "troubleshooting", label: "Troubleshooting" },
     ],
     content: (
       <>
-        <h2 id="requirements">Requirements</h2>
+        <h2 id="how-it-differs">How this differs</h2>
         <p>
-          Compiled services are not instrumented by an in-process SDK. A
-          host-level agent attaches eBPF uprobes to the deployed executable, so
-          the service is unmodified and needs no rebuild against a LiveProbe
-          library. The install is per host rather than per application.
+          Unlike the Node, Python, and JVM guides, there is no package to add to
+          your build. A host-level agent attaches eBPF uprobes to the
+          already-deployed executable, so the service is unmodified and never
+          links against LiveProbe. The install is <strong>per host, not per
+          application</strong>, and covers every compiled service on that
+          machine.
         </p>
         <p>
-          This backend is Linux x86-64 only. The kernel needs BTF, uprobes, BPF
-          ring buffers, and tracefs. The target executable must ship DWARF debug
-          information, either inside the binary or as a separate debug file
-          reachable through <code>symbolDirectories</code> or{" "}
-          <code>debuginfod</code>. Build with <code>debug = true</code> in Cargo
-          or <code>-g</code> for C++. Release optimization is supported, and
-          inlined code resolves to its inlined site.
-        </p>
-
-        <h2 id="privilege">Privilege boundary</h2>
-        <p>
-          Two processes run per host, and the split is the security boundary.
-          Only <code>liveprobe-bpf-loader</code> is privileged: it runs as root,
-          or with the smallest loader-only capability set the host permits. The
-          agent that talks to the broker runs as a dedicated unprivileged
-          account and reaches the loader over a root-owned Unix socket.
+          Two processes run per host, and the split between them is the security
+          boundary. Only <code>liveprobe-bpf-loader</code> is privileged: it runs
+          as root, or with the smallest loader-only capability set the host
+          permits. The agent that talks to the broker runs as a dedicated
+          unprivileged account and reaches the loader over a root-owned Unix
+          socket.
         </p>
         <Callout title="Never grant BPF privileges to the agent" warning>
           <p>
@@ -1015,7 +1010,97 @@ java --add-modules jdk.jdi \\
           </p>
         </Callout>
 
-        <h2 id="credential">Create a native credential</h2>
+        <h2 id="host-check">1. Check the host</h2>
+        <p>
+          This backend is Linux x86-64 only. The kernel must expose BTF,
+          tracefs, and uprobes:
+        </p>
+        <CodeBlock
+          language="shell"
+          code={`uname -m                                  # expect x86_64
+test -r /sys/kernel/btf/vmlinux && echo "BTF ok"
+mountpoint -q /sys/kernel/tracing ||
+  sudo mount -t tracefs tracefs /sys/kernel/tracing
+sudo test -e /sys/kernel/tracing/uprobe_events && echo "uprobes ok"`}
+        />
+        <p>
+          Most current distribution kernels satisfy this. Containers usually do
+          not: they commonly lack <code>uprobe_events</code> and a writable
+          tracefs, so the agent runs on the host rather than beside your service
+          in a container.
+        </p>
+
+        <h2 id="build">2. Build your service</h2>
+        <p>
+          Probes are placed at source lines, so the executable must carry DWARF
+          debug information and a GNU build ID. The build ID is how the agent
+          recognises which binary it is looking at, and a stripped binary cannot
+          be probed. Optimized release builds are supported, and inlined code
+          resolves to its inlined site.
+        </p>
+        <CodeBlock
+          language="toml"
+          code={`# Cargo.toml
+[profile.release]
+debug = 2
+strip = false`}
+        />
+        <CodeBlock
+          language="shell"
+          code={`g++ -std=c++20 -O2 -g -fno-omit-frame-pointer \\
+  -Wl,--build-id=sha1 main.cpp -o my-service`}
+        />
+        <p>Verify both requirements on the artefact you actually deploy:</p>
+        <CodeBlock
+          language="shell"
+          code={`readelf --notes ./my-service | grep 'Build ID:'
+readelf --sections ./my-service | grep -q debug_info && echo "DWARF ok"`}
+        />
+        <p>
+          If you ship stripped binaries, keep the separate debug files and point{" "}
+          <code>symbolDirectories</code> at them in step 5, or serve them from a{" "}
+          <code>debuginfod</code>.
+        </p>
+
+        <h2 id="install">3. Install the binaries</h2>
+        <p>
+          There is no published package yet; build the two binaries from the
+          repository on a machine matching the target host. On Debian or Ubuntu
+          the build needs Rust 1.88 or newer plus:
+        </p>
+        <CodeBlock
+          language="shell"
+          code={`sudo apt-get install -y --no-install-recommends \\
+  build-essential pkg-config clang llvm lld bpftool \\
+  libbpf-dev libelf-dev zlib1g-dev dwarves`}
+        />
+        <CodeBlock
+          language="shell"
+          code={`make native-release
+sudo make native-install`}
+        />
+        <p>
+          That installs <code>liveprobe-native-agent</code> and{" "}
+          <code>liveprobe-bpf-loader</code> into <code>/usr/local/bin</code> and
+          creates <code>/etc/liveprobe</code> and <code>/run/liveprobe</code>.
+          Override the prefix with <code>NATIVE_PREFIX</code>, or stage a
+          package with <code>DESTDIR</code>. No separate BPF object is
+          installed; it is embedded in the loader.
+        </p>
+
+        <h2 id="account">4. Create the account</h2>
+        <p>
+          The agent must not be able to load BPF programs, so give it its own
+          account with no login shell. The loader is told this account&apos;s
+          IDs in step 6 and will only hand the socket to it.
+        </p>
+        <CodeBlock
+          language="shell"
+          code={`sudo useradd --system --no-create-home --shell /usr/sbin/nologin liveprobe
+sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe`}
+        />
+
+        <h2 id="credential">5. Credential and config</h2>
         <p>
           Native agents authenticate with their own credential type rather than
           the shared operator key. The plaintext key is returned exactly once,
@@ -1040,11 +1125,12 @@ curl --fail --silent --show-error \\
           <code>503 credential_store_unavailable</code> without it.
         </p>
 
-        <h2 id="configure">Configure the agent</h2>
         <p>
           Describe each service by exact executable path in{" "}
           <code>/etc/liveprobe/native-agent.json</code>. Every service needs a
-          language.
+          language, and these paths must match the loader allowlist in step 6
+          exactly. Use the same <code>serviceId</code> values your team already
+          uses elsewhere; they are what you name in the MCP tools.
         </p>
         <CodeBlock
           language="json"
@@ -1064,37 +1150,72 @@ curl --fail --silent --show-error \\
 }`}
         />
 
-        <h2 id="run">Start the loader and agent</h2>
+        <h2 id="run">6. Start loader and agent</h2>
         <p>
-          Start the loader first, passing the unprivileged account&apos;s IDs
-          and the exact allowlist of attachable executables. The loader attaches
-          to nothing outside that list.
+          Start the loader first. It takes the socket path, the unprivileged
+          account&apos;s UID and GID, and then the exact allowlist of attachable
+          executables. It attaches to nothing outside that list, so adding a
+          service later means restarting the loader with the new path included.
         </p>
         <CodeBlock
           language="shell"
-          code={`sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe
-sudo /usr/local/bin/liveprobe-bpf-loader \\
+          code={`sudo /usr/local/bin/liveprobe-bpf-loader \\
   /run/liveprobe/loader.sock \\
   "$(id -u liveprobe)" "$(id -g liveprobe)" \\
   /opt/quotes/bin/quotes \\
   /opt/pricing/bin/pricing`}
         />
-        <p>Then start the agent as that unprivileged account:</p>
+        <p>
+          Then start the agent as that account, passing the credential from step
+          5:
+        </p>
         <CodeBlock
           language="shell"
           code={`sudo -u liveprobe env \\
-  LIVEPROBE_NATIVE_CREDENTIAL="$(secret-tool lookup service liveprobe-native-agent)" \\
+  LIVEPROBE_NATIVE_CREDENTIAL="lp_native_<secret>" \\
   /usr/local/bin/liveprobe-native-agent /etc/liveprobe/native-agent.json`}
         />
+        <p>
+          Both are long-running host daemons rather than something tied to your
+          application&apos;s lifecycle, so in production run them under systemd
+          with the loader ordered before the agent. Keep the credential out of
+          the unit file by loading it from an <code>EnvironmentFile</code> that
+          only root can read.
+        </p>
 
-        <h2 id="limitations">Current limitations</h2>
+        <h2 id="verify">7. Verify</h2>
+        <p>Ask the broker what it can see, using your operator key:</p>
+        <CodeBlock
+          language="shell"
+          code={`curl --fail --silent \\
+  -H "Authorization: Bearer $LIVEPROBE_API_KEY" \\
+  https://liveprobe.tryastrea.tech/v1/services | jq '.'`}
+        />
+        <p>
+          Your <code>serviceId</code> values appear once the agent has
+          registered and discovered a running instance. If a service is missing,
+          the agent is running but has not found a process matching that{" "}
+          <code>executablePath</code> — confirm the service is actually running
+          and that the path matches the real binary, not a symlink or a wrapper
+          script.
+        </p>
+
+        <h2 id="troubleshooting">Troubleshooting</h2>
+        <Table
+          headers={["Symptom", "Cause"]}
+          rows={[
+            [<code key="a">id: &apos;liveprobe&apos;: no such user</code>, "Step 4 was skipped."],
+            ["Agent starts, service never appears", "No running process matches executablePath, or the path differs from the loader allowlist."],
+            ["Probe stays pending and never arms", "The binary has no DWARF for that source line; it was stripped, or built without -g / debug = 2."],
+            ["Loader refuses a path", "The executable was not in the allowlist the loader was started with."],
+            ["Permission denied on the socket", "/run/liveprobe ownership does not match the UID/GID passed to the loader."],
+          ]}
+        />
         <p>
           Native probes are read-only: capture never writes to target memory,
           and the loader forbids the BPF helper that would allow it. A probe
           that reaches its configured limit latches detached rather than
           silently re-arming, so a hot site stays off until it is placed again.
-          Values are bounded by the capture plan rather than by the language, so
-          deeply nested structures are truncated at the recorded boundary.
         </p>
       </>
     ),

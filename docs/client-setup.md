@@ -217,30 +217,114 @@ the target's `LineNumberTable`; local capture also requires its
 
 ### Rust and C++ on Linux x86-64
 
-Compiled services are not instrumented by an in-process SDK. A host-level
-native agent attaches uprobes to the deployed executable through eBPF, so the
-service itself is unmodified and needs no rebuild against a LiveProbe library.
+Unlike the three runtimes above, a compiled service is not instrumented by an
+in-process SDK and there is no package to add to your build. A host-level agent
+attaches uprobes to the already-deployed executable through eBPF, so the
+service is unmodified and never links against LiveProbe. The install is
+therefore **per host, not per application**, and it is done once for every
+compiled service on that machine.
 
-This backend is Linux x86-64 only. The host kernel needs BTF, uprobes, BPF ring
-buffers, and tracefs. The target executable must ship DWARF debug information,
-either inside the binary or as a separate debug file found through
-`symbolDirectories` or `debuginfod`. Build with `debug = true` (Cargo) or `-g`
-(C++); release optimization is supported, and inlined code resolves to its
-inlined site.
+Two processes run per host, and the split between them is the security
+boundary. Only `liveprobe-bpf-loader` is privileged: it runs as root, or with
+the smallest loader-only capability set the host permits (normally `CAP_BPF`,
+`CAP_PERFMON`, and sometimes `CAP_SYS_RESOURCE`). The agent that talks to the
+broker runs as a dedicated unprivileged account and reaches the loader over a
+root-owned Unix socket. **Never grant BPF privileges to the agent or to your
+application.**
 
-Two processes run per host, and the split is the security boundary. Only
-`liveprobe-bpf-loader` is privileged; it runs as root, or with the smallest
-loader-only capability set the host permits. The agent that talks to the broker
-runs as a dedicated unprivileged account and reaches the loader over a
-root-owned Unix socket. Never grant BPF privileges to the agent or to the
-application. Build and install the two binaries with `make native-release`
-followed by `make native-install`; see
-[native eBPF development](native-ebpf-development.md) for the full build,
-packaging, and verification path.
+Work through the seven steps below in order.
+
+#### 1. Confirm the host can run it
+
+This backend is Linux x86-64 only. The kernel must expose BTF, tracefs, and
+uprobes:
+
+```sh
+uname -m                                  # expect x86_64
+test -r /sys/kernel/btf/vmlinux && echo "BTF ok"
+mountpoint -q /sys/kernel/tracing ||
+  sudo mount -t tracefs tracefs /sys/kernel/tracing
+sudo test -e /sys/kernel/tracing/uprobe_events && echo "uprobes ok"
+```
+
+Most current distribution kernels satisfy this. Containers usually do not:
+they commonly lack `uprobe_events` and a writable tracefs, so the agent runs on
+the host, not beside your service in a container. `scripts/native-linux-verify.sh`
+in the repository runs these checks and several more.
+
+#### 2. Build your service so it can be resolved
+
+Probes are placed at source lines, so the executable must carry DWARF debug
+information and a GNU build ID. The build ID is how the agent recognises which
+binary it is looking at, and a stripped binary cannot be probed. Optimized
+release builds are supported; inlined code resolves to its inlined site.
+
+For Rust, keep debug info in the release profile:
+
+```toml
+# Cargo.toml
+[profile.release]
+debug = 2
+strip = false
+```
+
+For C++, compile with `-g` and emit a build ID:
+
+```sh
+g++ -std=c++20 -O2 -g -fno-omit-frame-pointer \
+  -Wl,--build-id=sha1 main.cpp -o my-service
+```
+
+Verify both requirements on the artefact you actually deploy:
+
+```sh
+readelf --notes ./my-service | grep 'Build ID:'      # must print a build ID
+readelf --sections ./my-service | grep -q debug_info && echo "DWARF ok"
+```
+
+If you ship stripped binaries, keep the separate debug files and point
+`symbolDirectories` at them in step 5, or serve them from a `debuginfod`.
+
+#### 3. Install the agent binaries
+
+There is no published package yet; build the two binaries from the repository
+on a machine matching the target host. On Debian or Ubuntu the build needs:
+
+```sh
+sudo apt-get install -y --no-install-recommends \
+  build-essential pkg-config clang llvm lld bpftool \
+  libbpf-dev libelf-dev zlib1g-dev dwarves
+```
+
+Rust 1.88 or newer is required. Then, from the repository root:
+
+```sh
+make native-release
+sudo make native-install
+```
+
+That installs `liveprobe-native-agent` and `liveprobe-bpf-loader` into
+`/usr/local/bin` and creates `/etc/liveprobe` and `/run/liveprobe`. Override
+the prefix with `NATIVE_PREFIX`, or stage a package with `DESTDIR`. No separate
+BPF object is installed; it is embedded in the loader. See
+[native eBPF development](native-ebpf-development.md) for packaging details.
+
+#### 4. Create the unprivileged account
+
+The agent must not be able to load BPF programs, so give it its own account
+with no login shell. The loader is told this account's IDs in step 6 and will
+only hand the socket to it:
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin liveprobe
+sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe
+```
+
+#### 5. Create a native credential and configure the agent
 
 Native agents authenticate with their own credential type rather than the
-shared operator key. An operator mints one per host, and it is returned exactly
-once:
+shared operator key. An operator mints one per host, and the plaintext key is
+returned exactly once:
 
 ```sh
 umask 077
@@ -258,8 +342,9 @@ only as a hash, and is restricted to the listed service IDs. Revoke it with
 `GET /v1/native-credentials`. This route requires the broker's PostgreSQL
 durable store and returns `503 credential_store_unavailable` without it.
 
-Describe each service by exact executable path in the agent configuration at
-`/etc/liveprobe/native-agent.json`:
+Describe each service by exact executable path in
+`/etc/liveprobe/native-agent.json`. Every service needs a `language`, and the
+paths here must match the loader allowlist in step 6 exactly:
 
 ```json
 {
@@ -278,12 +363,17 @@ Describe each service by exact executable path in the agent configuration at
 }
 ```
 
-Start the loader first, passing the unprivileged account's IDs and the exact
-allowlist of attachable executables. The loader attaches to nothing outside
-that list:
+Use the same `serviceId` values your team already uses elsewhere; they are what
+you will name in the MCP tools.
+
+#### 6. Start the loader, then the agent
+
+Start the loader first. It takes the socket path, the unprivileged account's
+UID and GID, and then the exact allowlist of attachable executables. It will
+attach to nothing outside that list, so adding a service later means restarting
+the loader with the new path included:
 
 ```sh
-sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe
 sudo /usr/local/bin/liveprobe-bpf-loader \
   /run/liveprobe/loader.sock \
   "$(id -u liveprobe)" "$(id -g liveprobe)" \
@@ -291,18 +381,52 @@ sudo /usr/local/bin/liveprobe-bpf-loader \
   /opt/pricing/bin/pricing
 ```
 
-Then start the agent as that unprivileged account:
+Then start the agent as that account, passing the credential from step 5:
 
 ```sh
 sudo -u liveprobe env \
-  LIVEPROBE_NATIVE_CREDENTIAL="$(secret-tool lookup service liveprobe-native-agent)" \
+  LIVEPROBE_NATIVE_CREDENTIAL="lp_native_<secret>" \
   /usr/local/bin/liveprobe-native-agent /etc/liveprobe/native-agent.json
 ```
 
+Both are long-running host daemons rather than something tied to your
+application's lifecycle, so in production run them under systemd with the
+loader ordered before the agent. Keep the credential out of the unit file by
+loading it from an `EnvironmentFile` that only root can read.
+
+#### 7. Verify
+
+Ask the broker what it can see, using your operator key:
+
+```sh
+curl --fail --silent \
+  -H "Authorization: Bearer ${LIVEPROBE_API_KEY}" \
+  "${BROKER_URL}/v1/services" | jq '.'
+```
+
+Your `serviceId` values should appear once the agent has registered and
+discovered a running instance. If a service is missing, the agent is running
+but has not found a process matching that `executablePath` — confirm the
+service is actually running and that the path matches the real binary, not a
+symlink or a wrapper script.
+
 The agent registers, reports discovered instances, reconciles desired probe
-state, and retries transient failures with bounded jittered backoff. Native
-probes are read-only: capture never writes to target memory, and a probe that
-reaches its configured limit latches detached rather than silently re-arming.
+state, and retries transient failures with bounded jittered backoff, so a
+broker restart or a brief network failure recovers without intervention.
+
+#### Troubleshooting
+
+| Symptom | Cause |
+| --- | --- |
+| `id: 'liveprobe': no such user` | Step 4 was skipped. |
+| Agent starts, service never appears | No running process matches `executablePath`, or the path differs from the loader allowlist. |
+| Probe stays pending and never arms | The binary has no DWARF for that source line; it was stripped, or built without `-g`/`debug = 2`. |
+| Loader refuses a path | The executable was not in the allowlist the loader was started with. |
+| Permission denied on the socket | `/run/liveprobe` ownership does not match the UID/GID passed to the loader. |
+
+Native probes are read-only: capture never writes to target memory, the helper
+that would allow it is rejected, and a probe that reaches its configured limit
+latches detached rather than silently re-arming.
 
 ## 3. Configure the MCP tools
 

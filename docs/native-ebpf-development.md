@@ -69,10 +69,15 @@ Prerequisites are a recent Linux x86-64 kernel with BTF, uprobes, BPF ring
 buffers, tracefs, clang/LLVM, bpftool, libbpf, libelf, zlib, a C/C++ toolchain,
 Rust 1.88+, Node 20+, and the repository pnpm version.
 
+The `liveprobe` account below is the unprivileged worker the agent runs as, and
+it must exist before the loader can be told which UID and GID to hand the
+socket to.
+
 ```sh
 corepack pnpm install --frozen-lockfile
 make native-release
 make native-demo
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin liveprobe
 sudo install -d -o root -g liveprobe -m 0750 /run/liveprobe
 ```
 
