@@ -705,9 +705,10 @@ describe("scoped native integration", () => {
       expect(assignedAfterSuspend.assignments.flatMap((a) => a.probes))
         .not.toContainEqual(expect.objectContaining({ id: probe.id }));
 
-      // The agent re-attaches the detached site under a fresh generation and
-      // reports armed again, newer than the suspension. Honouring it would put
-      // the probe back into desired state and restart the detach/re-arm loop.
+      // A sibling physical site of the same probe reports armed after the
+      // suspension. Status is not keyed by site, so honouring the newer write
+      // would erase the suspension and put the probe back into desired state
+      // with its raw-hit budget already blown.
       expect((await ingestStatus(200, "armed")).statusCode).toBe(202);
       const assignedAfterRearm = (await broker.inject({
         method: "GET",

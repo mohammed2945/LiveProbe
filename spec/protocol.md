@@ -562,6 +562,24 @@ return `unsupported_by_backend` before storage.
 agent-reported identity of the executable actually attached by the loader.
 They are never interchangeable.
 
+A native status that ends an assignment — `suspended`, `hit-limit-reached`, or
+`expired` — latches for its probe version. Once recorded for an exact probe,
+version, agent, instance, and build, a non-terminal status for that same
+generation is ignored, and the probe stays out of desired state.
+
+This matters because a native probe is not one attachment. Its source line
+resolves to every inlined copy, each physical site reports its own status, and
+status is not keyed by site. Without the latch a site suspended for exceeding
+its raw-hit budget is erased by a sibling site reporting `armed`, and the probe
+is reassigned with its budget already blown. The raw-hit budget is per probe,
+so one site exceeding it suspends the probe.
+
+`suspended` therefore means different things per backend, and clients should
+not treat them alike. On managed runtimes it is a recoverable rate-limit
+window: the agent resumes on its own once the window resets. On the native
+backend it is terminal for that probe version — nothing re-arms it. Recreate
+the probe, or update it so it takes a new version, to attach again.
+
 ## 5. Client-facing broker API
 
 Every route in this section requires a human credential or the shared
