@@ -6,6 +6,7 @@ WORKDIR /workspace
 COPY pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages/broker/package.json packages/broker/
 COPY packages/mcp-server/package.json packages/mcp-server/
+COPY packages/protocol/package.json packages/protocol/
 RUN corepack enable \
     && corepack prepare pnpm@11.9.0 --activate \
     && pnpm install --frozen-lockfile --filter @liveprobe/broker...
@@ -15,6 +16,8 @@ COPY packages/broker/src packages/broker/src
 COPY packages/broker/scripts packages/broker/scripts
 COPY packages/mcp-server/tsconfig.json packages/mcp-server/
 COPY packages/mcp-server/src packages/mcp-server/src
+COPY packages/protocol/tsconfig.json packages/protocol/
+COPY packages/protocol/src packages/protocol/src
 RUN pnpm --filter @doomslayer2945/liveprobe-mcp run build
 RUN pnpm --filter @liveprobe/broker run build
 
@@ -29,11 +32,13 @@ WORKDIR /workspace
 COPY pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/broker/package.json packages/broker/
 COPY packages/mcp-server/package.json packages/mcp-server/
+COPY packages/protocol/package.json packages/protocol/
 RUN corepack enable \
     && corepack prepare pnpm@11.9.0 --activate \
     && pnpm install --frozen-lockfile --prod --filter @liveprobe/broker...
 COPY --from=build /workspace/packages/broker/dist packages/broker/dist
 COPY --from=build /workspace/packages/mcp-server/dist packages/mcp-server/dist
+COPY --from=build /workspace/packages/protocol/dist packages/protocol/dist
 
 RUN mkdir -p /var/lib/liveprobe && chown -R node:node /var/lib/liveprobe
 USER node
