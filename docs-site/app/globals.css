@@ -748,6 +748,7 @@ tr:last-child td {
 
 .tab {
   padding: 8px 15px;
+  text-decoration: none;
   border: 0;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;

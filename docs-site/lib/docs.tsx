@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import { CodeBlock } from "@/components/code-block";
-import { Tabs } from "@/components/tabs";
 
 export type DocPage = {
   slug: string;
@@ -56,6 +55,143 @@ function Table({
         </tbody>
       </table>
     </div>
+  );
+}
+
+// Rust and C++ are separate pages so each one appears in the sidebar next to
+// the Python, Node, and JVM guides. They are close enough that a reader
+// sometimes wants the other, so this strip links between them without a trip
+// back to the sidebar. Plain anchors rather than a client component: both
+// pages are prerendered, so switching language is a navigation, not state.
+function LanguageSwitch({ current }: { current: "rust" | "cpp" }) {
+  const options = [
+    { id: "rust", label: "Rust", href: "/docs/rust" },
+    { id: "cpp", label: "C++", href: "/docs/cpp" },
+  ] as const;
+
+  return (
+    <nav className="tab-list" aria-label="Choose a language">
+      {options.map((option) => (
+        <a
+          key={option.id}
+          href={option.href}
+          className={option.id === current ? "tab is-active" : "tab"}
+          aria-current={option.id === current ? "page" : undefined}
+        >
+          {option.label}
+        </a>
+      ))}
+    </nav>
+  );
+}
+
+function NativeHowItWorks() {
+  return (
+    <>
+      <h2 id="how-it-works">How it works</h2>
+      <p>
+        There is no package to add to your build. A host-level agent attaches
+        eBPF uprobes to the binary you already deployed, so your service is
+        untouched and never links against LiveProbe.
+      </p>
+      <p>
+        That makes this a <strong>per-host install</strong>, not a per-service
+        dependency. Set it up once on a machine and it covers every compiled
+        service running there.
+      </p>
+      <p>Two processes run per host:</p>
+      <Table
+        headers={["Process", "Runs as", "Job"]}
+        rows={[
+          [
+            <code key="l">liveprobe-bpf-loader</code>,
+            "root",
+            "Loads the BPF program and attaches uprobes. The only privileged part.",
+          ],
+          [
+            <code key="a">liveprobe-native-agent</code>,
+            <code key="u">liveprobe</code>,
+            "Talks to the broker, streams evidence. No BPF privileges.",
+          ],
+        ]}
+      />
+      <Callout title="Never give the agent BPF privileges" warning>
+        <p>
+          The loader is the only process that should hold <code>CAP_BPF</code>{" "}
+          or <code>CAP_SYS_ADMIN</code>. They talk over a root-owned Unix
+          socket, and that split is what stops a compromised agent from loading
+          arbitrary kernel programs.
+        </p>
+      </Callout>
+    </>
+  );
+}
+
+function NativeDebugInfo() {
+  return (
+    <>
+      <h2 id="debug-info">Debug info you need</h2>
+      <p>
+        Probes are placed at source lines, so the binary has to explain itself
+        to the agent. Two things must survive your build:
+      </p>
+      <Table
+        headers={["What", "Why", "Check"]}
+        rows={[
+          [
+            "DWARF",
+            "Maps source lines to addresses, and names local variables.",
+            <code key="1">readelf --sections app | grep debug_info</code>,
+          ],
+          [
+            "GNU build ID",
+            "Identifies which exact binary is running.",
+            <code key="2">readelf --notes app | grep &apos;Build ID:&apos;</code>,
+          ],
+        ]}
+      />
+      <p>
+        A stripped binary cannot be probed. Optimized release builds are fine —
+        inlined code resolves to its inlined site. If you ship stripped
+        binaries, keep the separate debug files and point{" "}
+        <code>symbolDirectories</code> at them, or serve them from a{" "}
+        <code>debuginfod</code>.
+      </p>
+    </>
+  );
+}
+
+function NativeTroubleshooting() {
+  return (
+    <>
+      <h2 id="troubleshooting">Troubleshooting</h2>
+      <Table
+        headers={["Symptom", "Fix"]}
+        rows={[
+          [<code key="a">no such user: liveprobe</code>, "Run step 4."],
+          [
+            "Service never appears",
+            "No running process matches executablePath, or it differs from the loader allowlist.",
+          ],
+          [
+            "Probe stays pending",
+            "No DWARF for that line. The binary was stripped or built without -g / debug = 2.",
+          ],
+          [
+            "Loader refuses a path",
+            "That executable was not in the allowlist the loader started with.",
+          ],
+          [
+            "Permission denied on the socket",
+            "/run/liveprobe ownership does not match the UID/GID passed to the loader.",
+          ],
+        ]}
+      />
+      <p>
+        Native probes are read-only: capture never writes to target memory, and
+        a probe that hits its limit detaches instead of silently re-arming.
+      </p>
+    </>
   );
 }
 
@@ -1098,11 +1234,11 @@ java --add-modules jdk.jdi \\
     ),
   },
   {
-    slug: "native",
-    title: "Rust and C++",
+    slug: "rust",
+    title: "Rust",
     section: "Runtime SDKs",
     description:
-      "Attach eBPF uprobes to a compiled Linux x86-64 service. No SDK, no rebuild against a LiveProbe library.",
+      "Attach eBPF uprobes to a compiled Rust service on Linux x86-64. No crate to add, no rebuild against a LiveProbe library.",
     headings: [
       { id: "how-it-works", label: "How it works" },
       { id: "debug-info", label: "Debug info you need" },
@@ -1111,171 +1247,86 @@ java --add-modules jdk.jdi \\
     ],
     content: (
       <>
-        <h2 id="how-it-works">How it works</h2>
-        <p>
-          There is no package to add to your build. A host-level agent attaches
-          eBPF uprobes to the binary you already deployed, so your service is
-          untouched and never links against LiveProbe.
-        </p>
-        <p>
-          That makes this a <strong>per-host install</strong>, not a per-service
-          dependency. Set it up once on a machine and it covers every compiled
-          service running there.
-        </p>
-        <p>Two processes run per host:</p>
-        <Table
-          headers={["Process", "Runs as", "Job"]}
-          rows={[
-            [
-              <code key="l">liveprobe-bpf-loader</code>,
-              "root",
-              "Loads the BPF program and attaches uprobes. The only privileged part.",
-            ],
-            [
-              <code key="a">liveprobe-native-agent</code>,
-              <code key="u">liveprobe</code>,
-              "Talks to the broker, streams evidence. No BPF privileges.",
-            ],
-          ]}
-        />
-        <Callout title="Never give the agent BPF privileges" warning>
-          <p>
-            The loader is the only process that should hold{" "}
-            <code>CAP_BPF</code> or <code>CAP_SYS_ADMIN</code>. They talk over a
-            root-owned Unix socket, and that split is what stops a compromised
-            agent from loading arbitrary kernel programs.
-          </p>
-        </Callout>
-
-        <h2 id="debug-info">Debug info you need</h2>
-        <p>
-          Probes are placed at source lines, so the binary has to explain itself
-          to the agent. Two things must survive your build:
-        </p>
-        <Table
-          headers={["What", "Why", "Check"]}
-          rows={[
-            [
-              "DWARF",
-              "Maps source lines to addresses, and names local variables.",
-              <code key="1">readelf --sections app | grep debug_info</code>,
-            ],
-            [
-              "GNU build ID",
-              "Identifies which exact binary is running.",
-              <code key="2">readelf --notes app | grep &apos;Build ID:&apos;</code>,
-            ],
-          ]}
-        />
-        <p>
-          A stripped binary cannot be probed. Optimized release builds are fine
-          — inlined code resolves to its inlined site. If you ship stripped
-          binaries, keep the separate debug files and point{" "}
-          <code>symbolDirectories</code> at them, or serve them from a{" "}
-          <code>debuginfod</code>.
-        </p>
-
+        <LanguageSwitch current="rust" />
+        <NativeHowItWorks />
+        <NativeDebugInfo />
         <h2 id="setup">Setup</h2>
         <p>
-          Linux x86-64 only, and about ten minutes on a fresh host. Pick your
-          language — each tab is the complete path from nothing to a probe.
+          Linux x86-64 only, and about ten minutes on a fresh host. Every step
+          you need is below.
         </p>
-        <Tabs
-          tabs={[
-            {
-              id: "rust",
-              label: "Rust",
-              content: (
-                <NativeSetupPath
-                  language="rust"
-                  buildStep={
-                    <>
-                      <p>Keep debug info in your release profile:</p>
-                      <CodeBlock
-                        language="toml"
-                        code={`# Cargo.toml
+        <NativeSetupPath
+          language="rust"
+          buildStep={
+            <>
+              <p>Keep debug info in your release profile:</p>
+              <CodeBlock
+                language="toml"
+                code={`# Cargo.toml
 [profile.release]
 debug = 2
 strip = false`}
-                      />
-                      <CodeBlock
-                        language="shell"
-                        code={`cargo build --release
+              />
+              <CodeBlock
+                language="shell"
+                code={`cargo build --release
 readelf --notes target/release/my-service | grep 'Build ID:'`}
-                      />
-                      <p>
-                        Cargo emits a build ID by default;{" "}
-                        <code>strip = false</code> is what keeps it and the
-                        DWARF in place.
-                      </p>
-                    </>
-                  }
-                />
-              ),
-            },
-            {
-              id: "cpp",
-              label: "C++",
-              content: (
-                <NativeSetupPath
-                  language="cpp"
-                  buildStep={
-                    <>
-                      <p>
-                        Compile with <code>-g</code> and ask the linker for a
-                        build ID:
-                      </p>
-                      <CodeBlock
-                        language="shell"
-                        code={`g++ -std=c++20 -O2 -g -fno-omit-frame-pointer \\
+              />
+              <p>
+                Cargo emits a build ID by default; <code>strip = false</code> is
+                what keeps it and the DWARF in place.
+              </p>
+            </>
+          }
+        />
+        <NativeTroubleshooting />
+      </>
+    ),
+  },
+  {
+    slug: "cpp",
+    title: "C++",
+    section: "Runtime SDKs",
+    description:
+      "Attach eBPF uprobes to a compiled C++ service on Linux x86-64. No library to link, no rebuild against a LiveProbe SDK.",
+    headings: [
+      { id: "how-it-works", label: "How it works" },
+      { id: "debug-info", label: "Debug info you need" },
+      { id: "setup", label: "Setup" },
+      { id: "troubleshooting", label: "Troubleshooting" },
+    ],
+    content: (
+      <>
+        <LanguageSwitch current="cpp" />
+        <NativeHowItWorks />
+        <NativeDebugInfo />
+        <h2 id="setup">Setup</h2>
+        <p>
+          Linux x86-64 only, and about ten minutes on a fresh host. Every step
+          you need is below.
+        </p>
+        <NativeSetupPath
+          language="cpp"
+          buildStep={
+            <>
+              <p>
+                Compile with <code>-g</code> and ask the linker for a build ID:
+              </p>
+              <CodeBlock
+                language="shell"
+                code={`g++ -std=c++20 -O2 -g -fno-omit-frame-pointer \\
   -Wl,--build-id=sha1 main.cpp -o my-service
 
 readelf --notes my-service | grep 'Build ID:'`}
-                      />
-                      <p>
-                        <code>--build-id</code> is not always on by default, so
-                        pass it explicitly.
-                      </p>
-                    </>
-                  }
-                />
-              ),
-            },
-          ]}
+              />
+              <p>
+                <code>--build-id</code> is not always on by default, so pass it
+                explicitly.
+              </p>
+            </>
+          }
         />
-
-
-        <h2 id="troubleshooting">Troubleshooting</h2>
-        <Table
-          headers={["Symptom", "Fix"]}
-          rows={[
-            [
-              <code key="a">no such user: liveprobe</code>,
-              "Run step 4.",
-            ],
-            [
-              "Service never appears",
-              "No running process matches executablePath, or it differs from the loader allowlist.",
-            ],
-            [
-              "Probe stays pending",
-              "No DWARF for that line. The binary was stripped or built without -g / debug = 2.",
-            ],
-            [
-              "Loader refuses a path",
-              "That executable was not in the allowlist the loader started with.",
-            ],
-            [
-              "Permission denied on the socket",
-              "/run/liveprobe ownership does not match the UID/GID passed to the loader.",
-            ],
-          ]}
-        />
-        <p>
-          Native probes are read-only: capture never writes to target memory,
-          and a probe that hits its limit detaches instead of silently
-          re-arming.
-        </p>
+        <NativeTroubleshooting />
       </>
     ),
   },

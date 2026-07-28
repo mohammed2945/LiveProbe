@@ -39,35 +39,35 @@ test("mobile navigation opens without covering its controls", async ({
   await expect(page.getByTitle("Close navigation")).toBeVisible();
 });
 
-test("native setup tabs switch between Rust and C++", async ({ page }) => {
-  await page.goto("/docs/native");
+test("Rust and C++ each get their own sidebar entry", async ({ page }) => {
+  await page.goto("/docs/rust");
+  const nav = page.getByRole("navigation", { name: "Documentation", exact: true });
 
-  const rustTab = page.getByRole("tab", { name: "Rust" });
-  const cppTab = page.getByRole("tab", { name: "C++" });
-  const rustPanel = page.getByRole("tabpanel").filter({ hasText: "Cargo.toml" });
-  const cppPanel = page
-    .getByRole("tabpanel")
-    .filter({ hasText: "-Wl,--build-id=sha1" });
+  if (await page.getByRole("button", { name: "Open navigation" }).isVisible()) {
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  }
 
-  // Rust is the default, so a reader who never touches the control still sees
-  // a complete set of instructions rather than an empty panel.
-  await expect(rustTab).toHaveAttribute("aria-selected", "true");
-  await expect(rustPanel).toBeVisible();
-  await expect(cppPanel).toBeHidden();
-
-  await cppTab.click();
-  await expect(cppTab).toHaveAttribute("aria-selected", "true");
-  await expect(cppPanel).toBeVisible();
-  await expect(rustPanel).toBeHidden();
+  await expect(nav.getByRole("link", { name: "Rust", exact: true })).toBeVisible();
+  await expect(nav.getByRole("link", { name: "C++", exact: true })).toBeVisible();
 });
 
-test("each native tab is a standalone path, not just the build step", async ({
-  page,
-}) => {
-  await page.goto("/docs/native");
+test("the language switch moves between the two pages", async ({ page }) => {
+  await page.goto("/docs/rust");
+  await expect(page.getByText("[profile.release]")).toBeVisible();
 
-  // The whole point of the tabs is that a reader never leaves their own tab to
-  // find a step, so every shared step has to be present in both panels.
+  await page
+    .getByRole("navigation", { name: "Choose a language" })
+    .getByRole("link", { name: "C++" })
+    .click();
+
+  await expect(page).toHaveURL(/\/docs\/cpp\/?$/);
+  await expect(page.getByText("-Wl,--build-id=sha1")).toBeVisible();
+  await expect(page.getByText("[profile.release]")).toBeHidden();
+});
+
+test.describe("each language page is a standalone path", () => {
+  // Splitting the languages only helps if neither page sends the reader to the
+  // other one to find a step, so both must carry the whole sequence.
   const sharedSteps = [
     "1. Check the kernel",
     "3. Install the agent",
@@ -78,13 +78,17 @@ test("each native tab is a standalone path, not just the build step", async ({
     "8. Verify",
   ];
 
-  for (const label of ["Rust", "C++"]) {
-    await page.getByRole("tab", { name: label }).click();
-    const panel = page.getByRole("tabpanel").filter({ visible: true });
-    for (const step of sharedSteps) {
+  for (const slug of ["rust", "cpp"]) {
+    test(`/docs/${slug}`, async ({ page }) => {
+      await page.goto(`/docs/${slug}`);
+      for (const step of sharedSteps) {
+        await expect(
+          page.getByRole("heading", { name: step, exact: true }),
+        ).toBeVisible();
+      }
       await expect(
-        panel.getByRole("heading", { name: step, exact: true }),
+        page.getByRole("heading", { name: "Troubleshooting", exact: true }),
       ).toBeVisible();
-    }
+    });
   }
 });

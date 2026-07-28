@@ -251,9 +251,11 @@ from a `debuginfod`.
 
 #### Setup
 
-Linux x86-64 only. Roughly ten minutes on a fresh host. The
-[documentation site](https://docs.liveprobe.tryastrea.tech/docs/native) has the
-same steps with the Rust and C++ build instructions in tabs.
+Linux x86-64 only. Roughly ten minutes on a fresh host. Only step 2 differs
+between the two toolchains; everything else is identical. The documentation
+site splits them into a page each if you would rather read only your own:
+[Rust](https://docs.liveprobe.tryastrea.tech/docs/rust) and
+[C++](https://docs.liveprobe.tryastrea.tech/docs/cpp).
 
 **1. Check the kernel.**
 
