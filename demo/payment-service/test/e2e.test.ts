@@ -474,6 +474,50 @@ async function metricAndLogPhase(
 }
 
 /**
+ * Captures at a call site the application stack has not yet unwound.
+ *
+ * The line above the capture line is the `await` that fetches the balance, so a
+ * probe there pauses with the whole request chain still on the stack, where the
+ * line below it pauses after the await has unwound to a microtask. Capturing at
+ * the deeper site used to fail with `inspector-capture: Maximum call stack size
+ * exceeded`, because the capture nested a frame per object it walked on top of
+ * whatever the application was already using.
+ */
+async function deepStackCapturePhase(phase: PhaseContext): Promise<number> {
+  const probeId = await createProbe(phase.brokerUrl, {
+    serviceId: phase.serviceId,
+    file: "src/payments.ts",
+    line: phase.line - 1,
+    ttlSeconds: 120,
+    createdBy: "e2e:payment-service",
+    type: "log",
+    template: "deep ${amountCents}",
+    hitLimit: 10_000,
+  });
+  try {
+    await waitArmed(phase.brokerUrl, probeId);
+    const before = phase.service.output().split("inspector-capture").length;
+    await burst(phase.serviceUrl, [2_500, 2_500, 2_500], "deep-stack", 150);
+    const logs = await waitFor("a capture from the pre-await line", 20_000, async () => {
+      const events = await probeEvents<LogEvent>(phase.brokerUrl, probeId, "log");
+      return events.length >= 3 ? events : null;
+    });
+    assert.ok(
+      logs.every((event) => event.message === "deep 2500"),
+      `pre-await capture rendered ${JSON.stringify(logs.map((e) => e.message))}`,
+    );
+    assert.equal(
+      phase.service.output().split("inspector-capture").length,
+      before,
+      "capturing at the deeper call site reported an inspector-capture error",
+    );
+    return logs.length;
+  } finally {
+    await deleteProbe(phase.brokerUrl, probeId);
+  }
+}
+
+/**
  * Runs a fixed over-budget burst against N log probes on one line.
  *
  * Returns the smallest number of captures any single probe managed, which is
@@ -624,7 +668,7 @@ async function ingestIsolationPhase(
 
 test(
   "snapshot probe captures the seeded pool bug without stopping traffic",
-  { timeout: 35_000 },
+  { timeout: 120_000 },
   async (context) => {
     const brokerPort = await unusedPort();
     const servicePort = await unusedPort();
@@ -819,6 +863,10 @@ test(
         `metric: ${String(metrics.samples)} samples summing ${String(metrics.sum)}`,
       );
       context.diagnostic(`log: ${String(metrics.logs)} rendered messages`);
+      const deepStack = await deepStackCapturePhase(phase);
+      context.diagnostic(
+        `pre-await capture: ${String(deepStack)} messages from line ${String(probeLine - 1)}`,
+      );
       const budget = await perCaptureBudgetPhase(phase);
       context.diagnostic(
         `per-capture budget: 1 probe captured ${String(budget.alone)}, ` +

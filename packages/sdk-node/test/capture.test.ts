@@ -180,3 +180,73 @@ describe("capture block scopes", () => {
     expect(variables).not.toHaveProperty("process");
   });
 });
+
+/** Frames currently on the JS stack, for measuring nesting rather than depth. */
+function stackFrames(): number {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = Infinity;
+  const frames = (new Error("probe").stack ?? "").split("\n").length;
+  Error.stackTraceLimit = limit;
+  return frames;
+}
+
+describe("capture stack usage", () => {
+  it("walks a wide scope without nesting a frame per object", () => {
+    // A scope of many sibling objects: every one becomes its own traversal
+    // task, so a queue driven by recursion would be this many frames deep by
+    // the last of them. The capture runs on top of the paused application's
+    // stack, which is why that depth is not affordable.
+    const objectCount = 150;
+    const depths: number[] = [];
+    let captured: RawCapture | undefined;
+
+    capturePaused(
+      {
+        getProperties({ objectId }, callback) {
+          depths.push(stackFrames());
+          if (objectId === "scope-1") {
+            callback(null, {
+              result: Array.from({ length: objectCount }, (_unused, index) => ({
+                name: `item${String(index)}`,
+                enumerable: true,
+                value: {
+                  type: "object" as const,
+                  objectId: `obj-${String(index)}`,
+                },
+              })),
+            });
+            return;
+          }
+          callback(null, {
+            result: [
+              { name: "leaf", enumerable: true, value: { type: "number" as const, value: 1 } },
+            ],
+          });
+        },
+      },
+      paused,
+      {
+        maxArray: 100,
+        maxDepth: 5,
+        maxObjects: 1_000,
+        maxProps: 1_000,
+        maxStackFrames: 1,
+        redactKeys: [],
+        scriptPath: () => "src/work.js",
+      },
+      (error, capture) => {
+        expect(error).toBeNull();
+        captured = capture;
+      },
+    );
+
+    expect(depths).toHaveLength(objectCount + 1);
+    const variables = captured?.variables as Record<string, unknown>;
+    expect(Object.keys(variables)).toHaveLength(objectCount);
+
+    // Recursing per object would make the last callback roughly `objectCount`
+    // nesting levels deeper than the first. The trampoline keeps it flat.
+    const spread = Math.max(...depths) - Math.min(...depths);
+    expect(spread).toBeLessThan(10);
+  });
+});

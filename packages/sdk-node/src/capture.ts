@@ -159,6 +159,8 @@ export function capturePaused(
 
   let firstError: Error | null = null;
   let visitedObjects = 0;
+  let pumping = false;
+  let pumpAgain = false;
 
   const finish = (): void => {
     callback(firstError, {
@@ -171,7 +173,7 @@ export function capturePaused(
     });
   };
 
-  const processNext = (): void => {
+  const step = (): void => {
     const task = tasks.shift();
     if (task === undefined) {
       finish();
@@ -243,6 +245,38 @@ export function capturePaused(
       }
       processNext();
     });
+  };
+
+  /**
+   * Drives the task queue without nesting a frame per captured object.
+   *
+   * On a same-thread session `getProperties` calls back synchronously — that is
+   * what lets a capture finish before the resume — so driving the queue by
+   * having each callback call the next step would stack one nesting level per
+   * object, up to `maxObjects`. That runs on top of the paused application's own
+   * stack, and while the object count is bounded the headroom left at the pause
+   * point is not: a probe on a deep call site overflowed with
+   * `Maximum call stack size exceeded` while the same probe a line later, after
+   * an `await` had unwound the stack, captured fine.
+   *
+   * A synchronous callback re-enters here, flags the pump and returns, so the
+   * loop below picks the next task up at a constant depth. An asynchronous one
+   * finds the pump idle and starts a fresh run.
+   */
+  const processNext = (): void => {
+    if (pumping) {
+      pumpAgain = true;
+      return;
+    }
+    pumping = true;
+    try {
+      do {
+        pumpAgain = false;
+        step();
+      } while (pumpAgain);
+    } finally {
+      pumping = false;
+    }
   };
 
   processNext();
