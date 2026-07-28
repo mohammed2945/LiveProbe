@@ -96,8 +96,10 @@ install_official_node() {
     "${SUDO[@]}" mkdir -p "$install_dir"
     "${SUDO[@]}" tar -xJf "$workdir/$archive" --strip-components=1 -C "$install_dir"
   fi
-  for tool in node npm npx; do
-    "${SUDO[@]}" ln -sfn "$install_dir/bin/$tool" "/usr/local/bin/$tool"
+  for tool in node npm npx corepack; do
+    if [[ -e "$install_dir/bin/$tool" ]]; then
+      "${SUDO[@]}" ln -sfn "$install_dir/bin/$tool" "/usr/local/bin/$tool"
+    fi
   done
   rm -rf "$workdir"
 }
@@ -109,6 +111,24 @@ fi
 if ! command -v corepack >/dev/null 2>&1; then
   "${SUDO[@]}" npm install --global corepack@0.35.0
 fi
+
+# corepack is invoked through sudo below, and sudo resolves commands against
+# secure_path. A Node installed under /opt is not on it, and recent Node
+# tarballs no longer ship corepack, so the npm --global copy lands beside that
+# Node rather than anywhere sudo can see. Link it onto secure_path first.
+if [[ ! -x /usr/local/bin/corepack ]]; then
+  corepack_bin="$(command -v corepack || true)"
+  if [[ -z "$corepack_bin" ]]; then
+    corepack_bin="$(npm prefix --global)/bin/corepack"
+  fi
+  if [[ -e "$corepack_bin" ]]; then
+    "${SUDO[@]}" ln -sfn "$corepack_bin" /usr/local/bin/corepack
+  else
+    echo "error: corepack was installed but could not be located" >&2
+    exit 1
+  fi
+fi
+
 "${SUDO[@]}" corepack enable --install-directory /usr/local/bin
 corepack prepare pnpm@11.9.0 --activate
 if [[ "$(pnpm --version)" != "11.9.0" ]]; then
