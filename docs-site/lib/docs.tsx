@@ -58,6 +58,27 @@ function Table({
   );
 }
 
+// The quickstart is a sequence, not a set of independent sections, so each step
+// is a two-column row: a numbered marker and connector rail on the left, the
+// heading and its body on the right. The numeral comes from a CSS counter, so
+// inserting or reordering a step cannot leave the page misnumbered.
+function QuickstartStep({
+  id,
+  title,
+  children,
+}: {
+  id: string;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="qs-step">
+      <h2 id={id}>{title}</h2>
+      <div className="qs-step-body">{children}</div>
+    </section>
+  );
+}
+
 function NativeHowItWorks() {
   return (
     <>
@@ -345,73 +366,82 @@ export const docs: DocPage[] = [
           </p>
         </Callout>
 
-        <h2 id="connect-mcp">1. Connect the hosted MCP server</h2>
-        <p>Add the production endpoint to Cursor or another OAuth MCP client:</p>
-        <CodeBlock code={hostedMcpConfig} language="json" />
-        <p>
-          Choose <strong>Login</strong>, sign in through Clerk, and select the
-          workspace you were invited to. No shared API key or local npm package
-          is needed for hosted MCP access.
-        </p>
+        <QuickstartStep id="connect-mcp" title="Connect the hosted MCP server">
+          <p>
+            Add the production endpoint to Cursor or another OAuth MCP client:
+          </p>
+          <CodeBlock code={hostedMcpConfig} language="json" />
+          <p>
+            Choose <strong>Login</strong>, sign in through Clerk, and select the
+            workspace you were invited to. No shared API key or local npm
+            package is needed for hosted MCP access.
+          </p>
+        </QuickstartStep>
 
-        <h2 id="create-runtime-identity">2. Create a runtime identity</h2>
-        <p>Ask the connected LiveProbe MCP server to perform these steps:</p>
-        <ol className="steps">
-          <li>
-            <strong>Create a project</strong>
-            Use one stable ID for the repository or application, such as{" "}
-            <code>acme</code>.
-          </li>
-          <li>
-            <strong>Create an environment</strong>
-            Add a deployment target such as <code>staging</code> or{" "}
-            <code>production</code>.
-          </li>
-          <li>
-            <strong>Register a service</strong>
-            Use one stable service ID for each independently deployed process,
-            such as <code>api</code> or <code>worker</code>.
-          </li>
-          <li>
-            <strong>Create a service credential</strong>
-            The plaintext <code>lp_service_...</code> key is returned once.
-            Place it directly in the deployment secret manager.
-          </li>
-        </ol>
-        <CodeBlock
-          language="text"
-          code={`Create project "acme", add its "production" environment,
+        <QuickstartStep
+          id="create-runtime-identity"
+          title="Create a runtime identity"
+        >
+          <p>Ask the connected LiveProbe MCP server to perform these steps:</p>
+          <ol className="steps">
+            <li>
+              <strong>Create a project</strong>
+              Use one stable ID for the repository or application, such as{" "}
+              <code>acme</code>.
+            </li>
+            <li>
+              <strong>Create an environment</strong>
+              Add a deployment target such as <code>staging</code> or{" "}
+              <code>production</code>.
+            </li>
+            <li>
+              <strong>Register a service</strong>
+              Use one stable service ID for each independently deployed process,
+              such as <code>api</code> or <code>worker</code>.
+            </li>
+            <li>
+              <strong>Create a service credential</strong>
+              The plaintext <code>lp_service_...</code> key is returned once.
+              Place it directly in the deployment secret manager.
+            </li>
+          </ol>
+          <CodeBlock
+            language="text"
+            code={`Create project "acme", add its "production" environment,
 register service "api", and create a production service credential
 labeled "Acme API production".`}
-        />
+          />
+        </QuickstartStep>
 
-        <h2 id="start-agent">3. Start one runtime agent</h2>
-        <p>
-          Configure the same project, environment, service, credential, and
-          deployed commit in the application. The language guides contain exact
-          startup code.
-        </p>
-        <CodeBlock code={commonRuntimeEnv} language="dotenv" />
-        <p>
-          Deploy the agent with the application. The application does not need
-          to run on GCP; it only needs outbound HTTPS access to{" "}
-          <code>liveprobe.tryastrea.tech</code>.
-        </p>
+        <QuickstartStep id="start-agent" title="Start one runtime agent">
+          <p>
+            Configure the same project, environment, service, credential, and
+            deployed commit in the application. The language guides contain
+            exact startup code.
+          </p>
+          <CodeBlock code={commonRuntimeEnv} language="dotenv" />
+          <p>
+            Deploy the agent with the application. The application does not need
+            to run on GCP; it only needs outbound HTTPS access to{" "}
+            <code>liveprobe.tryastrea.tech</code>.
+          </p>
+        </QuickstartStep>
 
-        <h2 id="verify">4. Verify the connection</h2>
-        <p>Run these read-only tools before placing a probe:</p>
-        <CodeBlock
-          language="text"
-          code={`Ping the LiveProbe broker. In project acme and environment
+        <QuickstartStep id="verify" title="Verify the connection">
+          <p>Run these read-only tools before placing a probe:</p>
+          <CodeBlock
+            language="text"
+            code={`Ping the LiveProbe broker. In project acme and environment
 production, list online services and show the safety overview.
 Do not create a probe yet.`}
-        />
-        <p>
-          <code>list_services</code> should show the service ID, SDK, deployed
-          commit, latest heartbeat, capabilities, and online state. An empty
-          list means the agent has not successfully heartbeated in the selected
-          project and environment.
-        </p>
+          />
+          <p>
+            <code>list_services</code> should show the service ID, SDK, deployed
+            commit, latest heartbeat, capabilities, and online state. An empty
+            list means the agent has not successfully heartbeated in the
+            selected project and environment.
+          </p>
+        </QuickstartStep>
       </>
     ),
   },
@@ -508,7 +538,7 @@ Do not create a probe yet.`}
         </Callout>
 
         <h2 id="data-lifecycle">Data lifecycle</h2>
-        <ul>
+        <ul className="lifecycle">
           <li>Agents poll probe definitions roughly once per second.</li>
           <li>Captured values are redacted and structurally bounded in-process.</li>
           <li>Counter and metric samples are pre-aggregated before transport.</li>

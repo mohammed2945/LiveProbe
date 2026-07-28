@@ -1,16 +1,6 @@
 "use client";
 
-import {
-  BookOpen,
-  ChevronLeft,
-  ChevronRight,
-  ExternalLink,
-  Menu,
-  Moon,
-  Search,
-  Sun,
-  X,
-} from "lucide-react";
+import { ExternalLink, Menu, Moon, Search, Sun, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -200,22 +190,16 @@ export function DocsShell({
         <nav className="page-nav" aria-label="Adjacent documentation pages">
           {previous ? (
             <Link href={`/docs/${previous.slug}`}>
-              <ChevronLeft size={18} />
-              <span>
-                <small>Previous</small>
-                {previous.title}
-              </span>
+              <small>← Previous</small>
+              <strong>{previous.title}</strong>
             </Link>
           ) : (
             <span />
           )}
           {next && (
             <Link href={`/docs/${next.slug}`} className="page-nav-next">
-              <span>
-                <small>Next</small>
-                {next.title}
-              </span>
-              <ChevronRight size={18} />
+              <small>Next →</small>
+              <strong>{next.title}</strong>
             </Link>
           )}
         </nav>
@@ -223,11 +207,13 @@ export function DocsShell({
 
       <aside className="toc">
         <p>On this page</p>
-        {headings.map((heading) => (
-          <a key={heading.id} href={`#${heading.id}`}>
-            {heading.label}
-          </a>
-        ))}
+        <nav aria-label="On this page">
+          {headings.map((heading) => (
+            <a key={heading.id} href={`#${heading.id}`}>
+              {heading.label}
+            </a>
+          ))}
+        </nav>
       </aside>
 
       {searchOpen && (
@@ -252,12 +238,12 @@ export function DocsShell({
               />
               <button
                 type="button"
-                className="icon-button"
+                className="escape-button"
                 onClick={() => setSearchOpen(false)}
                 aria-label="Close search"
                 title="Close search"
               >
-                <X size={18} />
+                esc
               </button>
             </div>
             <div className="search-results">
@@ -268,11 +254,11 @@ export function DocsShell({
                     href={`/docs/${doc.slug}`}
                     onClick={() => setSearchOpen(false)}
                   >
-                    <BookOpen size={18} />
                     <span>
                       <strong>{doc.title}</strong>
-                      <small>{doc.description}</small>
+                      <em>{doc.section}</em>
                     </span>
+                    <small>{doc.description}</small>
                   </Link>
                 ))
               ) : (

@@ -45,7 +45,13 @@ export default async function DocPage({
       next={next && { slug: next.slug, title: next.title }}
     >
       <header className="doc-header">
-        <p className="doc-kicker">{doc.section}</p>
+        <p className="doc-kicker">
+          <span>{doc.section}</span>
+          <span className="doc-kicker-separator" aria-hidden="true">
+            /
+          </span>
+          <span className="doc-kicker-current">{doc.title}</span>
+        </p>
         <h1>{doc.title}</h1>
         <p className="doc-summary">{doc.description}</p>
       </header>
