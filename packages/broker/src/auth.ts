@@ -7,6 +7,7 @@ import {
 } from "./store/migrations.js";
 
 export const SERVICE_API_KEY_PREFIX = "lp_service_";
+export const NATIVE_API_KEY_PREFIX = "lp_native_";
 
 export type HumanRole = "admin" | "operator" | "viewer";
 
@@ -42,6 +43,21 @@ export interface StoredServiceCredential extends ServiceCredentialRecord {
   secretHash: string;
 }
 
+export interface NativeCredentialRecord extends ResourceScope {
+  credentialId: string;
+  agentId: string;
+  allowedServiceIds: string[];
+  label: string;
+  keyPrefix: string;
+  createdAt: string;
+  lastUsedAt?: string | undefined;
+  revokedAt?: string | undefined;
+}
+
+export interface StoredNativeCredential extends NativeCredentialRecord {
+  secretHash: string;
+}
+
 export type BrokerPrincipal =
   | (ResourceScope & {
       type: "shared";
@@ -61,11 +77,23 @@ export type BrokerPrincipal =
       principalId: string;
       role: "agent";
       serviceId: string;
+    })
+  | (ResourceScope & {
+      type: "native";
+      principalId: string;
+      role: "native-agent";
+      agentId: string;
+      allowedServiceIds: string[];
     });
 
 export interface ServiceCredentialMaterial {
   apiKey: string;
   record: StoredServiceCredential;
+}
+
+export interface NativeCredentialMaterial {
+  apiKey: string;
+  record: StoredNativeCredential;
 }
 
 export type BearerAuthenticator = (
@@ -110,6 +138,31 @@ export function createServiceCredentialMaterial(input: {
   };
 }
 
+export function createNativeCredentialMaterial(input: {
+  agentId: string;
+  allowedServiceIds: string[];
+  label: string;
+  scope?: ResourceScope;
+  now?: Date;
+}): NativeCredentialMaterial {
+  const secret = randomBytes(32).toString("base64url");
+  const apiKey = `${NATIVE_API_KEY_PREFIX}${secret}`;
+  const scope = input.scope ?? DEFAULT_RESOURCE_SCOPE;
+  return {
+    apiKey,
+    record: {
+      credentialId: `nat_${randomBytes(16).toString("hex")}`,
+      ...scope,
+      agentId: input.agentId,
+      allowedServiceIds: [...new Set(input.allowedServiceIds)].sort(),
+      label: input.label,
+      keyPrefix: `${NATIVE_API_KEY_PREFIX}${secret.slice(0, 8)}`,
+      secretHash: hashBearerToken(apiKey),
+      createdAt: (input.now ?? new Date()).toISOString(),
+    },
+  };
+}
+
 export function servicePrincipal(
   credential: ServiceCredentialRecord,
 ): BrokerPrincipal {
@@ -121,6 +174,21 @@ export function servicePrincipal(
     projectId: credential.projectId,
     environmentId: credential.environmentId,
     serviceId: credential.serviceId,
+  };
+}
+
+export function nativePrincipal(
+  credential: NativeCredentialRecord,
+): BrokerPrincipal {
+  return {
+    type: "native",
+    role: "native-agent",
+    principalId: credential.credentialId,
+    tenantId: credential.tenantId,
+    projectId: credential.projectId,
+    environmentId: credential.environmentId,
+    agentId: credential.agentId,
+    allowedServiceIds: [...credential.allowedServiceIds],
   };
 }
 

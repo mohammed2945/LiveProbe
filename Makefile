@@ -19,6 +19,9 @@ GCP_LOGS_ARGS ?= --tail=200
 	payment-deps python-demo-deps payment-test inventory-test \
 	build typescript-build payment-build java-build inventory-build \
 	redaction-audit readonly-audit bench \
+	native-smoke native-build native-test native-ebpf-test native-demo \
+	native-release native-install native-loader-relocation-test \
+	native-e2e-rust native-e2e-cpp native-e2e native-hot-burst-test \
 	e2e-node e2e-python e2e-jvm \
 	demo-prerequisites demo demo-down \
 	gcp-demo-prerequisites gcp-demo-up gcp-demo-status gcp-demo-logs gcp-demo-down \
@@ -92,6 +95,67 @@ redaction-audit:
 
 readonly-audit:
 	node scripts/readonly-audit.mjs
+
+native-smoke:
+	$(MAKE) -C tools/ebpf-smoke run
+
+native-build:
+	@test "$$(uname -s)" = Linux || { echo "native-build requires Linux"; exit 1; }
+	$(MAKE) -C native/bpf
+	cargo build --manifest-path native/Cargo.toml --workspace
+
+native-test:
+	cargo fmt --manifest-path native/Cargo.toml --all --check
+	cargo test --manifest-path native/Cargo.toml --workspace
+
+native-ebpf-test:
+	@test "$$(uname -s)" = Linux || { echo "native-ebpf-test requires Linux"; exit 1; }
+	@test "$$(uname -m)" = x86_64 || { echo "native-ebpf-test requires x86_64"; exit 1; }
+	$(MAKE) native-build
+	$(MAKE) -C native/bpf audit
+	$(MAKE) -C native/tests all
+	sudo -n native/tests/.build/ebpf-integration \
+		native/bpf/liveprobe.bpf.o native/tests/.build/target
+
+native-demo:
+	cargo build --manifest-path demo/rust-service/Cargo.toml --release
+	$(MAKE) -C demo/cpp-service
+
+NATIVE_PREFIX ?= /usr/local
+DESTDIR ?=
+
+native-release:
+	@test "$$(uname -s)" = Linux || { echo "native-release requires Linux"; exit 1; }
+	$(MAKE) -C native/bpf audit
+	cargo build --manifest-path native/Cargo.toml --workspace --release
+
+native-loader-relocation-test: native-release
+	@tmp="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmp"' EXIT INT TERM; \
+	cp native/target/release/liveprobe-bpf-loader "$$tmp/"; \
+	cd / && "$$tmp/liveprobe-bpf-loader" --verify-embedded
+
+native-install: native-release
+	install -d "$(DESTDIR)$(NATIVE_PREFIX)/bin" "$(DESTDIR)/etc/liveprobe" \
+		"$(DESTDIR)/run/liveprobe"
+	install -m 0755 native/target/release/liveprobe-native-agent \
+		"$(DESTDIR)$(NATIVE_PREFIX)/bin/liveprobe-native-agent"
+	install -m 0755 native/target/release/liveprobe-bpf-loader \
+		"$(DESTDIR)$(NATIVE_PREFIX)/bin/liveprobe-bpf-loader"
+
+native-e2e-rust: native-release native-demo
+	pnpm --filter @liveprobe/protocol build
+	pnpm --filter @liveprobe/broker build
+	node scripts/native-e2e.mjs rust
+
+native-e2e-cpp: native-release native-demo
+	pnpm --filter @liveprobe/protocol build
+	pnpm --filter @liveprobe/broker build
+	node scripts/native-e2e.mjs cpp
+
+native-e2e: native-e2e-rust native-e2e-cpp
+
+native-hot-burst-test: native-e2e-rust
 
 bench:
 	pnpm --filter @doomslayer2945/liveprobe-node run bench

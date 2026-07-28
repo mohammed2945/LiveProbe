@@ -1,0 +1,10 @@
+[package]
+name = "liveprobe-rust-demo"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+debug = 2
+strip = false
+lto = false
+codegen-units = 8

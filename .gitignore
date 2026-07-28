@@ -22,6 +22,8 @@ htmlcov/
 java/bridge/build/
 java/bridge/*.jar
 target/
+native/bpf/liveprobe.bpf.o
+demo/cpp-service/liveprobe-cpp-demo
 
 # Local configuration and operating-system files
 .env

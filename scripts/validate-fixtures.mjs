@@ -29,6 +29,7 @@ const nodeTypes = new Set([
   "fn",
   "truncated",
   "redacted",
+  "unavailable",
 ]);
 const truncationReasons = new Set([
   "depth",
@@ -89,6 +90,11 @@ function validateNode(node, location) {
     case "truncated":
       if (!truncationReasons.has(node.v)) {
         fail(location, "truncated.v has an unknown reason");
+      }
+      break;
+    case "unavailable":
+      if (!isObject(node.v) || typeof node.v.reasonCode !== "string") {
+        fail(location, "unavailable.v must contain a reasonCode");
       }
       break;
     case "fn":

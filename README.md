@@ -3,7 +3,9 @@
 LiveProbe is an experimental, AI-native live debugger. An MCP server gives an
 AI client a small diagnostic tool surface; a broker coordinates short-lived
 probes; and runtime agents collect bounded snapshots, dynamic logs, counters,
-or metrics from a running Node.js, Python, or JVM process.
+or metrics from a running Node.js, Python, JVM, Rust, or C++ process. Rust and
+C++ use the Linux native-eBPF backend documented in
+[native eBPF development](docs/native-ebpf-development.md).
 
 This repository is a development prototype, not a production observability
 service. Published client packages are
@@ -24,9 +26,9 @@ The hosted documentation is available at
 ```text
 AI client -- stdio MCP --> MCP server -- HTTP --> broker + durable store
                                                   |       |        |
-                                            Node SDK  Python SDK  Java JDI bridge
-                                                  |       |        |
-                                             payment   billing   inventory
+                                            Node SDK  Python SDK  Java bridge  Native agent
+                                                  |       |          |             |
+                                             payment   billing   inventory      Rust/C++
 ```
 
 The MCP process never connects directly to a target runtime. Agents poll the
@@ -43,6 +45,8 @@ to relay probe definitions and evidence.
 - Python 3.12+ and `venv`
 - JDK 17+ and Maven 3.9+
 - Docker with Compose v2 for the all-language demo
+- Linux x86-64, build IDs, DWARF, libbpf, BTF, uprobes, and ring buffers for
+  native Rust/C++ capture; use the checked-in Lima VM from macOS
 
 ```sh
 corepack enable
@@ -94,11 +98,12 @@ Python uses PEP 669 `sys.monitoring` and therefore requires Python 3.12+:
 
 ```python
 import liveprobe
+import os
 
 agent = liveprobe.start(
     service_id="billing",
     broker_url="http://127.0.0.1:7070",
-    api_key="dev-liveprobe-key",
+    api_key=os.environ["LIVEPROBE_API_KEY"],
     commit_sha="abcdef1234567890",
     environment="development",
 )

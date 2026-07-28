@@ -16,6 +16,7 @@
     "typecheck": "pnpm --filter @doomslayer2945/liveprobe-mcp run build && tsc --project tsconfig.json --noEmit && tsc --project tsconfig.test.json"
   },
   "dependencies": {
+    "@liveprobe/protocol": "workspace:*",
     "@clerk/backend": "^3.12.0",
     "@doomslayer2945/liveprobe-mcp": "workspace:*",
     "@jridgewell/trace-mapping": "^0.3.31",

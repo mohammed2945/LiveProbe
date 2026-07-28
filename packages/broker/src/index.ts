@@ -9,6 +9,23 @@ import Fastify, {
   type FastifyServerOptions,
 } from "fastify";
 import { handleStatelessHttpMcpRequest } from "@doomslayer2945/liveprobe-mcp";
+import {
+  BuildIdSchema,
+  ConditionSchema as SharedConditionSchema,
+  CreateProbeInputSchema as SharedCreateProbeInputSchema,
+  NativeAgentRegistrationSchema,
+  NativeInstanceSchema,
+  NativeInstanceSetSchema,
+  NativeIngestEnvelopeSchema,
+  NATIVE_MAX_CAPTURE_SLOTS,
+  NativeProbeStatusSchema,
+  NativeReasonCodeSchema,
+  NativeStatusMetadataSchema,
+  ProbeDefinitionSchema as SharedProbeDefinitionSchema,
+  type NativeAgentRegistration,
+  type NativeIngestEnvelope,
+  type NativeInstance,
+} from "@liveprobe/protocol";
 import { z, ZodError } from "zod";
 
 import type {
@@ -20,10 +37,13 @@ import type {
 import {
   BearerAuthenticationError,
   SERVICE_API_KEY_PREFIX,
+  NATIVE_API_KEY_PREFIX,
   DEFAULT_RESOURCE_SCOPE,
   createServiceCredentialMaterial,
+  createNativeCredentialMaterial,
   hashBearerToken,
   servicePrincipal,
+  nativePrincipal,
   sharedPrincipal,
   type BrokerPrincipal,
   type BearerAuthenticator,
@@ -31,6 +51,8 @@ import {
   type ResourceScopeLabels,
   type ServiceCredentialRecord,
   type StoredServiceCredential,
+  type NativeCredentialRecord,
+  type StoredNativeCredential,
 } from "./auth.js";
 import {
   clerkAuthenticatorFromEnv,
@@ -67,7 +89,9 @@ export type {
 export {
   BearerAuthenticationError,
   SERVICE_API_KEY_PREFIX,
+  NATIVE_API_KEY_PREFIX,
   createServiceCredentialMaterial,
+  createNativeCredentialMaterial,
   hashBearerToken,
 } from "./auth.js";
 export {
@@ -97,6 +121,8 @@ export type {
   ResourceScopeLabels,
   ServiceCredentialRecord,
   StoredServiceCredential,
+  NativeCredentialRecord,
+  StoredNativeCredential,
 } from "./auth.js";
 export type {
   AuditEventRecord,
@@ -186,12 +212,6 @@ const dotPathSchema = z
   .max(1_024)
   .regex(/^[^.]+(?:\.[^.]+)*$/, "must be a dot path with non-empty segments");
 const timestampSchema = z.string().datetime({ offset: true });
-const jsonScalarSchema = z.union([
-  z.string(),
-  z.number().finite(),
-  z.boolean(),
-  z.null(),
-]);
 const expressionScalarSchema = z.union([
   z.string(),
   z
@@ -205,13 +225,7 @@ const expressionScalarSchema = z.union([
   z.null(),
 ]);
 
-export const ConditionSchema = z
-  .object({
-    path: dotPathSchema,
-    op: z.enum(["eq", "ne", "gt", "gte", "lt", "lte"]),
-    value: jsonScalarSchema,
-  })
-  .strict();
+export const ConditionSchema = SharedConditionSchema;
 
 const expressionPathSegmentSchema = z.union([
   z.string().min(1).max(128),
@@ -286,108 +300,9 @@ const TemplateSegmentSchema: z.ZodType<TemplateSegment> =
       .strict(),
   ]);
 
-const createCommonShape = {
-  serviceId: serviceIdSchema,
-  sourceCommit: sourceCommitSchema.optional(),
-  file: sourceFileSchema,
-  line: z.number().int().positive(),
-  condition: ConditionSchema.optional(),
-  conditionExpression: z.string().trim().min(1).max(4_096).optional(),
-  ttlSeconds: z.number().int().positive().default(DEFAULT_TTL_SECONDS),
-  createdBy: z.string().trim().min(1).max(500),
-} as const;
+export const CreateProbeSchema = SharedCreateProbeInputSchema;
 
-export const CreateProbeSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      ...createCommonShape,
-      type: z.literal("snapshot"),
-      watchPaths: z.array(dotPathSchema).max(100).optional(),
-      watchExpressions: z.array(z.string().trim().min(1).max(4_096)).max(100).optional(),
-      includeStackLocals: z.boolean().default(false),
-      stackFrameLimit: z.number().int().min(1).max(8).default(3),
-      hitLimit: z.number().int().positive().default(1),
-    })
-    .strict(),
-  z
-    .object({
-      ...createCommonShape,
-      type: z.literal("log"),
-      template: z.string().min(1).max(16_384),
-      logLevel: logLevelSchema.default("info"),
-      hitLimit: z.number().int().positive().default(100),
-    })
-    .strict(),
-  z
-    .object({
-      ...createCommonShape,
-      type: z.literal("counter"),
-      hitLimit: z.number().int().positive().default(10_000),
-    })
-    .strict(),
-  z
-    .object({
-      ...createCommonShape,
-      type: z.literal("metric"),
-      metricPath: dotPathSchema.optional(),
-      metricExpression: z.string().trim().min(1).max(4_096).optional(),
-      hitLimit: z.number().int().positive().default(10_000),
-    })
-    .strict(),
-]);
-
-const definitionCommonShape = {
-  id: probeIdSchema,
-  serviceId: serviceIdSchema,
-  sourceCommit: sourceCommitSchema.optional(),
-  file: sourceFileSchema,
-  line: z.number().int().positive(),
-  runtimeLocation: sourceFileSchema.optional(),
-  runtimeLine: z.number().int().positive().optional(),
-  runtimeColumn: z.number().int().nonnegative().optional(),
-  condition: ConditionSchema.optional(),
-  conditionExpression: CompiledExpressionSchema.optional(),
-  ttlSeconds: z.number().int().positive(),
-  hitLimit: z.number().int().positive(),
-  version: z.number().int().positive(),
-  createdBy: z.string().trim().min(1).max(500),
-} as const;
-
-export const ProbeDefinitionSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      ...definitionCommonShape,
-      type: z.literal("snapshot"),
-      watchPaths: z.array(dotPathSchema).max(100).optional(),
-      watchExpressions: z.array(CompiledExpressionSchema).max(100).optional(),
-      includeStackLocals: z.boolean().default(false),
-      stackFrameLimit: z.number().int().min(1).max(8).default(3),
-    })
-    .strict(),
-  z
-    .object({
-      ...definitionCommonShape,
-      type: z.literal("log"),
-      template: z.string().min(1).max(16_384),
-      logLevel: logLevelSchema.default("info"),
-      templateSegments: z.array(TemplateSegmentSchema).max(201).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      ...definitionCommonShape,
-      type: z.literal("counter"),
-    })
-    .strict(),
-  z
-    .object({
-      ...definitionCommonShape,
-      type: z.literal("metric"),
-      metricPath: dotPathSchema.optional(),
-      metricExpression: CompiledExpressionSchema.optional(),
-    })
-    .strict(),
-]);
+export const ProbeDefinitionSchema = SharedProbeDefinitionSchema;
 
 export type CreateProbeInput = z.infer<typeof CreateProbeSchema>;
 export type ProbeDefinition = z.infer<typeof ProbeDefinitionSchema>;
@@ -400,6 +315,15 @@ export type SerializedNode =
   | { t: "null"; v: null }
   | { t: "fn" }
   | { t: "redacted" }
+  | {
+      t: "unavailable";
+      v: {
+        reasonCode: z.infer<typeof NativeReasonCodeSchema>;
+        detail?: string | undefined;
+        siteId?: string | undefined;
+        buildId?: string | undefined;
+      };
+    }
   | {
       t: "truncated";
       v: "depth" | "array" | "props" | "string" | "circular" | "unsupported";
@@ -423,6 +347,15 @@ export const SerializedNodeSchema: z.ZodType<SerializedNode> = z.lazy(() =>
     z.object({ t: z.literal("null"), v: z.null() }).strict(),
     z.object({ t: z.literal("fn") }).strict(),
     z.object({ t: z.literal("redacted") }).strict(),
+    z.object({
+      t: z.literal("unavailable"),
+      v: z.object({
+        reasonCode: NativeReasonCodeSchema,
+        detail: z.string().max(4_096).optional(),
+        siteId: z.string().max(300).optional(),
+        buildId: BuildIdSchema.optional(),
+      }).strict(),
+    }).strict(),
     z
       .object({
         t: z.literal("truncated"),
@@ -484,6 +417,7 @@ export const StatusNameSchema = z.enum([
 
 const eventCommonShape = {
   probeId: probeIdSchema,
+  probeVersion: z.number().int().positive().optional(),
   ts: timestampSchema,
 } as const;
 
@@ -538,6 +472,7 @@ export const ProbeEventSchema = z.discriminatedUnion("type", [
       type: z.literal("status"),
       status: StatusNameSchema,
       detail: z.string().max(4_096).optional(),
+      ...NativeStatusMetadataSchema.shape,
     })
     .strict(),
 ]);
@@ -563,6 +498,12 @@ export const SafetyLimitsSchema = z
     maxEventLoopLagMs: z.number().finite().positive().optional(),
   })
   .strict();
+
+function nativeStatusEndsAssignment(status: ProbeStatusName): boolean {
+  return status === "hit-limit-reached" ||
+    status === "suspended" ||
+    status === "expired";
+}
 
 export const AgentStatusSchema = z
   .object({
@@ -614,6 +555,17 @@ export interface ProbeStatus {
    * indistinguishable from never having armed.
    */
   armedAt?: string | undefined;
+  reasonCode?: z.infer<typeof NativeReasonCodeSchema> | undefined;
+  agentId?: string | undefined;
+  instanceId?: string | undefined;
+  buildId?: string | undefined;
+  probeVersion?: number | undefined;
+  siteId?: string | undefined;
+  resolution?: z.infer<typeof NativeStatusMetadataSchema>["resolution"];
+  variableAvailability?: z.infer<typeof NativeStatusMetadataSchema>["variableAvailability"];
+  physicalSiteCount?: number | undefined;
+  rawHitRate?: number | undefined;
+  droppedEventCount?: number | undefined;
 }
 
 export interface ServiceRecord {
@@ -624,6 +576,11 @@ export interface ServiceRecord {
   commitSource?: "env" | "config" | undefined;
   capabilities?: AgentCapability[] | undefined;
   agentStatus?: AgentStatus | undefined;
+  backend?: "managed-runtime" | "native-ebpf" | undefined;
+  language?: "node" | "python" | "jvm" | "rust" | "cpp" | undefined;
+  instanceCount?: number | undefined;
+  buildIds?: string[] | undefined;
+  nativeLimitations?: string[] | undefined;
 }
 
 interface StoredProbe {
@@ -713,6 +670,21 @@ export interface BrokerStore {
     input: IngestInput,
     scope: ResourceScope,
   ): Promise<void>;
+  persistNativeAgent?(
+    state: BrokerState,
+    agentId: string,
+    scope: ResourceScope,
+  ): Promise<void>;
+  persistNativeInstances?(
+    state: BrokerState,
+    agentId: string,
+    scope: ResourceScope,
+  ): Promise<void>;
+  persistNativeIngest?(
+    state: BrokerState,
+    input: NativeIngestEnvelope,
+    scope: ResourceScope,
+  ): Promise<void>;
   persistSourceMapSet?(
     state: BrokerState,
     serviceId: string,
@@ -732,6 +704,19 @@ export interface BrokerStore {
   authenticateServiceCredential?(
     secretHash: string,
   ): Promise<ServiceCredentialRecord | undefined>;
+  createNativeCredential?(
+    credential: StoredNativeCredential,
+  ): Promise<NativeCredentialRecord>;
+  listNativeCredentials?(
+    scope: ResourceScope,
+  ): Promise<NativeCredentialRecord[]>;
+  revokeNativeCredential?(
+    credentialId: string,
+    scope: ResourceScope,
+  ): Promise<boolean>;
+  authenticateNativeCredential?(
+    secretHash: string,
+  ): Promise<NativeCredentialRecord | undefined>;
   appendAuditEvent?(event: AuditEventRecord): Promise<void>;
   listAuditEvents?(
     scope: ResourceScope,
@@ -817,11 +802,11 @@ function scopeFor(request: FastifyRequest): ResourceScope {
 
 function requireHumanRead(request: FastifyRequest): BrokerPrincipal {
   const principal = principalFor(request);
-  if (principal.role === "agent") {
+  if (principal.type === "service" || principal.type === "native") {
     throw new BrokerHttpError(
       403,
       "forbidden",
-      "service credentials cannot read human control-plane resources",
+      "runtime credentials cannot read human control-plane resources",
     );
   }
   return principal;
@@ -855,6 +840,13 @@ function requireServiceAccess(
   serviceId: string,
 ): BrokerPrincipal {
   const principal = principalFor(request);
+  if (principal.type === "native") {
+    throw new BrokerHttpError(
+      403,
+      "forbidden",
+      "native credentials cannot call managed runtime routes",
+    );
+  }
   if (principal.type === "user") {
     throw new BrokerHttpError(
       403,
@@ -868,6 +860,27 @@ function requireServiceAccess(
       "forbidden",
       `service credential cannot access service ${serviceId}`,
     );
+  }
+  return principal;
+}
+
+function requireNativeAccess(
+  request: FastifyRequest,
+  agentId: string,
+): ResourceScope & { allowedServiceIds: readonly string[] } {
+  const principal = principalFor(request);
+  if (principal.type === "shared") {
+    return { ...resourceScope(principal), allowedServiceIds: ["*"] };
+  }
+  if (principal.type !== "native") {
+    throw new BrokerHttpError(
+      403,
+      "forbidden",
+      "only native host-agent credentials may call native runtime routes",
+    );
+  }
+  if (principal.agentId !== agentId) {
+    throw new BrokerHttpError(403, "forbidden", "native credential agent ID mismatch");
   }
   return principal;
 }
@@ -907,6 +920,7 @@ const persistedStatusSchema = z
     updatedAt: timestampSchema,
     detail: z.string().max(4_096).optional(),
     armedAt: timestampSchema.optional(),
+    ...NativeStatusMetadataSchema.shape,
   })
   .strict();
 
@@ -926,8 +940,37 @@ const persistedServiceSchema = z
     commitSource: commitSourceSchema.optional(),
     capabilities: z.array(AgentCapabilitySchema).max(32).default([]),
     agentStatus: AgentStatusSchema.optional(),
+    backend: z.enum(["managed-runtime", "native-ebpf"]).optional(),
+    language: z.enum(["node", "python", "jvm", "rust", "cpp"]).optional(),
+    instanceCount: z.number().int().nonnegative().optional(),
+    buildIds: z.array(BuildIdSchema).optional(),
+    nativeLimitations: z.array(z.string()).optional(),
   })
   .strict();
+
+const persistedNativeAgentSchema = NativeAgentRegistrationSchema.extend({
+  ...resourceScopeShape,
+  lastSeen: timestampSchema,
+}).strict();
+const persistedNativeInstanceSchema = NativeInstanceSchema.extend({
+  ...resourceScopeShape,
+  agentId: z.string().trim().min(1).max(200),
+  capabilities: z.array(z.string()).default([]),
+}).strict();
+const persistedNativeStatusSchema = z.object({
+  ...resourceScopeShape,
+  probeId: probeIdSchema,
+  probeVersion: z.number().int().positive(),
+  agentId: z.string().trim().min(1).max(200),
+  instanceId: z.string().trim().min(1).max(300),
+  buildId: BuildIdSchema,
+  value: persistedStatusSchema,
+}).strict();
+const persistedNativeAssignmentVersionSchema = z.object({
+  ...resourceScopeShape,
+  agentId: z.string().trim().min(1).max(200),
+  version: z.number().int().nonnegative(),
+}).strict();
 
 const persistedSourceMapSetSchema = z
   .object({
@@ -1032,6 +1075,12 @@ const snapshotSchema = z
         .strict(),
     ),
     sourceMapSets: z.array(persistedSourceMapSetSchema).default([]),
+    nativeAgents: z.array(persistedNativeAgentSchema).default([]),
+    nativeInstances: z.array(persistedNativeInstanceSchema).default([]),
+    nativeStatuses: z.array(persistedNativeStatusSchema).default([]),
+    nativeAssignmentVersions: z
+      .array(persistedNativeAssignmentVersionSchema)
+      .default([]),
   })
   .strict();
 
@@ -1104,10 +1153,33 @@ function normalizeAgentCapabilities(
 }
 
 type ScopedServiceRecord = ServiceRecord & ResourceScope;
+type NativeAgentRecord = z.infer<typeof persistedNativeAgentSchema>;
+type NativeInstanceRecord = z.infer<typeof persistedNativeInstanceSchema>;
 type ScopedServiceVersion = ResourceScope & {
   serviceId: string;
   version: number;
 };
+
+function nativeAttachmentIdentity(
+  instance: NativeInstance | NativeInstanceRecord,
+  fallbackCapabilities: readonly string[] = [],
+): string {
+  return JSON.stringify({
+    instanceId: instance.instanceId,
+    serviceId: instance.serviceId,
+    language: instance.language,
+    pid: instance.pid,
+    processStartTime: instance.processStartTime,
+    executablePath: instance.executablePath,
+    executableDevice: instance.executableDevice,
+    executableInode: instance.executableInode,
+    buildId: instance.buildId,
+    architecture: instance.architecture,
+    capabilities: [...(instance.capabilities ?? fallbackCapabilities)].sort(),
+    cgroup: instance.cgroup,
+    containerId: instance.containerId,
+  });
+}
 
 function resourceScope(scope: ResourceScope): ResourceScope {
   return {
@@ -1223,6 +1295,29 @@ function compileProbeInput(input: CreateProbeInput): Record<string, unknown> {
   return compiledCommon;
 }
 
+function nativeCapturePaths(input: CreateProbeInput): Set<string> {
+  const paths = new Set<string>();
+  if (input.condition !== undefined) {
+    paths.add(input.condition.path);
+  }
+  if (input.type === "snapshot") {
+    for (const path of input.watchPaths ?? []) {
+      paths.add(path);
+    }
+  } else if (input.type === "metric" && input.metricPath !== undefined) {
+    paths.add(input.metricPath);
+  } else if (input.type === "log") {
+    const interpolation = /\$\{([^.}]+(?:\.[^.}]+)*)\}/gu;
+    for (const match of input.template.matchAll(interpolation)) {
+      const path = match[1];
+      if (path !== undefined) {
+        paths.add(path);
+      }
+    }
+  }
+  return paths;
+}
+
 function requiresExpressionCapability(
   input: Record<string, unknown>,
 ): boolean {
@@ -1246,6 +1341,10 @@ export class BrokerState {
   private readonly statuses = new Map<string, ProbeStatus>();
   private readonly sourceMapSets = new Map<string, SourceMapSet>();
   private readonly sourceMapLeases = new Map<string, SourceMapLease>();
+  private readonly nativeAgents = new Map<string, NativeAgentRecord>();
+  private readonly nativeInstances = new Map<string, NativeInstanceRecord>();
+  private readonly nativeStatuses = new Map<string, ProbeStatus>();
+  private readonly nativeAssignmentVersions = new Map<string, number>();
   private readonly listeners = new Map<string, Set<ActivityListener>>();
   private readonly clock: () => number;
   private readonly idGenerator: (now: number) => string;
@@ -1275,6 +1374,49 @@ export class BrokerState {
     const compiledInput = compileProbeInput(input);
     this.refreshServiceCapabilities(scope, input.serviceId);
     const service = this.services.get(this.serviceKey(scope, input.serviceId));
+    if (service?.backend === "native-ebpf") {
+      const unsupported =
+        input.conditionExpression !== undefined
+          ? ["conditionExpression", "simple condition"]
+          : input.type === "snapshot" && input.watchExpressions !== undefined
+            ? ["watchExpressions", "watchPaths"]
+            : input.type === "snapshot" && input.includeStackLocals
+              ? ["includeStackLocals", "bounded watchPaths"]
+              : input.type === "snapshot" && input.stackFrameLimit !== 3
+                ? ["stackFrameLimit", "omit stack capture options"]
+                : input.type === "metric" && input.metricExpression !== undefined
+                  ? ["metricExpression", "metricPath"]
+                  : input.type === "counter" && input.condition !== undefined
+                    ? ["condition", "an unconditional counter"]
+                  : input.type === "log" && input.logLevel !== "info"
+                    ? ["logLevel", "info"]
+                    : undefined;
+      if (unsupported !== undefined) {
+        throw new BrokerHttpError(
+          409,
+          "unsupported_by_backend",
+          `native-ebpf service ${input.serviceId} does not support ${unsupported[0]}; use ${unsupported[1]}`,
+        );
+      }
+      if (
+        input.type === "snapshot" &&
+        (input.watchPaths === undefined || input.watchPaths.length === 0)
+      ) {
+        throw new BrokerHttpError(
+          409,
+          "unsupported_by_backend",
+          `native-ebpf service ${input.serviceId} requires at least one bounded watchPath`,
+        );
+      }
+      const capturePathCount = nativeCapturePaths(input).size;
+      if (capturePathCount > NATIVE_MAX_CAPTURE_SLOTS) {
+        throw new BrokerHttpError(
+          409,
+          "unsupported_by_backend",
+          `native-ebpf service ${input.serviceId} requires ${capturePathCount} unique capture paths, but the native ABI supports at most ${NATIVE_MAX_CAPTURE_SLOTS} including condition paths`,
+        );
+      }
+    }
     if (input.type === "log" && input.logLevel !== "info") {
       if (!service?.capabilities?.includes("log-levels-v1")) {
         throw new BrokerHttpError(
@@ -1626,6 +1768,231 @@ export class BrokerState {
     return input.events.length;
   }
 
+  public registerNativeAgent(
+    input: NativeAgentRegistration,
+    scope: ResourceScope,
+  ): NativeAgentRecord {
+    const record = persistedNativeAgentSchema.parse({
+      ...input,
+      ...resourceScope(scope),
+      lastSeen: this.timestamp(),
+    });
+    this.nativeAgents.set(this.nativeAgentKey(scope, input.agentId), record);
+    if (!this.nativeAssignmentVersions.has(this.nativeAgentKey(scope, input.agentId))) {
+      this.nativeAssignmentVersions.set(this.nativeAgentKey(scope, input.agentId), 0);
+    }
+    return record;
+  }
+
+  public replaceNativeInstances(
+    agentId: string,
+    instances: NativeInstance[],
+    scope: ResourceScope,
+    allowedServiceIds: readonly string[],
+  ): number {
+    const agentKey = this.nativeAgentKey(scope, agentId);
+    const agent = this.nativeAgents.get(agentKey);
+    if (agent === undefined) {
+      throw new BrokerHttpError(404, "native_agent_not_found", "native agent is not registered");
+    }
+    const allowed = new Set(allowedServiceIds);
+    const ids = new Set<string>();
+    for (const instance of instances) {
+      if (!allowed.has("*") && !allowed.has(instance.serviceId)) {
+        throw new BrokerHttpError(403, "forbidden", `service ${instance.serviceId} is not allowed`);
+      }
+      if (ids.has(instance.instanceId)) {
+        throw new BrokerHttpError(400, "invalid_request", "duplicate native instance");
+      }
+      ids.add(instance.instanceId);
+      const existing = [...this.nativeInstances.values()].find((candidate) =>
+        sameResourceScope(candidate, scope) &&
+        candidate.instanceId === instance.instanceId &&
+        candidate.agentId !== agentId
+      );
+      if (existing !== undefined) {
+        throw new BrokerHttpError(409, "native_instance_owned", "native instance has another owner");
+      }
+    }
+    const previous = [...this.nativeInstances.values()]
+      .filter((item) => sameResourceScope(item, scope) && item.agentId === agentId)
+      .map((item) => nativeAttachmentIdentity(item))
+      .sort();
+    const next = instances
+      .map((item) => nativeAttachmentIdentity(item, agent.capabilities))
+      .sort();
+    for (const [key, item] of this.nativeInstances) {
+      if (
+        sameResourceScope(item, scope) &&
+        item.agentId === agentId &&
+        !ids.has(item.instanceId)
+      ) {
+        this.nativeInstances.delete(key);
+      }
+    }
+    for (const instance of instances) {
+      this.nativeInstances.set(
+        this.nativeInstanceKey(scope, agentId, instance.instanceId),
+        persistedNativeInstanceSchema.parse({
+          ...instance,
+          ...resourceScope(scope),
+          agentId,
+          capabilities: instance.capabilities ?? agent.capabilities,
+        }),
+      );
+    }
+    this.nativeAgents.set(agentKey, { ...agent, lastSeen: this.timestamp() });
+    if (JSON.stringify(previous) !== JSON.stringify(next)) {
+      this.bumpNativeAssignmentVersion(scope, agentId);
+    }
+    this.rebuildNativeServices(scope);
+    return instances.length;
+  }
+
+  public nativeAssignments(
+    agentId: string,
+    since: number,
+    scope: ResourceScope,
+    allowedServiceIds: readonly string[],
+  ): {
+    version: number;
+    assignments: Array<{
+      instanceId: string;
+      serviceId: string;
+      backend?: "managed-runtime" | "native-ebpf";
+      language?: "node" | "python" | "jvm" | "rust" | "cpp";
+      buildId: string;
+      probes: ProbeDefinition[];
+    }>;
+  } {
+    const agentKey = this.nativeAgentKey(scope, agentId);
+    if (!this.nativeAgents.has(agentKey)) {
+      throw new BrokerHttpError(404, "native_agent_not_found", "native agent is not registered");
+    }
+    this.expireDueProbes();
+    const version = this.nativeAssignmentVersions.get(agentKey) ?? 0;
+    if (since === version) return { version, assignments: [] };
+    const allowed = new Set(allowedServiceIds);
+    const assignments = [...this.nativeInstances.values()]
+      .filter((instance) =>
+        sameResourceScope(instance, scope) &&
+        instance.agentId === agentId &&
+        (allowed.has("*") || allowed.has(instance.serviceId)))
+      .sort((left, right) => left.instanceId.localeCompare(right.instanceId))
+      .map((instance) => ({
+        instanceId: instance.instanceId,
+        serviceId: instance.serviceId,
+        buildId: instance.buildId,
+        probes: [...this.probes.values()]
+          .filter((stored) =>
+            sameResourceScope(stored.scope, scope) &&
+            stored.probe.serviceId === instance.serviceId &&
+            !stored.expired &&
+            !this.nativeTerminal(
+              stored.probe,
+              agentId,
+              instance.instanceId,
+              instance.buildId,
+              scope,
+            ))
+          .map((stored) => stored.probe),
+      }));
+    return { version, assignments };
+  }
+
+  public ingestNative(
+    input: {
+      agentId: string;
+      serviceId: string;
+      instanceId: string;
+      buildId: string;
+      agentStatus: AgentStatus;
+      events: ProbeEvent[];
+    },
+    scope: ResourceScope,
+  ): number {
+    const instance = this.nativeInstances.get(
+      this.nativeInstanceKey(scope, input.agentId, input.instanceId),
+    );
+    if (
+      instance === undefined ||
+      instance.serviceId !== input.serviceId ||
+      instance.buildId !== input.buildId
+    ) {
+      throw new BrokerHttpError(409, "target-instance-changed", "native instance identity changed");
+    }
+    for (const event of input.events) {
+      const stored = this.probes.get(event.probeId);
+      if (
+        stored === undefined ||
+        !sameResourceScope(stored.scope, scope) ||
+        stored.probe.serviceId !== input.serviceId ||
+        (event.type !== "status" && event.type !== stored.probe.type)
+      ) {
+        throw new BrokerHttpError(400, "invalid_request", "native event does not match its logical probe");
+      }
+      if (event.probeVersion !== stored.probe.version) {
+        throw new BrokerHttpError(
+          409,
+          "probe_version_changed",
+          "native event probe version does not match the logical probe",
+        );
+      }
+      if (event.type === "status") {
+        if (
+          event.agentId !== input.agentId ||
+          event.instanceId !== input.instanceId ||
+          event.buildId !== input.buildId
+        ) {
+          throw new BrokerHttpError(409, "target-instance-changed", "native status identity mismatch");
+        }
+      }
+    }
+    for (const event of input.events) {
+      this.appendEvent(event);
+      if (event.type === "status") {
+        const stored = this.probes.get(event.probeId)!;
+        const { probeId: _probeId, type: _type, ts, status, ...metadata } = event;
+        const statusKey = this.nativeStatusKey(
+          scope,
+          event.probeId,
+          event.probeVersion!,
+          input.agentId,
+          input.instanceId,
+          input.buildId,
+        );
+        const previous = this.nativeStatuses.get(statusKey);
+        if (
+          previous !== undefined &&
+          Date.parse(ts) < Date.parse(previous.updatedAt)
+        ) {
+          continue;
+        }
+        this.nativeStatuses.set(
+          statusKey,
+          { status, updatedAt: ts, ...metadata },
+        );
+        if (
+          nativeStatusEndsAssignment(status) &&
+          (previous === undefined || !nativeStatusEndsAssignment(previous.status))
+        ) {
+          this.bumpNativeAssignmentVersion(scope, input.agentId);
+        }
+        this.deriveNativeLogicalStatus(event.probeId, scope);
+      }
+    }
+    const serviceKey = this.serviceKey(scope, input.serviceId);
+    const service = this.services.get(serviceKey);
+    if (service !== undefined) {
+      this.services.set(serviceKey, {
+        ...service,
+        lastSeen: this.timestamp(),
+        agentStatus: input.agentStatus,
+      });
+    }
+    return input.events.length;
+  }
+
   public listServices(
     scope: ResourceScope = DEFAULT_RESOURCE_SCOPE,
   ): ServiceRecord[] {
@@ -1643,7 +2010,12 @@ export class BrokerState {
           environmentId: _environmentId,
           ...record
         } = service;
-        return record;
+        return {
+          ...record,
+          backend: record.backend ?? "managed-runtime",
+          language: record.language ?? record.sdk,
+          instanceCount: record.instanceCount ?? 1,
+        };
       })
       .sort((left, right) => left.serviceId.localeCompare(right.serviceId));
   }
@@ -1661,6 +2033,8 @@ export class BrokerState {
       agent: { state: "green" | "red" | "unknown"; detail?: string };
       probesSummary: Record<ProbeStatusName | "unknown", number>;
       caveats: string[];
+      instanceCount?: number;
+      buildIds?: string[];
     }>;
   } {
     this.expireDueProbes();
@@ -1688,7 +2062,9 @@ export class BrokerState {
         const caveats = [
           "Safety state is agent-reported and scoped to LiveProbe runtime safeguards, not total process load.",
         ];
-        if (service.sdk === "jvm") {
+        if (service.backend === "native-ebpf") {
+          caveats.splice(0, caveats.length, ...(service.nativeLimitations ?? []));
+        } else if (service.sdk === "jvm") {
           caveats.push(
             "JVM red usually means rate-limited or suspended JDI breakpoints, not a whole-process GC pause signal.",
           );
@@ -1718,6 +2094,8 @@ export class BrokerState {
               };
         return {
           serviceId: service.serviceId,
+          ...(service.backend === undefined ? {} : { backend: service.backend }),
+          ...(service.language === undefined ? {} : { language: service.language }),
           ...(service.sdk === undefined ? {} : { sdk: service.sdk }),
           ...(service.commitSha === undefined
             ? {}
@@ -1727,6 +2105,12 @@ export class BrokerState {
           agent,
           probesSummary: summary,
           caveats,
+          ...(service.instanceCount === undefined ? {} : {
+            instanceCount: service.instanceCount,
+          }),
+          ...(service.buildIds === undefined ? {} : {
+            buildIds: service.buildIds,
+          }),
         };
       }),
     };
@@ -1902,6 +2286,10 @@ export class BrokerState {
     this.statuses.clear();
     this.sourceMapSets.clear();
     this.sourceMapLeases.clear();
+    this.nativeAgents.clear();
+    this.nativeInstances.clear();
+    this.nativeStatuses.clear();
+    this.nativeAssignmentVersions.clear();
 
     for (const stored of parsed.probes) {
       this.probes.set(stored.probe.id, stored);
@@ -1928,6 +2316,27 @@ export class BrokerState {
       this.statuses.set(status.probeId, status.value);
     }
     this.loadSourceMapSets(parsed.sourceMapSets);
+    for (const agent of parsed.nativeAgents) {
+      this.nativeAgents.set(this.nativeAgentKey(agent, agent.agentId), agent);
+    }
+    for (const instance of parsed.nativeInstances) {
+      this.nativeInstances.set(
+        this.nativeInstanceKey(instance, instance.agentId, instance.instanceId),
+        instance,
+      );
+    }
+    for (const entry of parsed.nativeStatuses) {
+      this.nativeStatuses.set(this.nativeStatusKey(
+        entry, entry.probeId, entry.probeVersion, entry.agentId,
+        entry.instanceId, entry.buildId,
+      ), entry.value);
+    }
+    for (const entry of parsed.nativeAssignmentVersions) {
+      this.nativeAssignmentVersions.set(
+        this.nativeAgentKey(entry, entry.agentId),
+        entry.version,
+      );
+    }
     this.expireDueProbes();
   }
 
@@ -1958,6 +2367,44 @@ export class BrokerState {
         updatedAt: set.updatedAt,
         maps: [...set.maps.values()],
       })),
+      nativeAgents: [...this.nativeAgents.values()],
+      nativeInstances: [...this.nativeInstances.values()],
+      nativeStatuses: [...this.nativeStatuses.entries()].flatMap(
+        ([key, value]) => {
+          const parts = key.split("\u0000");
+          const probeId = parts[1];
+          const probeVersion = Number(parts[2]);
+          const agentId = parts[3];
+          const instanceId = parts[4];
+          const buildId = parts[5];
+          if (
+            probeId === undefined || agentId === undefined ||
+            instanceId === undefined || buildId === undefined
+          ) return [];
+          const stored = this.probes.get(probeId);
+          return stored === undefined ? [] : [{
+            ...stored.scope,
+            probeId,
+            probeVersion,
+            agentId,
+            instanceId,
+            buildId,
+            value,
+          }];
+        },
+      ),
+      nativeAssignmentVersions: [...this.nativeAssignmentVersions.entries()]
+        .flatMap(([key, version]) => {
+          const parts = key.split("\u0000");
+          const agentId = parts[1];
+          if (agentId === undefined) return [];
+          const scope = [...this.nativeAgents.values()].find(
+            (agent) => this.nativeAgentKey(agent, agent.agentId) === key,
+          );
+          return scope === undefined ? [] : [{
+            ...resourceScope(scope), agentId, version,
+          }];
+        }),
     });
   }
 
@@ -1994,7 +2441,150 @@ export class BrokerState {
       serviceId,
       version,
     });
+    for (const instance of this.nativeInstances.values()) {
+      if (
+        sameResourceScope(instance, scope) &&
+        instance.serviceId === serviceId
+      ) {
+        this.bumpNativeAssignmentVersion(scope, instance.agentId);
+      }
+    }
     return version;
+  }
+
+  private nativeAgentKey(scope: ResourceScope, agentId: string): string {
+    return `${resourceScopeKey(scope)}\u0000${agentId}`;
+  }
+
+  private nativeInstanceKey(
+    scope: ResourceScope,
+    agentId: string,
+    instanceId: string,
+  ): string {
+    return `${this.nativeAgentKey(scope, agentId)}\u0000${instanceId}`;
+  }
+
+  private nativeStatusKey(
+    scope: ResourceScope,
+    probeId: string,
+    probeVersion: number,
+    agentId: string,
+    instanceId: string,
+    buildId: string,
+  ): string {
+    return `${resourceScopeKey(scope)}\u0000${probeId}\u0000${probeVersion}\u0000${agentId}\u0000${instanceId}\u0000${buildId}`;
+  }
+
+  private bumpNativeAssignmentVersion(
+    scope: ResourceScope,
+    agentId: string,
+  ): number {
+    const key = this.nativeAgentKey(scope, agentId);
+    const version = (this.nativeAssignmentVersions.get(key) ?? 0) + 1;
+    this.nativeAssignmentVersions.set(key, version);
+    return version;
+  }
+
+  private nativeTerminal(
+    probe: ProbeDefinition,
+    agentId: string,
+    instanceId: string,
+    buildId: string,
+    scope: ResourceScope,
+  ): boolean {
+    const status = this.nativeStatuses.get(
+      this.nativeStatusKey(
+        scope, probe.id, probe.version, agentId, instanceId, buildId,
+      ),
+    );
+    return status !== undefined && nativeStatusEndsAssignment(status.status);
+  }
+
+  private deriveNativeLogicalStatus(
+    probeId: string,
+    scope: ResourceScope,
+  ): void {
+    const stored = this.probes.get(probeId);
+    if (
+      stored === undefined ||
+      !sameResourceScope(stored.scope, scope) ||
+      stored.expired
+    ) return;
+    const instances = [...this.nativeInstances.values()].filter(
+      (instance) =>
+        sameResourceScope(instance, scope) &&
+        instance.serviceId === stored.probe.serviceId,
+    );
+    const statuses = instances.map((instance) =>
+      this.nativeStatuses.get(this.nativeStatusKey(
+        scope, probeId, stored.probe.version, instance.agentId,
+        instance.instanceId, instance.buildId,
+      )));
+    const defined = statuses.filter(
+      (status): status is ProbeStatus => status !== undefined,
+    );
+    if (
+      statuses.some((status) => status === undefined) ||
+      defined.some((status) => status.status === "armed")
+    ) {
+      const armed = defined
+        .filter((status) => status.status === "armed")
+        .sort(
+          (left, right) =>
+            Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+        )[0];
+      if (armed !== undefined) this.statuses.set(probeId, armed);
+      return;
+    }
+    const latest = defined.sort(
+      (left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+    )[0];
+    if (latest !== undefined) this.statuses.set(probeId, latest);
+  }
+
+  private rebuildNativeServices(scope: ResourceScope): void {
+    const grouped = new Map<string, NativeInstanceRecord[]>();
+    for (const instance of this.nativeInstances.values()) {
+      if (!sameResourceScope(instance, scope)) continue;
+      const values = grouped.get(instance.serviceId) ?? [];
+      values.push(instance);
+      grouped.set(instance.serviceId, values);
+    }
+    for (const [key, service] of this.services) {
+      if (
+        sameResourceScope(service, scope) &&
+        service.backend === "native-ebpf" &&
+        !grouped.has(service.serviceId)
+      ) {
+        this.services.delete(key);
+      }
+    }
+    for (const [serviceId, instances] of grouped) {
+      const capabilitySets = instances.map(
+        (instance) => new Set(instance.capabilities),
+      );
+      const capabilities = [...(capabilitySets[0] ?? new Set<string>())]
+        .filter((capability) =>
+          capabilitySets.every((set) => set.has(capability)))
+        .sort();
+      const latest = instances.reduce((left, right) =>
+        Date.parse(left.lastSeen) >= Date.parse(right.lastSeen) ? left : right);
+      this.services.set(this.serviceKey(scope, serviceId), {
+        ...resourceScope(scope),
+        serviceId,
+        backend: "native-ebpf",
+        language: latest.language,
+        lastSeen: latest.lastSeen,
+        capabilities,
+        instanceCount: instances.length,
+        buildIds: [...new Set(instances.map((item) => item.buildId))].sort(),
+        nativeLimitations: [
+          "Linux x86-64 only",
+          "bounded scalar, C-string, and fixed-field DWARF capture only",
+          "no floating-register, STL, deep traversal, or suspended-future capture",
+        ],
+      });
+    }
   }
 
   private serviceKey(scope: ResourceScope, serviceId: string): string {
@@ -2275,6 +2865,21 @@ const serviceCredentialParamsSchema = z
     credentialId: z.string().regex(/^svc_[0-9a-f]{32}$/),
   })
   .strict();
+const nativeCredentialCreateSchema = z.object({
+  agentId: z.string().trim().min(1).max(200),
+  allowedServiceIds: z.array(serviceIdSchema).min(1).max(1_000),
+  label: z.string().trim().min(1).max(200),
+}).strict();
+const nativeCredentialParamsSchema = z.object({
+  credentialId: z.string().regex(/^nat_[0-9a-f]{32}$/),
+}).strict();
+const nativeAgentParamsSchema = z.object({
+  agentId: z.string().trim().min(1).max(200),
+}).strict();
+const nativeAssignmentsQuerySchema = z.object({
+  since: z.coerce.number().int().nonnegative().default(0),
+}).strict();
+const nativeIngestSchema = NativeIngestEnvelopeSchema;
 const auditListQuerySchema = z
   .object({
     limit: z.coerce.number().int().min(1).max(100).default(50),
@@ -2518,6 +3123,19 @@ export async function buildBroker(
     const token = bearerToken(request.headers.authorization);
     if (
       principal === undefined &&
+      token?.startsWith(NATIVE_API_KEY_PREFIX) === true &&
+      store !== false &&
+      store.authenticateNativeCredential !== undefined
+    ) {
+      const credential = await store.authenticateNativeCredential(
+        hashBearerToken(token),
+      );
+      if (credential !== undefined) {
+        principal = nativePrincipal(credential);
+      }
+    }
+    if (
+      principal === undefined &&
       token?.startsWith(SERVICE_API_KEY_PREFIX) === true &&
       store !== false &&
       store.authenticateServiceCredential !== undefined
@@ -2573,18 +3191,19 @@ export async function buildBroker(
       environmentId,
     };
     if (
-      principal.type === "service" &&
+      (principal.type === "service" || principal.type === "native") &&
       (projectId !== principal.projectId ||
         environmentId !== principal.environmentId)
     ) {
       throw new BrokerHttpError(
         403,
         "scope_mismatch",
-        "service credentials cannot switch project or environment",
+        "runtime credentials cannot switch project or environment",
       );
     }
     if (
       principal.type !== "service" &&
+      principal.type !== "native" &&
       (projectId !== principal.projectId ||
         environmentId !== principal.environmentId)
     ) {
@@ -2696,6 +3315,33 @@ export async function buildBroker(
     await (store.persistSourceMapSet === undefined
       ? store.persist(state)
       : store.persistSourceMapSet(state, serviceId, commitSha, scope));
+  };
+  const persistNativeAgent = async (
+    agentId: string,
+    scope: ResourceScope,
+  ): Promise<void> => {
+    if (store === false) return;
+    await (store.persistNativeAgent === undefined
+      ? store.persist(state)
+      : store.persistNativeAgent(state, agentId, scope));
+  };
+  const persistNativeInstances = async (
+    agentId: string,
+    scope: ResourceScope,
+  ): Promise<void> => {
+    if (store === false) return;
+    await (store.persistNativeInstances === undefined
+      ? store.persist(state)
+      : store.persistNativeInstances(state, agentId, scope));
+  };
+  const persistNativeIngest = async (
+    input: NativeIngestEnvelope,
+    scope: ResourceScope,
+  ): Promise<void> => {
+    if (store === false) return;
+    await (store.persistNativeIngest === undefined
+      ? store.persist(state)
+      : store.persistNativeIngest(state, input, scope));
   };
 
   const appendAuditEvent = async (
@@ -3088,6 +3734,37 @@ export async function buildBroker(
       return reply.status(204).send();
     },
   );
+  const auditNativeRejection = async <T>(
+    request: FastifyRequest,
+    action: string,
+    resourceId: string,
+    operation: () => Promise<T> | T,
+  ): Promise<T> => {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      if (
+        error instanceof BrokerHttpError &&
+        [400, 403, 404, 409].includes(error.statusCode)
+      ) {
+        await appendAuditEvent(
+          request,
+          principalFor(request),
+          {
+            action,
+            resourceType: "native_runtime",
+            resourceId,
+            metadata: {},
+            successStatus: 200,
+          },
+          error.statusCode === 403 ? "denied" : "error",
+          error.statusCode,
+          error.code,
+        );
+      }
+      throw error;
+    }
+  };
 
   app.post("/v1/probes", async (request, reply) => {
     emptyQuerySchema.parse(request.query);
@@ -3155,6 +3832,97 @@ export async function buildBroker(
     requireHumanRead(request);
     emptyQuerySchema.parse(request.query);
     return { services: state.listServices(scopeFor(request)) };
+  });
+
+  app.post("/v1/native/agents/register", async (request, reply) => {
+    emptyQuerySchema.parse(request.query);
+    const input = NativeAgentRegistrationSchema.parse(request.body);
+    const agent = await auditNativeRejection(
+      request,
+      "native_agent.register",
+      input.agentId,
+      async () => {
+        const principal = requireNativeAccess(request, input.agentId);
+        return mutateDurably(
+          () => state.registerNativeAgent(input, principal),
+          () => persistNativeAgent(input.agentId, principal),
+        );
+      },
+    );
+    const principal = requireNativeAccess(request, input.agentId);
+    return reply.status(201).send({
+      agentId: agent.agentId,
+      accepted: true,
+      lastSeen: agent.lastSeen,
+      allowedServiceIds: principal.allowedServiceIds,
+    });
+  });
+
+  app.put("/v1/native/agents/:agentId/instances", async (request, reply) => {
+    emptyQuerySchema.parse(request.query);
+    const { agentId } = nativeAgentParamsSchema.parse(request.params);
+    const input = NativeInstanceSetSchema.parse(request.body);
+    const accepted = await auditNativeRejection(
+      request,
+      "native_instance.reconcile",
+      agentId,
+      async () => {
+        const principal = requireNativeAccess(request, agentId);
+        return mutateDurably(
+          () => state.replaceNativeInstances(
+            agentId,
+            input.instances,
+            principal,
+            principal.allowedServiceIds,
+          ),
+          () => persistNativeInstances(agentId, principal),
+        );
+      },
+    );
+    return reply.status(202).send({ accepted });
+  });
+
+  app.get("/v1/native/agents/:agentId/assignments", async (request) => {
+    const { agentId } = nativeAgentParamsSchema.parse(request.params);
+    const { since } = nativeAssignmentsQuerySchema.parse(request.query);
+    return auditNativeRejection(
+      request,
+      "native_assignment.read",
+      agentId,
+      () => {
+        const principal = requireNativeAccess(request, agentId);
+        return state.nativeAssignments(
+          agentId,
+          since,
+          principal,
+          principal.allowedServiceIds,
+        );
+      },
+    );
+  });
+
+  app.post("/v1/native/ingest", async (request, reply) => {
+    emptyQuerySchema.parse(request.query);
+    const input = nativeIngestSchema.parse(request.body);
+    const accepted = await auditNativeRejection(
+      request,
+      "native_ingest.write",
+      input.agentId,
+      async () => {
+        const principal = requireNativeAccess(request, input.agentId);
+        if (
+          !principal.allowedServiceIds.includes("*") &&
+          !principal.allowedServiceIds.includes(input.serviceId)
+        ) {
+          throw new BrokerHttpError(403, "forbidden", "native service is not allowed");
+        }
+        return mutateDurably(
+          () => state.ingestNative(input, principal),
+          () => persistNativeIngest(input, principal),
+        );
+      },
+    );
+    return reply.status(202).send({ accepted });
   });
 
   app.get("/v1/ping", async (request) => {
@@ -3333,6 +4101,78 @@ export async function buildBroker(
       return reply.status(204).send();
     },
   );
+
+  app.post("/v1/native-credentials", async (request, reply) => {
+    emptyQuerySchema.parse(request.query);
+    const input = nativeCredentialCreateSchema.parse(request.body);
+    const audit: AuditMutationContext = {
+      action: "native_credential.create",
+      resourceType: "native_credential",
+      metadata: { agentId: input.agentId },
+      successStatus: 201,
+    };
+    const result = await runAuditedMutation(request, audit, async () => {
+      const principal = requireAdmin(request);
+      if (store === false || store.createNativeCredential === undefined) {
+        throw new BrokerHttpError(
+          503,
+          "credential_store_unavailable",
+          "native credentials require the PostgreSQL durable store",
+        );
+      }
+      const material = createNativeCredentialMaterial({
+        ...input,
+        scope: principal,
+        now: new Date(state.now()),
+      });
+      const credential = await store.createNativeCredential(material.record);
+      audit.resourceId = credential.credentialId;
+      return { credential, apiKey: material.apiKey };
+    });
+    return reply.status(201).send(result);
+  });
+
+  app.get("/v1/native-credentials", async (request) => {
+    const principal = requireAdmin(request);
+    emptyQuerySchema.parse(request.query);
+    if (store === false || store.listNativeCredentials === undefined) {
+      throw new BrokerHttpError(
+        503,
+        "credential_store_unavailable",
+        "native credentials require the PostgreSQL durable store",
+      );
+    }
+    return { credentials: await store.listNativeCredentials(principal) };
+  });
+
+  app.delete("/v1/native-credentials/:credentialId", async (request, reply) => {
+    emptyQuerySchema.parse(request.query);
+    const { credentialId } = nativeCredentialParamsSchema.parse(request.params);
+    await runAuditedMutation(
+      request,
+      {
+        action: "native_credential.revoke",
+        resourceType: "native_credential",
+        resourceId: credentialId,
+        metadata: {},
+        successStatus: 204,
+      },
+      async () => {
+        const principal = requireAdmin(request);
+        if (store === false || store.revokeNativeCredential === undefined) {
+          throw new BrokerHttpError(
+            503,
+            "credential_store_unavailable",
+            "native credentials require the PostgreSQL durable store",
+          );
+        }
+        if (!await store.revokeNativeCredential(credentialId, principal)) {
+          throw new BrokerHttpError(404, "not_found", "native credential not found");
+        }
+      },
+    );
+    return reply.status(204).send();
+  });
 
   app.get("/v1/audit-events", async (request) => {
     requireAdmin(request);

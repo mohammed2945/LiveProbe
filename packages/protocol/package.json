@@ -1,0 +1,23 @@
+{
+  "name": "@liveprobe/protocol",
+  "version": "0.2.0",
+  "description": "Canonical LiveProbe broker, MCP, managed-runtime, and native-eBPF wire contract",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist"],
+  "engines": { "node": ">=20" },
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "test": "npm run build && vitest run --passWithNoTests",
+    "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.test.json"
+  },
+  "dependencies": { "zod": "^4.4.3" },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildBroker,
@@ -19,6 +19,7 @@ import {
   BrokerProbeDefinitionSchema,
   createMcpServer,
   createToolHandlers,
+  type BrokerCreateProbeInput,
 } from "../src/index.js";
 
 const openBrokers: Awaited<ReturnType<typeof buildBroker>>[] = [];
@@ -86,6 +87,58 @@ function dataEvents(events: Record<string, unknown>[]): ProbeEvent[] {
     (event) => event["type"] !== "status",
   ) as ProbeEvent[];
 }
+
+it("lists a native service and creates a supported logical probe", async () => {
+  const createProbe = vi.fn(async (input: BrokerCreateProbeInput) => ({
+    id: "prb_01J5V4T8NZ6M2KQ7CYX3R9W0AB",
+    ...input,
+    ttlSeconds: input.ttlSeconds ?? 1_800,
+    hitLimit: input.hitLimit ?? 10_000,
+    version: 1,
+  }));
+  const client = {
+    listServices: vi.fn(async () => ({
+      services: [{
+        serviceId: "pricing-native",
+        backend: "native-ebpf",
+        language: "rust",
+        sdk: "rust",
+        capabilities: ["uprobe", "counter"],
+        instanceCount: 2,
+        buildIds: ["abcdef1234567890"],
+        lastSeen: new Date().toISOString(),
+        nativeLimitations: ["no stack-local expansion"],
+        agentStatus: { state: "green" },
+      }],
+    })),
+    createProbe,
+  } as unknown as BrokerClient;
+  const handlers = createToolHandlers(client);
+
+  await expect(handlers.list_services()).resolves.toMatchObject({
+    services: [{
+      serviceId: "pricing-native",
+      backend: "native-ebpf",
+      language: "rust",
+      instanceCount: 2,
+      buildIds: ["abcdef1234567890"],
+    }],
+  });
+  await expect(handlers.set_counter_probe({
+    service_id: "pricing-native",
+    commit_hash: "abcdef1",
+    file: "src/main.rs",
+    line: 42,
+    created_by: "mcp-native-test",
+  })).resolves.toMatchObject({
+    probe: {
+      serviceId: "pricing-native",
+      sourceCommit: "abcdef1",
+      type: "counter",
+    },
+  });
+  expect(createProbe).toHaveBeenCalledOnce();
+});
 
 describe("Phase 1 MCP and fake-agent integration", () => {
   it("serves the complete tool set over authenticated Streamable HTTP", async () => {
