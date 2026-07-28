@@ -77,6 +77,7 @@ interface StatusRow extends QueryResultRow {
   status: string;
   updated_at: Date;
   detail: string | null;
+  value: Record<string, unknown> | null;
 }
 
 interface SourceMapSetRow extends QueryResultRow {
@@ -641,7 +642,7 @@ export class PostgresStore {
          from probe_events order by probe_id, sequence`,
       );
       const statuses = await client.query<StatusRow>(
-        `select tenant_id, probe_id, status, updated_at, detail
+        `select tenant_id, probe_id, status, updated_at, detail, value
          from probe_statuses order by probe_id`,
       );
       const sourceMapSets = await client.query<SourceMapSetRow>(
@@ -796,7 +797,10 @@ export class PostgresStore {
         statuses: statuses.rows.map((row) => ({
           scope: scopeByProbe.get(row.probe_id),
           probeId: row.probe_id,
-          value: {
+          // `value` carries the whole status, including armedAt and the
+          // native metadata that has no column of its own. The column fallback
+          // only matters for a row written by a broker predating the column.
+          value: row.value ?? {
             status: row.status,
             updatedAt: row.updated_at.toISOString(),
             ...(row.detail === null ? {} : { detail: row.detail }),
@@ -1751,27 +1755,32 @@ export class PostgresStore {
     if (statuses.length === 0) return;
     await client.query(
       `insert into probe_statuses (
-         tenant_id, probe_id, status, updated_at, detail
+         tenant_id, probe_id, status, updated_at, detail, value
        )
-       select tenant_id, probe_id, status, updated_at::timestamptz, detail
+       select tenant_id, probe_id, status, updated_at::timestamptz, detail,
+         value
        from jsonb_to_recordset($1::jsonb) as probe_status(
          tenant_id text, probe_id text, status text, updated_at text,
-         detail text
+         detail text, value jsonb
        )
        on conflict (probe_id) do update set
          tenant_id = excluded.tenant_id,
          status = excluded.status,
          updated_at = excluded.updated_at,
-         detail = excluded.detail
+         detail = excluded.detail,
+         value = excluded.value
        where excluded.updated_at >= probe_statuses.updated_at`,
       [
         JSON.stringify(
           statuses.map((entry) => ({
             tenant_id: entry.scope.tenantId,
             probe_id: entry.probeId,
+            // The three scalar columns are kept in step with `value` so they
+            // stay queryable and a rollback still reads a correct status.
             status: entry.value.status,
             updated_at: entry.value.updatedAt,
             detail: entry.value.detail ?? null,
+            value: entry.value,
           })),
         ),
       ],

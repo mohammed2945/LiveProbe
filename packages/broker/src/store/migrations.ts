@@ -532,4 +532,27 @@ export const POSTGRES_MIGRATION_SQL = `
     on native_probe_statuses (
       tenant_id, project_id, environment_id, agent_id, instance_id, build_id
     );
+
+  -- probe_statuses began as one column per field, so every field added since
+  -- -- armedAt, and the eleven native ones -- was silently dropped on restore
+  -- while the column list stayed at three. native_probe_statuses already
+  -- stores its status whole; this brings the logical status in line.
+  --
+  -- status/updated_at/detail stay, still written and still indexable, so an
+  -- older broker reading this table keeps working and a rollback stays clean.
+  -- value is the read path when present.
+  alter table probe_statuses
+    add column if not exists value jsonb;
+
+  update probe_statuses
+  set value = jsonb_strip_nulls(
+    jsonb_build_object(
+      'status', status,
+      'updatedAt', to_char(
+        updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+      ),
+      'detail', detail
+    )
+  )
+  where value is null;
 `;

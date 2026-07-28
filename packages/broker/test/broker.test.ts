@@ -3235,6 +3235,245 @@ describe("Postgres persistence", () => {
       await inspection.end();
     }
   });
+
+  postgresIt("restores the whole probe status, not just its three columns", async () => {
+    const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
+    await resetPostgresSchema(databaseUrl);
+
+    const firstStore = new PostgresStore(databaseUrl);
+    const first = await buildBroker({ store: firstStore, persistence: false });
+    openBrokers.push(first);
+
+    const probe = (await first.inject({
+      method: "POST",
+      url: "/v1/probes",
+      payload: {
+        serviceId: "orders",
+        sourceCommit: "abcdef1234567890",
+        type: "counter",
+        file: "src/orders.ts",
+        line: 19,
+        createdBy: "postgres-test",
+      },
+    })).json<{ probe: ProbeDefinition }>().probe;
+
+    const armedAt = new Date().toISOString();
+    const ingest = (ts: string, status: string) => first.inject({
+      method: "POST",
+      url: "/v1/ingest",
+      payload: {
+        serviceId: "orders",
+        sdk: "node",
+        commitSha: "abcdef1234567890",
+        agentStatus: { state: "green" },
+        events: [{ probeId: probe.id, type: "status", ts, status }],
+      },
+    });
+    expect((await ingest(armedAt, "armed")).statusCode).toBe(202);
+    expect((await ingest(
+      new Date(Date.parse(armedAt) + 1_000).toISOString(),
+      "hit-limit-reached",
+    )).statusCode).toBe(202);
+
+    // In memory this holds armedAt. It has to survive the column mapping too,
+    // otherwise a broker restart turns "armed, then hit its limit" back into
+    // the "never armed" case armedAt exists to rule out.
+    expect(first.liveprobeState.getStatus(probe.id)).toMatchObject({
+      status: "hit-limit-reached",
+      armedAt,
+    });
+
+    await first.close();
+    openBrokers.splice(openBrokers.indexOf(first), 1);
+
+    const restored = await buildBroker({
+      store: new PostgresStore(databaseUrl),
+      persistence: false,
+    });
+    openBrokers.push(restored);
+    expect(restored.liveprobeState.getStatus(probe.id)).toMatchObject({
+      status: "hit-limit-reached",
+      armedAt,
+    });
+  });
+
+  postgresIt("backfills value for rows written before the column existed", async () => {
+    const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
+    await resetPostgresSchema(databaseUrl);
+
+    const first = await buildBroker({
+      store: new PostgresStore(databaseUrl),
+      persistence: false,
+    });
+    openBrokers.push(first);
+    const probe = (await first.inject({
+      method: "POST",
+      url: "/v1/probes",
+      payload: {
+        serviceId: "orders",
+        sourceCommit: "abcdef1234567890",
+        type: "counter",
+        file: "src/orders.ts",
+        line: 19,
+        createdBy: "postgres-test",
+      },
+    })).json<{ probe: ProbeDefinition }>().probe;
+    const armedAt = "2026-07-24T00:00:00.000Z";
+    expect((await first.inject({
+      method: "POST",
+      url: "/v1/ingest",
+      payload: {
+        serviceId: "orders",
+        sdk: "node",
+        commitSha: "abcdef1234567890",
+        agentStatus: { state: "green" },
+        events: [{
+          probeId: probe.id,
+          type: "status",
+          ts: armedAt,
+          status: "armed",
+          detail: "src/orders.ts:19",
+        }],
+      },
+    })).statusCode).toBe(202);
+    await first.close();
+    openBrokers.splice(openBrokers.indexOf(first), 1);
+
+    // Exactly what a row written by a pre-`value` broker looks like: the three
+    // scalar columns populated and nothing else.
+    const client = new Client({ connectionString: databaseUrl });
+    await client.connect();
+    try {
+      await client.query("update probe_statuses set value = null");
+    } finally {
+      await client.end();
+    }
+
+    const restored = await buildBroker({
+      store: new PostgresStore(databaseUrl),
+      persistence: false,
+    });
+    openBrokers.push(restored);
+    expect(restored.liveprobeState.getStatus(probe.id)).toMatchObject({
+      status: "armed",
+      updatedAt: armedAt,
+      detail: "src/orders.ts:19",
+    });
+
+    const inspection = new Client({ connectionString: databaseUrl });
+    await inspection.connect();
+    try {
+      // The startup migration must have refilled the column, not merely left
+      // the reader falling back to it forever.
+      const backfilled = await inspection.query<{ value: unknown }>(
+        "select value from probe_statuses where probe_id = $1",
+        [probe.id],
+      );
+      expect(backfilled.rows[0]?.value).toEqual({
+        status: "armed",
+        updatedAt: armedAt,
+        detail: "src/orders.ts:19",
+      });
+    } finally {
+      await inspection.end();
+    }
+  });
+
+  postgresIt("restores native status metadata across a restart", async () => {
+    const databaseUrl = process.env["TEST_DATABASE_URL"] as string;
+    await resetPostgresSchema(databaseUrl);
+
+    const nativeInstance = {
+      instanceId: "orders-100-10",
+      serviceId: "orders-native",
+      language: "rust" as const,
+      pid: 100,
+      processStartTime: "10",
+      executablePath: "/opt/orders",
+      buildId: "abcdef1234567890",
+      architecture: "x86_64" as const,
+      capabilities: ["uprobe", "count", "counter"],
+      lastSeen: "2026-07-24T00:00:00.000Z",
+    };
+
+    const firstStore = new PostgresStore(databaseUrl);
+    const first = await buildBroker({ store: firstStore, persistence: false });
+    openBrokers.push(first);
+    await first.inject({
+      method: "POST",
+      url: "/v1/native/agents/register",
+      payload: {
+        agentId: "host-a",
+        hostname: "local",
+        backend: "native-ebpf",
+        architecture: "x86_64",
+        capabilities: ["uprobe", "count", "counter"],
+        agentVersion: "0.2.0",
+      },
+    });
+    await first.inject({
+      method: "PUT",
+      url: "/v1/native/agents/host-a/instances",
+      payload: { instances: [nativeInstance] },
+    });
+    const probe = (await first.inject({
+      method: "POST",
+      url: "/v1/probes",
+      payload: {
+        serviceId: "orders-native",
+        sourceCommit: "abcdef1",
+        type: "counter",
+        file: "src/main.rs",
+        line: 10,
+        createdBy: "postgres-test",
+      },
+    })).json<{ probe: ProbeDefinition }>().probe;
+
+    const armedAt = new Date().toISOString();
+    expect((await first.inject({
+      method: "POST",
+      url: "/v1/native/ingest",
+      payload: {
+        agentId: "host-a",
+        serviceId: "orders-native",
+        instanceId: nativeInstance.instanceId,
+        buildId: nativeInstance.buildId,
+        backend: "native-ebpf",
+        agentStatus: { state: "green" },
+        events: [{
+          probeId: probe.id,
+          probeVersion: probe.version,
+          type: "status",
+          ts: armedAt,
+          status: "armed",
+          agentId: "host-a",
+          instanceId: nativeInstance.instanceId,
+          buildId: nativeInstance.buildId,
+          physicalSiteCount: 1,
+        }],
+      },
+    })).statusCode).toBe(202);
+
+    await first.close();
+    openBrokers.splice(openBrokers.indexOf(first), 1);
+
+    const restored = await buildBroker({
+      store: new PostgresStore(databaseUrl),
+      persistence: false,
+    });
+    openBrokers.push(restored);
+    // The handoff states probeVersion survives a PostgreSQL restore. None of
+    // these fields has a column, so they only survive if the whole status does.
+    expect(restored.liveprobeState.getStatus(probe.id)).toMatchObject({
+      status: "armed",
+      armedAt,
+      probeVersion: probe.version,
+      agentId: "host-a",
+      instanceId: nativeInstance.instanceId,
+      buildId: nativeInstance.buildId,
+      physicalSiteCount: 1,
+    });
+  });
 });
 
 describe("probe status arming history", () => {
