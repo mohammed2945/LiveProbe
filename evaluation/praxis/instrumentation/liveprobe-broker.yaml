@@ -22,8 +22,8 @@ spec:
               value: "0.0.0.0"
             - name: PORT
               value: "7070"
-            - name: LIVEPROBE_REQUIRE_AUTH
-              value: "false"
+            - name: NODE_ENV
+              value: "development"
           ports:
             - name: http
               containerPort: 7070

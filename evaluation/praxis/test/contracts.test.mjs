@@ -153,6 +153,18 @@ test("instrumented image source discovery preserves absolute runtime commands", 
   ]);
 });
 
+test("isolated eval broker explicitly opts out of production auth mode", async () => {
+  const manifest = await readFile(
+    resolve(evaluationRoot, "instrumentation/liveprobe-broker.yaml"),
+    "utf8",
+  );
+  assert.match(
+    manifest,
+    /- name: NODE_ENV\s+value: "development"/u,
+  );
+  assert.doesNotMatch(manifest, /LIVEPROBE_REQUIRE_AUTH/u);
+});
+
 test("evidence snapshots reject scorer leakage and preserve revisioned paging", async () => {
   const snapshot = await json(fixture401Path);
   validateEvidenceSnapshot(snapshot);
