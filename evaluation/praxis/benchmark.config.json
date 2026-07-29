@@ -21,7 +21,7 @@
     "incident_replays": 10,
     "liveprobe_rounds": 10,
     "liveprobe_watches": 50,
-    "smoke_llm_total_tokens": 30000,
+    "smoke_llm_total_tokens": 50000,
     "smoke_wall_time_ms": 180000
   },
   "evidence": {

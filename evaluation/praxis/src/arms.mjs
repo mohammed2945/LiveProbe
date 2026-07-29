@@ -134,7 +134,7 @@ Your available capability profile is:
 
 ${JSON.stringify(capability, null, 2)}
 
-This is a bounded evaluation with a hard Codex rollout budget of ${tokenBudget} provider tokens, including repeated context and output. Treat the limit as a ceiling, not a target. Batch source inspection when practical and make only tool calls that can change the diagnosis. When a rollout-budget reminder appears, stop using tools and return the best evidence-backed structured result immediately; return an honest INSUFFICIENT if the remaining evidence cannot support localization.
+This is a bounded evaluation with a hard shared Codex rollout budget of ${tokenBudget} tokens. Treat the limit as a ceiling, not a target. Do not create a todo list. Batch source inspection into as few shell calls as practical and make only tool calls that can change the diagnosis. When a rollout-budget reminder appears, stop using tools and return the best evidence-backed structured result immediately unless one already-started observation is sufficient to finish; return an honest INSUFFICIENT if the remaining evidence cannot support localization.
 
 Use only evidence and source exposed to this arm. Return exactly the structured diagnosis required by the output schema. Do not modify code, configuration, cluster state, or benchmark data.`;
 }
