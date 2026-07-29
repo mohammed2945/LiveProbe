@@ -20,6 +20,13 @@ For application teams connecting to an existing broker, start with the
 connectivity, SDK installation, source maps, JVM debugging, MCP configuration,
 tool usage, and troubleshooting.
 
+Deploying into a cluster instead of onto a host or VM: **[Kubernetes
+setup](docs/kubernetes-setup.md)**. Before relying on values captured from a
+Rust or C++ service, read **[native language
+evaluation](docs/native-language-evaluation.md)** — line resolution and value
+fidelity behave differently under optimization, and the difference is not
+visible in the output.
+
 The hosted documentation is available at
 **[docs.liveprobe.tryastrea.tech](https://docs.liveprobe.tryastrea.tech)**.
 

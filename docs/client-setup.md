@@ -3,6 +3,12 @@
 This guide is for a team connecting an application and an MCP-capable AI
 client to an existing LiveProbe broker. It does not cover deploying the broker.
 
+**Running on Kubernetes?** Read [Kubernetes setup](kubernetes-setup.md) instead
+of section 2's Rust and C++ instructions. The native agent becomes a per-node
+DaemonSet, executable paths refer to the container rather than the node, and
+granting the agent its one required capability needs a step that fails silently
+if you miss it. The language guidance below still applies.
+
 ## 1. Get connection details
 
 The current internal test deployment uses:
@@ -283,6 +289,39 @@ debug = 2
 strip = false
 ```
 
+This is enough to **place** probes: lines resolve and probes fire at any
+optimization level. It is **not** enough to trust the **values** they capture.
+
+At `opt-level` 1 and above, LLVM frequently records a variable's location as a
+single stack slot with no validity range. When the variable is actually living in
+a register at that instruction, the slot holds something else — and the agent
+reports its contents as an ordinary value, beside correct ones, with nothing to
+tell them apart. Measured: a parameter whose real values alternated between 3 and
+7 was reported as a constant stack address, while another local in the same
+snapshot was correct.
+
+For services where you intend to read values, build the crate under test
+unoptimized. Cargo profile overrides let you do that without deoptimizing
+dependencies:
+
+```toml
+[profile.release.package.my-service]
+opt-level = 0
+```
+
+Expect a real cost — Rust leans on inlining, so unoptimized code can be
+substantially slower, though the effect is much smaller for I/O-bound services
+than for compute-heavy ones. Counter and log probes are unaffected and need no
+change. See [native language evaluation](native-language-evaluation.md) for the
+measurements.
+
+C++ built with **GCC** needs no such concession: it emits location lists with
+validity ranges, and every value measured at `-O3` was correct. That result does
+not transfer to **clang**, which shares LLVM's backend with Rust and may well
+behave the same way — it has not been measured. If you build with clang, treat
+optimized values with the same caution as Rust until you have verified one
+against a known quantity.
+
 C++ — compile with `-g` and ask the linker for a build ID, which is not always
 on by default. Use `"language": "cpp"` in step 5.
 
@@ -397,6 +436,10 @@ Now place a probe from your MCP client.
 | Probe stays pending | No DWARF for that line. The binary was stripped or built without `-g` / `debug = 2`. |
 | Loader refuses a path | That executable was not in the allowlist the loader started with. |
 | Permission denied on the socket | `/run/liveprobe` ownership does not match the UID/GID passed to the loader. |
+| Loader exits printing a long instruction dump | The kernel's verifier refused the BPF program. Confirm with `sudo bpftool prog loadall liveprobe.bpf.o /sys/fs/bpf/lptest`; the error names the offending instruction. Not a configuration problem. |
+| `source-file-not-found` for a path you know exists | The file *was* found — that line has no code. Optimizing compilers routinely attribute a statement to a neighbouring line. Try adjacent lines. |
+| Probe reports `armed` but never returns data | Check `get_safety_overview`. An `evidence` block reporting `rejectedBatches` above zero means captured evidence is being discarded before storage, not that the line is cold. |
+| A captured value looks like a large meaningless number | Likely a stale stack slot rather than the variable. Common in optimized Rust; see the build-settings note above. Values near `0x7f0000000000` are addresses, not data. |
 
 Native probes are read-only: capture never writes to target memory, and a probe
 that hits its limit detaches instead of silently re-arming.

@@ -20,9 +20,12 @@ test("search routes to matching documentation", async ({ page }) => {
   await page.goto("/docs/quickstart");
   await page.getByRole("button", { name: /search documentation/i }).click();
   await page.getByRole("textbox", { name: "Search documentation" }).fill("JVM");
+  // More than one page legitimately mentions the JVM bridge — the Kubernetes
+  // guide covers running it as a sidecar — so target the result by its
+  // destination rather than by matching text that appears in several.
   await page
     .getByRole("dialog")
-    .getByRole("link", { name: /JVM bridge/ })
+    .locator('a[href="/docs/jvm"]')
     .click();
   await expect(page).toHaveURL(/\/docs\/jvm\/?$/);
 });

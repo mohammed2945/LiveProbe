@@ -1,0 +1,152 @@
+# Native eBPF backend as a per-node DaemonSet.
+#
+# The two-process split from the client-setup guide becomes two containers. The
+# loader is privileged and is the only thing that may load BPF; the agent holds
+# the broker credential and never gets BPF privileges. A compromised agent still
+# cannot load a kernel program.
+#
+# hostPID is what makes this work: procfs is per-PID-namespace, so with host PIDs
+# the pod's own /proc lists every process on the node. Executable content is then
+# read through /proc/<pid>/exe, which resolves across mount namespaces — that is
+# why a service running in another pod is reachable at all.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: liveprobe-native-agent
+  namespace: liveprobe
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: liveprobe-native-agent
+  namespace: liveprobe
+data:
+  native-agent.json: |
+    {
+      "agentId": "gke-node-agent",
+      "brokerUrl": "https://liveprobe.tryastrea.tech",
+      "loaderSocket": "/run/liveprobe/loader.sock",
+      "services": [
+        {
+          "serviceId": "dsb-user-service",
+          "language": "cpp",
+          "executablePath": "/usr/local/bin/UserService"
+        },
+        {
+          "serviceId": "dsb-compose-post-service",
+          "language": "cpp",
+          "executablePath": "/usr/local/bin/ComposePostService"
+        },
+        {
+          "serviceId": "rust-service",
+          "language": "rust",
+          "executablePath": "/srv/app/rust-service"
+        }
+      ],
+      "symbolDirectories": [],
+      "redactKeys": [],
+      "redactValues": [],
+      "debuginfodUrl": null,
+      "symbolCacheDirectory": null
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: liveprobe-native-agent
+  namespace: liveprobe
+spec:
+  selector:
+    matchLabels:
+      app: liveprobe-native-agent
+  template:
+    metadata:
+      labels:
+        app: liveprobe-native-agent
+    spec:
+      serviceAccountName: liveprobe-native-agent
+      # Required. Without it the pod sees only its own PID namespace and can
+      # discover nothing.
+      hostPID: true
+      volumes:
+        - name: loader-socket
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: liveprobe-native-agent
+        - name: tracing
+          hostPath:
+            path: /sys/kernel/tracing
+            type: DirectoryOrCreate
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+      containers:
+        # The privileged half. Its argument list after the socket, uid and gid is
+        # the attach allowlist: the loader will attach to nothing else, so adding
+        # a service means adding its executable here as well as to the ConfigMap.
+        #
+        # These are IN-CONTAINER paths — the path as the target process sees it,
+        # not a path on the node. That differs from the host install documented in
+        # client-setup.md and is the single most likely thing to get wrong.
+        - name: loader
+          image: ${LIVEPROBE_NATIVE_AGENT_IMAGE} # set to the image built in step 1
+          command: ["/usr/local/bin/liveprobe-bpf-loader"]
+          args:
+            - /run/liveprobe/loader.sock
+            - "10001"
+            - "10001"
+            - /usr/local/bin/UserService
+            - /usr/local/bin/ComposePostService
+            - /srv/app/rust-service
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          volumeMounts:
+            - name: loader-socket
+              mountPath: /run/liveprobe
+            - name: tracing
+              mountPath: /sys/kernel/tracing
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+
+        # The unprivileged half. SYS_PTRACE is needed to read /proc/<pid>/exe and
+        # /proc/<pid>/root for processes it does not own — which is every target.
+        - name: agent
+          image: ${LIVEPROBE_NATIVE_AGENT_IMAGE} # set to the image built in step 1
+          command: ["/usr/local/bin/liveprobe-native-agent"]
+          args: ["/etc/liveprobe/native-agent.json"]
+          env:
+            - name: LIVEPROBE_NATIVE_CREDENTIAL
+              valueFrom:
+                secretKeyRef:
+                  name: liveprobe-native-credential
+                  key: credential
+          securityContext:
+            runAsUser: 10001
+            # Must match the gid passed to the loader: it chowns the socket to
+            # root:<gid> mode 0660.
+            runAsGroup: 10001
+            # Required for the binary's cap_sys_ptrace file capability to take
+            # effect. With this false, NO_NEW_PRIVS blocks the transition and the
+            # agent runs with CapEff=0 — it sees every process but can read none
+            # of them, and registers no services at all. This does not let the
+            # agent become root: the bounding set below is still only SYS_PTRACE.
+            allowPrivilegeEscalation: true
+            capabilities:
+              add: ["SYS_PTRACE"]
+              drop: ["ALL"]
+          volumeMounts:
+            - name: loader-socket
+              mountPath: /run/liveprobe
+            - name: config
+              mountPath: /etc/liveprobe
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
