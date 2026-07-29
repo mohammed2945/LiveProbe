@@ -147,22 +147,50 @@ All 16 four-arm incidents, 401–416. Both strata (`direct_code` → `LOCALIZED`
 logs contain the full traceback and LiveProbe cannot beat a log read on them;
 they are the control showing where LiveProbe adds nothing.
 
-**Incident 402 is excluded, for a mechanical reason recorded here in full.**
-Its published image `quay.io/shengkunrz/it-bench-dev:nightly-recommendation`
-does not match the artifact's locked `errlog` source. Both files are 182 lines
-and differ on exactly one line, 47: the image logs
-`"Exception in get_product_list, products_list cannot be fetched due to
-Attribute Error."` where the locked source logs
-`"Error fetching product catalog: {e}"`. The deployed image therefore names the
-fault more explicitly than the source the agent is shown. The build's source
-integrity gate refuses this, correctly — an arm must not be scored against
-source that differs from what is deployed.
+**Seven incidents are excluded because the released artifact and the published
+images have drifted apart.** The build's source integrity gate refuses to run
+an arm whose deployed source differs from the locked source the agent is
+shown, which is correct.
 
-This is not an exclusion on performance grounds and does not weaken rule 4.
-402 is one of four near-identical variants of a single fault, and 401, 403 and
-404 all pass the integrity gate and stay in the set, so the log-rich control
-stratum is fully preserved. Any incident whose image fails the same gate is
-excluded on the same basis and listed in the results.
+This was checked exhaustively rather than assumed. Every one of the 16 mapped
+image tags was pulled, its `/usr/src/app/recommendation_server.py` hashed, and
+compared against all 16 locked sources:
+
+| Incident | Locked source | Mapped tag | Result |
+| --- | --- | --- | --- |
+| 401 | `01d80fed` | `dev` | match |
+| 403 | `6c35fb3a` | `alpha` | match |
+| 404 | `000b442f` | `monzo` | match |
+| 407 | `d171eb22` | `neo4jto-bootstrap` | match |
+| 408 | `11a0d2a8` | `neo4jto-serving` | match |
+| 409 | `7f27648d` | `neo4jto-live-bootstrap` | match |
+| 410 | `68e58a03` | `neo4jto-live-serving` | match |
+| 411 | `85365438` | `logicc` | match |
+| 412 | `fe32e9e9` | `logics` | match |
+| 402 | `640128e4` | `nightly` (`c5a0cdc0`) | **no tag matches** |
+| 405 | `759c5c66` | `neo4j-serving` (`8c0570a0`) | **no tag matches** |
+| 406 | `12da597a` | `neo4j-bootstrap` (`29cf7225`) | **no tag matches** |
+| 413 | `cad629e3` | `neo4j-label-serving` (`fec65377`) | **no tag matches** |
+| 414 | `a89a8c9f` | `neo4j-label-bootstrap` (`2b0ce2c9`) | **no tag matches** |
+| 415 | `510da82e` | `config` (`5f5925d4`) | **no tag matches** |
+| 416 | `c9cf01d8` | `configdb` (`57e0984c`) | **no tag matches** |
+
+No locked source matches *any* other tag, so `image-map.json` is not
+mismapped and there is no correct tag to substitute. For 402 the divergence
+was inspected directly: both files are 182 lines and differ on line 47 alone,
+where the image logs `"Exception in get_product_list, products_list cannot be
+fetched due to Attribute Error."` and the locked source logs `"Error fetching
+product catalog: {e}"` — the deployed image names the fault more explicitly
+than the source the agent is shown.
+
+These exclusions are mechanical and do not weaken rule 4. Nothing is dropped
+on performance grounds. 401, 403 and 404 cover the same fault class as 402, so
+the log-rich control stratum is fully preserved.
+
+**Resulting set: 9 incidents, both strata represented.**
+
+- `direct_code` (expects `LOCALIZED`): 401, 403, 404, 411, 412
+- `boundary_configuration` (expects `HANDOFF`): 407, 408, 409, 410
 
 A **log-richness** covariate is computed per incident before running — whether
 the snapshot logs already name the faulty file and line — and results are
