@@ -1,5 +1,108 @@
 # PRAXIS Evaluation Checkpoint
 
+## Clean restart checkpoint — 2026-07-29
+
+Branch `praxis-eval` is pushed through commit `2c3e6d0`. This is a safe
+pre-paid pause point:
+
+- no campaign, tripwire, PRAXIS runner, or Codex model process is running;
+- the official incident-401 fault is removed and recommendation is back on
+  `ghcr.io/open-telemetry/demo:2.0.1-recommendation`;
+- Prometheus has no firing alerts;
+- the broker reports zero active probe locations; and
+- every failed campaign/setup attempt recorded zero model calls and zero
+  provider tokens.
+
+The reusable Linux environment remains running so a workstation restart does
+not discard the Kind cluster:
+
+```text
+GCP project:  liveprobeeval
+VM:           liveprobe-praxis-eval
+zone:         us-east1-b
+machine:      n2-custom-32-65536
+disk:         250 GB pd-balanced
+repo:         /home/veer/LightProbe
+artifact:     /home/veer/LightProbe/.eval-cache/praxis/438709b4b4b43467ec384de8ee398b2cc75f2e495a57514fd57784021af7814f
+source panel: /home/veer/LightProbe/.eval-cache/praxis-sources
+```
+
+Persistent VM sessions that should still exist after reconnecting:
+
+```text
+cloud-provider
+ingress-forward
+broker-forward
+```
+
+The VM continues to incur compute charges while running. Do not delete it; the
+user will explicitly say when deletion is allowed.
+
+### What the live correctness pass found and fixed
+
+The pre-model gates correctly prevented paid calls while surfacing real
+large-codebase/runtime integration gaps. The pushed fixes now cover:
+
+- runtime source-path discovery with exact locked-source hash verification;
+- explicit non-production auth mode for the isolated evaluation broker;
+- timezone-qualified ClickHouse snapshot windows;
+- local Kind image rollout via `imagePullPolicy: IfNotPresent`;
+- a `.pth` bootstrap that coexists with OpenTelemetry's own
+  `sitecustomize`;
+- the actual failing recommendation HTTP route;
+- a reachable post-`ListProducts` boundary criterion across all 16 source
+  variants; and
+- enough tripwire hit allowance to preserve the pre-registered replay under
+  background load.
+
+The latest static gate passed all 16 variants. Incident 401 now builds a legal
+probe at `recommendation_server.py:96` for `cat_response`. In the real cluster
+that probe arms, captures exact-execution snapshots, preserves the deferred
+frontier, and runs in the real application process.
+
+### Exact remaining blocker
+
+The replay base currently points at port `8080`, which is a port-forward to the
+ingress controller used for Prometheus and ClickHouse. Astronomy Shop has no
+Ingress rule there, so the replay receives HTTP 404 and never reaches
+`frontend-proxy`. The application service is
+`otel-demo/frontend-proxy:8080`.
+
+This is the next action after reconnecting:
+
+1. Start a separate persistent VM forward:
+
+   ```sh
+   tmux new-session -d -s frontend-forward \
+     'kubectl -n otel-demo port-forward service/frontend-proxy 8081:8080'
+   ```
+
+2. Verify the clean service through
+   `http://127.0.0.1:8081/api/recommendations?productIds=0PUK6V6EV0`.
+3. Change the campaign, collector, and runtime-tripwire replay defaults from
+   port `8080` to `8081`. Change the registered snapshot recipe from
+   `/api/products/...` to the trace-proven
+   `/api/recommendations?productIds=...` route.
+4. Add/update contract coverage, run the 27 evaluation contracts and the
+   16-variant static compatibility gate, commit, and push.
+5. Run the real zero-token incident-401 runtime tripwire with automatic fault
+   cleanup. Do not open the paid gate until it emits a `status: passed`
+   artifact containing correlated snapshots, typed dossiers, judgments, and
+   preserved alternatives.
+6. Start a fresh campaign directory (next suggested name:
+   `/home/veer/praxis-campaign-smoke-gpt54-r6`) using `gpt-5.4`, low
+   reasoning, all four arms, seed 10, and
+   `--replay-base-url=http://127.0.0.1:8081`.
+7. Generate the deterministic report, copy the campaign artifacts locally,
+   update the results README with real time/token comparisons, push, then stop
+   (but do not delete) the VM.
+
+Previous setup attempts under `praxis-campaign-smoke-gpt54-r2` through `r5`
+are retained as zero-call harness failures and must not be reported as
+leaderboard outcomes.
+
+---
+
 Checkpoint date: 2026-07-28
 Branch: `praxis-eval`
 Status: implementation and all local zero-token validation complete. The first
