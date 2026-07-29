@@ -147,6 +147,23 @@ All 16 four-arm incidents, 401–416. Both strata (`direct_code` → `LOCALIZED`
 logs contain the full traceback and LiveProbe cannot beat a log read on them;
 they are the control showing where LiveProbe adds nothing.
 
+**Incident 402 is excluded, for a mechanical reason recorded here in full.**
+Its published image `quay.io/shengkunrz/it-bench-dev:nightly-recommendation`
+does not match the artifact's locked `errlog` source. Both files are 182 lines
+and differ on exactly one line, 47: the image logs
+`"Exception in get_product_list, products_list cannot be fetched due to
+Attribute Error."` where the locked source logs
+`"Error fetching product catalog: {e}"`. The deployed image therefore names the
+fault more explicitly than the source the agent is shown. The build's source
+integrity gate refuses this, correctly — an arm must not be scored against
+source that differs from what is deployed.
+
+This is not an exclusion on performance grounds and does not weaken rule 4.
+402 is one of four near-identical variants of a single fault, and 401, 403 and
+404 all pass the integrity gate and stay in the set, so the log-rich control
+stratum is fully preserved. Any incident whose image fails the same gate is
+excluded on the same basis and listed in the results.
+
 A **log-richness** covariate is computed per incident before running — whether
 the snapshot logs already name the faulty file and line — and results are
 broken out by it. This is measured, not selected on.
