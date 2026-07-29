@@ -19,7 +19,17 @@
     "root_cause": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["entity", "kind"],
+      "required": [
+        "entity",
+        "kind",
+        "service",
+        "file",
+        "line",
+        "function",
+        "namespace",
+        "resource",
+        "config_path"
+      ],
       "properties": {
         "entity": {"type": "string", "minLength": 1},
         "kind": {"type": "string", "minLength": 1},
@@ -41,7 +51,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["from", "to", "evidence_ids"],
+        "required": ["from", "to", "evidence_ids", "explanation"],
         "properties": {
           "from": {"type": "string", "minLength": 1},
           "to": {"type": "string", "minLength": 1},
@@ -50,7 +60,7 @@
             "items": {"type": "string", "minLength": 1},
             "uniqueItems": true
           },
-          "explanation": {"type": "string"}
+          "explanation": {"type": ["string", "null"]}
         }
       }
     },

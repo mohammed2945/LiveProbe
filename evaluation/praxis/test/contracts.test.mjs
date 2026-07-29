@@ -53,6 +53,29 @@ async function json(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
+function assertStrictOutputSchema(node, path = "$") {
+  if (node?.type === "object") {
+    const properties = Object.keys(node.properties ?? {}).sort();
+    const required = [...(node.required ?? [])].sort();
+    assert.deepEqual(
+      required,
+      properties,
+      `${path} must require every declared property for provider structured output`,
+    );
+    assert.equal(
+      node.additionalProperties,
+      false,
+      `${path} must reject undeclared properties`,
+    );
+    for (const [key, child] of Object.entries(node.properties ?? {})) {
+      assertStrictOutputSchema(child, `${path}.${key}`);
+    }
+  }
+  if (node?.type === "array") {
+    assertStrictOutputSchema(node.items, `${path}[]`);
+  }
+}
+
 async function expectCommandFailure(command, args, pattern, options = {}) {
   await assert.rejects(
     execFile(command, args, {
@@ -1135,6 +1158,21 @@ test("all paid paths require explicit consent and real evidence", async () => {
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+});
+
+test("diagnosis schema satisfies strict provider structured-output rules", async () => {
+  const schema = await json(
+    resolve(evaluationRoot, "schemas/diagnosis.schema.json"),
+  );
+  assertStrictOutputSchema(schema);
+  assert.deepEqual(schema.properties.root_cause.properties.service.type, [
+    "string",
+    "null",
+  ]);
+  assert.deepEqual(
+    schema.properties.propagation.items.properties.explanation.type,
+    ["string", "null"],
+  );
 });
 
 test("dirty source metadata is rejected before a coding agent can start", async () => {
