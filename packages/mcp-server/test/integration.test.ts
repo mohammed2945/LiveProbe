@@ -16,6 +16,7 @@ import {
   BrokerClient,
   createMcpServer,
   createToolHandlers,
+  GetProbeDataInputSchema,
 } from "../src/index.js";
 
 const openBrokers: Awaited<ReturnType<typeof buildBroker>>[] = [];
@@ -1117,6 +1118,24 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     });
 
     await expect(client.ping()).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("defaults probe collection to a short long-poll rather than a bare peek", () => {
+    // A probe armed moments ago has usually not been hit yet. Returning empty
+    // by default costs the caller an extra round trip, and round trips are
+    // what drive token cost.
+    const parsed = GetProbeDataInputSchema.parse({
+      probe_id: "prb_01JAZM3Y6S8X2V4K9N7Q1T5WCE",
+    });
+    expect(parsed.wait_seconds).toBeGreaterThan(0);
+    expect(parsed.wait_seconds).toBeLessThanOrEqual(30);
+    // Zero stays reachable for callers that genuinely want a peek.
+    expect(
+      GetProbeDataInputSchema.parse({
+        probe_id: "prb_01JAZM3Y6S8X2V4K9N7Q1T5WCE",
+        wait_seconds: 0,
+      }).wait_seconds,
+    ).toBe(0);
   });
 
   it("retries an idempotent read through a transient transport failure", async () => {

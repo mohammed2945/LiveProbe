@@ -195,9 +195,9 @@ export const GetProbeDataInputSchema = z
       .min(0)
       .max(30)
       .optional()
-      .default(0)
+      .default(5)
       .describe(
-        "Long-poll duration; returns immediately when retained data already exists",
+        "Long-poll duration; returns immediately when retained data already exists. Defaults to a short wait because a probe armed moments ago has usually not been hit yet, and returning empty forces another round trip. Pass 0 for a non-blocking peek.",
       ),
   })
   .strict();
