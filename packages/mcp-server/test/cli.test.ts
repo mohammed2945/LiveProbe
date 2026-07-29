@@ -183,9 +183,21 @@ describe("published tarball", () => {
           version?: string;
           dependencies?: Record<string, string>;
         };
+        // Compare against the source manifest rather than a literal, so a
+        // version bump does not fail this test for the wrong reason. What is
+        // being checked is that the packed tarball carries the version it was
+        // built from, not that the version is any particular number.
+        const sourceVersion = (
+          JSON.parse(
+            readFileSync(
+              new URL("../package.json", import.meta.url),
+              "utf8",
+            ),
+          ) as { version: string }
+        ).version;
         expect(installedPackageJson).toMatchObject({
           name: "@doomslayer2945/liveprobe-mcp",
-          version: "0.4.0",
+          version: sourceVersion,
         });
         // A `workspace:` specifier that survives into the published manifest
         // is uninstallable for everyone outside this repository, and the
