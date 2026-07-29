@@ -198,7 +198,7 @@ export async function runRemoteTripwire(options) {
       investigation_id: investigation.investigation_id,
       service_map: [],
       ttl_seconds: Math.ceil(options.timeoutMs / 1000) + 60,
-      hit_limit: 3,
+      hit_limit: 100,
       created_by: "praxis-runtime-tripwire",
     });
     for (const item of deployed.probes) {

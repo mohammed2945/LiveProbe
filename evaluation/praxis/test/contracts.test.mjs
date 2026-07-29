@@ -227,6 +227,7 @@ test("runtime tripwire replays the failing recommendation route", async () => {
     tripwire,
     /incidentCompatibility\.criterion\.expected_type \?\? "mapping"/u,
   );
+  assert.match(tripwire, /hit_limit: 100/u);
 });
 
 test("snapshot collector accepts timezone-qualified ClickHouse windows", async () => {
