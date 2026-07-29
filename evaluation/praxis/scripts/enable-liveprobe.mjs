@@ -5,6 +5,11 @@ import { dirname, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import process from "node:process";
 
+import {
+  deploymentSelector,
+  waitForRecommendationConvergence,
+} from "./kubernetes-convergence.mjs";
+
 const evaluationRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 
 function run(command, args, execute) {
@@ -21,6 +26,62 @@ function run(command, args, execute) {
   });
 }
 
+function capture(command, args) {
+  return new Promise((resolveCapture, reject) => {
+    const child = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      const output = Buffer.concat(stdout).toString("utf8");
+      const errors = Buffer.concat(stderr).toString("utf8");
+      if (code === 0) resolveCapture(output);
+      else {
+        reject(
+          new Error(
+            `${command} exited ${code}: ${errors.trim() || output.trim()}`,
+          ),
+        );
+      }
+    });
+  });
+}
+
+async function kubectlJson(namespace, args) {
+  return JSON.parse(
+    await capture("kubectl", [
+      "-n",
+      namespace,
+      ...args,
+      "-o",
+      "json",
+      "--request-timeout=10s",
+    ]),
+  );
+}
+
+async function readRecommendationState(namespace) {
+  const deployment = await kubectlJson(namespace, [
+    "get",
+    "deployment/recommendation",
+  ]);
+  const selector = deploymentSelector(deployment);
+  const [pods, endpointSlices] = await Promise.all([
+    kubectlJson(namespace, ["get", "pods", "-l", selector]),
+    kubectlJson(namespace, [
+      "get",
+      "endpointslices.discovery.k8s.io",
+      "-l",
+      "kubernetes.io/service-name=recommendation",
+    ]),
+  ]);
+  return { deployment, pods, endpointSlices };
+}
+
 async function main(argv) {
   let incident;
   let namespace = "otel-demo";
@@ -28,6 +89,7 @@ async function main(argv) {
   let sourceRoot;
   let execute = false;
   let allowUnready = false;
+  let convergenceTimeoutMs = 180_000;
   for (const argument of argv) {
     if (argument.startsWith("--incident=")) incident = argument.slice(11);
     else if (argument.startsWith("--namespace=")) namespace = argument.slice(12);
@@ -37,7 +99,16 @@ async function main(argv) {
     }
     else if (argument === "--execute") execute = true;
     else if (argument === "--allow-unready") allowUnready = true;
+    else if (argument.startsWith("--convergence-timeout-ms=")) {
+      convergenceTimeoutMs = Number(argument.slice(25));
+    }
     else throw new Error(`unknown argument ${argument}`);
+  }
+  if (
+    !Number.isSafeInteger(convergenceTimeoutMs) ||
+    convergenceTimeoutMs < 1_000
+  ) {
+    throw new Error("--convergence-timeout-ms must be an integer >= 1000");
   }
   const imageMap = JSON.parse(
     await readFile(
@@ -136,6 +207,20 @@ async function main(argv) {
     if (!allowUnready) throw error;
     process.stderr.write(
       `enable-liveprobe: rollout remained unready as allowed: ${error}\n`,
+    );
+  }
+  if (execute) {
+    const convergence = await waitForRecommendationConvergence(
+      () => readRecommendationState(namespace),
+      {
+        image,
+        commit,
+        allowUnready,
+        timeoutMs: convergenceTimeoutMs,
+      },
+    );
+    process.stdout.write(
+      `enable-liveprobe: stable runtime route ${JSON.stringify(convergence)}\n`,
     );
   }
 }

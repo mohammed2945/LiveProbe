@@ -1,18 +1,22 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
+import { promisify } from "node:util";
 
 import {
   AnalyzerRunner,
   BrokerClient,
   createToolHandlers,
 } from "../../../packages/mcp-server/dist/index.js";
+import { activeEndpointPodNames } from "./kubernetes-convergence.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
+const execFile = promisify(execFileCallback);
 
 function parseArgs(argv) {
   const result = {
@@ -25,6 +29,7 @@ function parseArgs(argv) {
     output: undefined,
     python: "python3.12",
     timeoutMs: 120_000,
+    namespace: "otel-demo",
   };
   for (const argument of argv) {
     if (argument.startsWith("--incident=")) result.incident = argument.slice(11);
@@ -44,6 +49,8 @@ function parseArgs(argv) {
       result.python = argument.slice(9);
     } else if (argument.startsWith("--timeout-ms=")) {
       result.timeoutMs = Number(argument.slice(13));
+    } else if (argument.startsWith("--namespace=")) {
+      result.namespace = argument.slice(12);
     } else if (argument === "--help" || argument === "-h") result.help = true;
     else throw new Error(`unknown argument ${argument}`);
   }
@@ -64,6 +71,7 @@ Runtime:
   --replay-base-url=http://127.0.0.1:8081
   --replay-path=/api/recommendations?productIds=0PUK6V6EV0
   --python=python3.12
+  --namespace=otel-demo
   --timeout-ms=120000`;
 }
 
@@ -91,6 +99,31 @@ async function waitFor(check, label, timeoutMs) {
     `${label} did not complete within ${timeoutMs}ms` +
       (lastError === undefined ? "" : `: ${String(lastError)}`),
   );
+}
+
+async function readyRecommendationEndpointPods(namespace) {
+  const { stdout } = await execFile(
+    "kubectl",
+    [
+      "-n",
+      namespace,
+      "get",
+      "endpointslices.discovery.k8s.io",
+      "-l",
+      "kubernetes.io/service-name=recommendation",
+      "-o",
+      "json",
+      "--request-timeout=10s",
+    ],
+    { maxBuffer: 4 * 1024 * 1024 },
+  );
+  const endpointState = activeEndpointPodNames(JSON.parse(stdout));
+  assert(
+    endpointState.invalid.length === 0 && endpointState.names.length > 0,
+    "recommendation has no exact ready Pod endpoint",
+    endpointState,
+  );
+  return endpointState.names;
 }
 
 function exactTraceIdentity(incident) {
@@ -145,15 +178,17 @@ export async function runRemoteTripwire(options) {
   const probeIds = new Set();
   try {
     await handlers.ping_broker({});
+    const heartbeatNotBefore = Date.now();
     const service = await waitFor(async () => {
       const listed = await handlers.list_services({});
       return listed.services.find(
         (item) =>
           item.serviceId === "recommendation" &&
           item.online === true &&
-          item.commitSha === metadata.git_commit,
+          item.commitSha === metadata.git_commit &&
+          Date.parse(item.lastSeen) >= heartbeatNotBefore,
       );
-    }, "exact recommendation runtime heartbeat", options.timeoutMs);
+    }, "fresh exact recommendation runtime heartbeat", options.timeoutMs);
     assert(
       service.commitSha === metadata.git_commit,
       "runtime reported the wrong source commit",
@@ -239,6 +274,9 @@ export async function runRemoteTripwire(options) {
       );
     }, "probe arming", options.timeoutMs);
 
+    const expectedServiceInstances = await readyRecommendationEndpointPods(
+      options.namespace,
+    );
     const identity = exactTraceIdentity(options.incident);
     const response = await fetch(
       new URL(options.replayPath, options.replayBaseUrl),
@@ -252,6 +290,15 @@ export async function runRemoteTripwire(options) {
       },
     );
     await response.arrayBuffer();
+    assert(
+      response.status >= 500,
+      "registered replay did not exercise the incident-401 failure",
+      {
+        status: response.status,
+        traceId: identity.traceId,
+        endpointPods: expectedServiceInstances,
+      },
+    );
 
     const snapshots = await waitFor(
       async () => {
@@ -275,6 +322,21 @@ export async function runRemoteTripwire(options) {
       },
       `correlated runtime snapshot for trace ${identity.traceId}`,
       options.timeoutMs,
+    );
+    const snapshotServiceInstances = [
+      ...new Set(
+        snapshots
+          .map((snapshot) => snapshot.correlation?.serviceInstance)
+          .filter((instance) => typeof instance === "string"),
+      ),
+    ].sort();
+    assert(
+      snapshotServiceInstances.length > 0 &&
+        snapshotServiceInstances.every((instance) =>
+          expectedServiceInstances.includes(instance),
+        ),
+      "correlated snapshot came from a pod outside the ready service route",
+      { expectedServiceInstances, snapshotServiceInstances },
     );
 
     const collected = await handlers.collect_investigation_evidence({
@@ -337,6 +399,11 @@ export async function runRemoteTripwire(options) {
       source_commit: metadata.git_commit,
       source_variant: metadata.source_variant,
       service_id: service.serviceId,
+      runtime: {
+        heartbeat_last_seen: service.lastSeen,
+        endpoint_pods: expectedServiceInstances,
+        snapshot_service_instances: snapshotServiceInstances,
+      },
       replay: {
         url: new URL(options.replayPath, options.replayBaseUrl).toString(),
         http_status: response.status,

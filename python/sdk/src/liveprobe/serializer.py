@@ -9,6 +9,11 @@ import types
 from dataclasses import dataclass
 from typing import Any, Mapping, TypeAlias
 
+try:
+    from google.protobuf.message import Message as _ProtobufMessage
+except ImportError:  # LiveProbe intentionally keeps protobuf optional.
+    _ProtobufMessage = None
+
 SanitizedNode: TypeAlias = dict[str, Any]
 
 DEFAULT_REDACT_KEYS = (
@@ -157,6 +162,93 @@ def serialize(
         folded = key.casefold()
         return any(pattern in folded for pattern in redact_patterns)
 
+    def visit_protobuf_repeated(
+        value: object,
+        field: object,
+        depth: int,
+    ) -> SanitizedNode:
+        try:
+            message_type = getattr(field, "message_type", None)
+            is_map = bool(
+                message_type is not None
+                and message_type.GetOptions().map_entry
+            )
+            length = len(value)  # type: ignore[arg-type]
+        except (AttributeError, TypeError):
+            return {"t": "truncated", "v": "unsupported"}
+        if is_map:
+            try:
+                keys = list(value.keys())  # type: ignore[union-attr]
+            except (AttributeError, TypeError):
+                return {"t": "truncated", "v": "unsupported"}
+            retained_keys = keys[: prepared.max_props]
+            children_by_key: dict[str, SanitizedNode] = {}
+            omitted = len(keys) > len(retained_keys)
+            for raw_key in retained_keys:
+                key = str(raw_key)
+                if key_is_redacted(key):
+                    children_by_key[key] = {"t": "redacted"}
+                    continue
+                try:
+                    child = value[raw_key]  # type: ignore[index]
+                except (KeyError, TypeError):
+                    omitted = True
+                    continue
+                children_by_key[key] = visit(child, depth + 1)
+            node: SanitizedNode = {"t": "obj", "c": children_by_key}
+            if omitted:
+                node["m"] = {"t": "truncated", "v": "props"}
+            return node
+
+        retained = min(length, prepared.max_array)
+        children = []
+        for index in range(retained):
+            try:
+                child = value[index]  # type: ignore[index]
+            except (IndexError, TypeError):
+                return {"t": "truncated", "v": "unsupported"}
+            children.append(visit(child, depth + 1))
+        node = {"t": "arr", "c": children}
+        if retained < length:
+            node["m"] = {"t": "truncated", "v": "array"}
+        return node
+
+    def visit_protobuf(value: object, depth: int) -> SanitizedNode:
+        identity = id(value)
+        if identity in active_ancestors:
+            return {"t": "truncated", "v": "circular"}
+        active_ancestors.add(identity)
+        try:
+            try:
+                fields = list(value.ListFields())  # type: ignore[union-attr]
+            except (AttributeError, TypeError, ValueError):
+                return {"t": "truncated", "v": "unsupported"}
+            retained_fields = fields[: prepared.max_props]
+            children_by_key: dict[str, SanitizedNode] = {}
+            omitted = len(fields) > len(retained_fields)
+            for field, child in retained_fields:
+                name = getattr(field, "name", None)
+                if not isinstance(name, str) or not name:
+                    omitted = True
+                    continue
+                if key_is_redacted(name):
+                    children_by_key[name] = {"t": "redacted"}
+                    continue
+                if bool(getattr(field, "is_repeated", False)):
+                    children_by_key[name] = visit_protobuf_repeated(
+                        child,
+                        field,
+                        depth + 1,
+                    )
+                else:
+                    children_by_key[name] = visit(child, depth + 1)
+            node: SanitizedNode = {"t": "obj", "c": children_by_key}
+            if omitted:
+                node["m"] = {"t": "truncated", "v": "props"}
+            return node
+        finally:
+            active_ancestors.remove(identity)
+
     def visit(value: object, depth: int) -> SanitizedNode:
         if type(value) is str and value in redacted_values:
             return {"t": "redacted"}
@@ -178,6 +270,11 @@ def serialize(
             return {"t": "str", "v": value}
         if callable(value):
             return {"t": "fn"}
+        if (
+            _ProtobufMessage is not None
+            and isinstance(value, _ProtobufMessage)
+        ):
+            return visit_protobuf(value, depth)
 
         is_list = isinstance(value, list)
         is_tuple = isinstance(value, tuple)

@@ -35,6 +35,11 @@ import { OBSERVABILITY_TOOLS } from "../src/observability-mcp.mjs";
 import { buildOfficialOracle } from "../scripts/build-official-oracle.mjs";
 import { runtimePathCandidates } from "../scripts/build-instrumented-images.mjs";
 import { extractSources } from "../scripts/extract-sources.mjs";
+import {
+  assessRecommendationConvergence,
+  deploymentSelector,
+  waitForRecommendationConvergence,
+} from "../scripts/kubernetes-convergence.mjs";
 
 const execFile = promisify(execFileCallback);
 const evaluationRoot = resolve(import.meta.dirname, "..");
@@ -175,6 +180,109 @@ test("Kind rollout uses the locally loaded instrumented image", async () => {
     enableScript,
     /"patch",\s+"deployment\/recommendation",\s+"--type=strategic"/u,
   );
+  assert.match(enableScript, /waitForRecommendationConvergence/u);
+});
+
+function rolloutFixture({
+  endpointPod = "recommendation-new",
+  ready = true,
+  image = "liveprobe-praxis:incident-401",
+} = {}) {
+  const conditions = ready ? [{ type: "Ready", status: "True" }] : [];
+  const deployment = {
+    metadata: { generation: 8 },
+    spec: {
+      replicas: 1,
+      selector: {
+        matchLabels: {
+          "app.kubernetes.io/name": "recommendation",
+          "app.kubernetes.io/component": "service",
+        },
+      },
+      template: {
+        spec: {
+          containers: [
+            {
+              name: "recommendation",
+              image,
+              imagePullPolicy: "IfNotPresent",
+              env: [
+                { name: "LIVEPROBE_ENABLED", value: "on" },
+                { name: "LIVEPROBE_COMMIT_SHA", value: "a".repeat(40) },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    status: {
+      observedGeneration: 8,
+      replicas: 1,
+      updatedReplicas: 1,
+      readyReplicas: ready ? 1 : 0,
+      availableReplicas: ready ? 1 : 0,
+    },
+  };
+  const pods = {
+    items: [
+      {
+        metadata: { name: "recommendation-new" },
+        spec: { containers: deployment.spec.template.spec.containers },
+        status: { conditions },
+      },
+    ],
+  };
+  const endpointSlices = {
+    items: [
+      {
+        endpoints: [
+          {
+            addresses: ["10.0.0.2"],
+            conditions: { ready },
+            targetRef: { kind: "Pod", name: endpointPod },
+          },
+        ],
+      },
+    ],
+  };
+  return { deployment, pods, endpointSlices };
+}
+
+test("recommendation rollout gate rejects stale service endpoints", () => {
+  const state = rolloutFixture({ endpointPod: "recommendation-old" });
+  const assessment = assessRecommendationConvergence({
+    ...state,
+    image: "liveprobe-praxis:incident-401",
+    commit: "a".repeat(40),
+  });
+  assert.equal(assessment.converged, false);
+  assert.match(assessment.reasons.join("\n"), /stale pods/u);
+  assert.equal(
+    deploymentSelector(state.deployment),
+    "app.kubernetes.io/component=service,app.kubernetes.io/name=recommendation",
+  );
+});
+
+test("recommendation rollout gate requires a stable exact endpoint identity", async () => {
+  const stale = rolloutFixture({ endpointPod: "recommendation-old" });
+  const current = rolloutFixture();
+  let reads = 0;
+  const assessment = await waitForRecommendationConvergence(
+    async () => {
+      reads += 1;
+      return reads === 1 ? stale : current;
+    },
+    {
+      image: "liveprobe-praxis:incident-401",
+      commit: "a".repeat(40),
+      timeoutMs: 1_000,
+      pollMs: 1,
+      stableChecks: 3,
+    },
+  );
+  assert.equal(assessment.converged, true);
+  assert.deepEqual(assessment.endpointPodNames, ["recommendation-new"]);
+  assert.equal(reads, 4);
 });
 
 test("Python bootstrap coexists with OpenTelemetry auto-instrumentation", async () => {
@@ -243,6 +351,10 @@ test("runtime tripwire replays the failing recommendation route", async () => {
   );
   assert.match(tripwire, /"x-trace-id": identity\.traceId/u);
   assert.doesNotMatch(tripwire, /randomUUID/u);
+  assert.match(tripwire, /Date\.parse\(item\.lastSeen\) >= heartbeatNotBefore/u);
+  assert.match(tripwire, /response\.status >= 500/u);
+  assert.match(tripwire, /readyRecommendationEndpointPods/u);
+  assert.match(tripwire, /snapshotServiceInstances/u);
   assert.match(
     campaign,
     /replayBaseUrl: "http:\/\/127\.0\.0\.1:8081"/u,

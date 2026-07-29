@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import liveprobe.serializer as serializer_module
 from liveprobe.serializer import (
     SerializerConfig,
     materialize_fixture,
@@ -69,6 +70,79 @@ def test_redacted_dict_key_is_checked_before_value_read() -> None:
         "password": {"t": "redacted"},
         "safe": {"t": "num", "v": 7},
     }
+
+
+def test_protobuf_adapter_is_bounded_redacted_and_not_duck_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Options:
+        map_entry = False
+
+    class MessageType:
+        def GetOptions(self) -> Options:
+            return Options()
+
+    class Field:
+        def __init__(self, name: str, *, repeated: bool = False) -> None:
+            self.name = name
+            self.is_repeated = repeated
+            self.message_type = MessageType() if repeated else None
+
+    class TrustedMessage:
+        def __init__(self, fields: list[tuple[Field, object]]) -> None:
+            self.fields = fields
+
+        def ListFields(self) -> list[tuple[Field, object]]:
+            return self.fields
+
+    class Lookalike:
+        def ListFields(self) -> None:
+            raise AssertionError("duck-typed protobuf method was invoked")
+
+    monkeypatch.setattr(
+        serializer_module,
+        "_ProtobufMessage",
+        TrustedMessage,
+    )
+    products = [
+        TrustedMessage(
+            [
+                (Field("id"), f"product-{index}"),
+                (Field("api_token"), "must-not-leak"),
+            ]
+        )
+        for index in range(4)
+    ]
+    response = TrustedMessage(
+        [(Field("products", repeated=True), products)]
+    )
+
+    assert serialize(response, {"maxArray": 2}) == {
+        "t": "obj",
+        "c": {
+            "products": {
+                "t": "arr",
+                "c": [
+                    {
+                        "t": "obj",
+                        "c": {
+                            "id": {"t": "str", "v": "product-0"},
+                            "api_token": {"t": "redacted"},
+                        },
+                    },
+                    {
+                        "t": "obj",
+                        "c": {
+                            "id": {"t": "str", "v": "product-1"},
+                            "api_token": {"t": "redacted"},
+                        },
+                    },
+                ],
+                "m": {"t": "truncated", "v": "array"},
+            }
+        },
+    }
+    assert serialize(Lookalike()) == {"t": "obj", "c": {}}
 
 
 def test_fixture_encoding_materializes_identity_cycle() -> None:
