@@ -808,4 +808,230 @@ describe("scoped native integration", () => {
       await broker.close();
     }
   });
+
+  it("keeps a live probe's evidence when the same batch carries a removed probe's late events", async () => {
+    // `remove_probe` deletes the logical probe at once, but the uprobe detaches
+    // only on the agent's next poll, so hits captured in between arrive after
+    // the probe is gone. They ride in the same batch as evidence for probes
+    // that are still live. Rejecting the batch discarded all of it, and since
+    // the condition recurred on every flush the agent stopped delivering
+    // anything until it was restarted — while probes still reported `armed`.
+    const broker = await buildBroker({ store: false });
+    try {
+      await broker.inject({
+        method: "POST",
+        url: "/v1/native/agents/register",
+        payload: {
+          agentId: "host-a",
+          hostname: "local",
+          backend: "native-ebpf",
+          architecture: "x86_64",
+          capabilities: ["uprobe", "count", "counter"],
+          agentVersion: "0.2.0",
+        },
+      });
+      await broker.inject({
+        method: "PUT",
+        url: "/v1/native/agents/host-a/instances",
+        payload: { instances: [instance] },
+      });
+
+      const createProbe = async (line: number) => (await broker.inject({
+        method: "POST",
+        url: "/v1/probes",
+        payload: {
+          serviceId: "orders-native",
+          sourceCommit: "abcdef1",
+          type: "counter",
+          file: "src/main.rs",
+          line,
+          createdBy: "test",
+        },
+      })).json<{ probe: { id: string; version: number } }>().probe;
+
+      const removed = await createProbe(10);
+      const live = await createProbe(20);
+
+      expect((await broker.inject({
+        method: "DELETE",
+        url: `/v1/probes/${removed.id}`,
+      })).statusCode).toBe(204);
+
+      const status = (probe: { id: string; version: number }) => ({
+        probeId: probe.id,
+        probeVersion: probe.version,
+        type: "status" as const,
+        ts: new Date().toISOString(),
+        status: "armed",
+        agentId: "host-a",
+        instanceId: instance.instanceId,
+        buildId: instance.buildId,
+      });
+
+      // The stale event is deliberately first: the old code threw on it before
+      // ever reaching the live probe's event.
+      const response = await broker.inject({
+        method: "POST",
+        url: "/v1/native/ingest",
+        payload: {
+          agentId: "host-a",
+          serviceId: "orders-native",
+          instanceId: instance.instanceId,
+          buildId: instance.buildId,
+          backend: "native-ebpf",
+          agentStatus: { state: "green" },
+          events: [status(removed), status(live)],
+        },
+      });
+
+      expect(response.statusCode).toBe(202);
+      // Only the live event is retained, and the caller is told so rather than
+      // being given the submitted count.
+      expect(response.json()).toMatchObject({ accepted: 1 });
+      expect((await broker.inject({
+        method: "GET",
+        url: `/v1/probes/${live.id}/data`,
+      })).json()).toMatchObject({ status: { status: "armed" } });
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("reports discarded evidence in the safety overview instead of failing silently", async () => {
+    // The bug this guards against was invisible: probes reported `armed` while
+    // every batch was rejected and dropped. Whatever else changes, a service
+    // losing evidence must say so somewhere the client actually looks.
+    const broker = await buildBroker({ store: false });
+    try {
+      await broker.inject({
+        method: "POST",
+        url: "/v1/native/agents/register",
+        payload: {
+          agentId: "host-a",
+          hostname: "local",
+          backend: "native-ebpf",
+          architecture: "x86_64",
+          capabilities: ["uprobe", "count", "counter"],
+          agentVersion: "0.2.0",
+        },
+      });
+      await broker.inject({
+        method: "PUT",
+        url: "/v1/native/agents/host-a/instances",
+        payload: { instances: [instance] },
+      });
+
+      const clean = (await broker.inject({
+        method: "GET",
+        url: "/v1/safety",
+      })).json<{ services: Array<{ serviceId: string; evidence?: unknown }> }>();
+      expect(
+        clean.services.find((s) => s.serviceId === "orders-native")?.evidence,
+      ).toBeUndefined();
+
+      // An id that was never issued is a genuine inconsistency and still 400s.
+      expect((await broker.inject({
+        method: "POST",
+        url: "/v1/native/ingest",
+        payload: {
+          agentId: "host-a",
+          serviceId: "orders-native",
+          instanceId: instance.instanceId,
+          buildId: instance.buildId,
+          backend: "native-ebpf",
+          agentStatus: { state: "green" },
+          events: [{
+            probeId: "prb_00000000000000000000000000",
+            probeVersion: 1,
+            type: "counter",
+            ts: new Date().toISOString(),
+            delta: 1,
+          }],
+        },
+      })).statusCode).toBe(400);
+
+      const after = (await broker.inject({
+        method: "GET",
+        url: "/v1/safety",
+      })).json<{
+        services: Array<{
+          serviceId: string;
+          caveats: string[];
+          evidence?: { rejectedBatches: number; lastRejectionCode?: string };
+        }>;
+      }>();
+      const service = after.services.find((s) => s.serviceId === "orders-native");
+      expect(service?.evidence).toMatchObject({
+        rejectedBatches: 1,
+        lastRejectionCode: "invalid_request",
+      });
+      expect(service?.caveats.join(" ")).toContain("Evidence is being discarded");
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("still rejects a batch carrying another service's probe", async () => {
+    // The skip above must not become a blanket amnesty: a probe belonging to a
+    // different service is an inconsistency, not a detach race.
+    const broker = await buildBroker({ store: false });
+    try {
+      await broker.inject({
+        method: "POST",
+        url: "/v1/native/agents/register",
+        payload: {
+          agentId: "host-a",
+          hostname: "local",
+          backend: "native-ebpf",
+          architecture: "x86_64",
+          capabilities: ["uprobe", "count", "counter"],
+          agentVersion: "0.2.0",
+        },
+      });
+      await broker.inject({
+        method: "PUT",
+        url: "/v1/native/agents/host-a/instances",
+        payload: { instances: [instance] },
+      });
+      const foreign = (await broker.inject({
+        method: "POST",
+        url: "/v1/probes",
+        payload: {
+          serviceId: "some-other-service",
+          sourceCommit: "abcdef1",
+          type: "counter",
+          file: "src/main.rs",
+          line: 10,
+          createdBy: "test",
+        },
+      })).json<{ probe: { id: string; version: number } }>().probe;
+
+      const response = await broker.inject({
+        method: "POST",
+        url: "/v1/native/ingest",
+        payload: {
+          agentId: "host-a",
+          serviceId: "orders-native",
+          instanceId: instance.instanceId,
+          buildId: instance.buildId,
+          backend: "native-ebpf",
+          agentStatus: { state: "green" },
+          events: [{
+            probeId: foreign.id,
+            probeVersion: foreign.version,
+            type: "status",
+            ts: new Date().toISOString(),
+            status: "armed",
+            agentId: "host-a",
+            instanceId: instance.instanceId,
+            buildId: instance.buildId,
+          }],
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+    } finally {
+      await broker.close();
+    }
+  });
 });

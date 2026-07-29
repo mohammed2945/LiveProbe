@@ -466,6 +466,19 @@ const safetyResponseSchema = z
             .strict(),
           probesSummary: z.record(z.string(), z.number().int().nonnegative()),
           caveats: z.array(z.string()),
+          // Present only when native evidence has failed to reach storage.
+          // `rejectedBatches` above zero means probes can report armed while
+          // returning nothing, which is otherwise indistinguishable from a
+          // probe on a line that has not executed.
+          evidence: z
+            .object({
+              staleEventsDropped: z.number().int().nonnegative(),
+              rejectedBatches: z.number().int().nonnegative(),
+              lastRejectionAt: z.string().optional(),
+              lastRejectionCode: z.string().optional(),
+            })
+            .strict()
+            .optional(),
         })
         .strict(),
     ),
