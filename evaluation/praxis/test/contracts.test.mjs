@@ -177,6 +177,32 @@ test("Kind rollout uses the locally loaded instrumented image", async () => {
   );
 });
 
+test("Python bootstrap coexists with OpenTelemetry auto-instrumentation", async () => {
+  const [dockerfile, bootstrapHook] = await Promise.all([
+    readFile(resolve(evaluationRoot, "instrumentation/Dockerfile"), "utf8"),
+    readFile(
+      resolve(
+        evaluationRoot,
+        "instrumentation/liveprobe_bootstrap.pth",
+      ),
+      "utf8",
+    ),
+  ]);
+  assert.match(
+    dockerfile,
+    /sitecustomize\.py \/opt\/liveprobe-bootstrap\/liveprobe_bootstrap\.py/u,
+  );
+  assert.match(
+    dockerfile,
+    /site\.getsitepackages\(\)\[0\] \+ '\/liveprobe_bootstrap\.pth'/u,
+  );
+  assert.doesNotMatch(
+    dockerfile,
+    /\/opt\/liveprobe-bootstrap\/sitecustomize\.py/u,
+  );
+  assert.equal(bootstrapHook.trim(), "import liveprobe_bootstrap");
+});
+
 test("snapshot collector accepts timezone-qualified ClickHouse windows", async () => {
   const collector = await readFile(
     resolve(evaluationRoot, "python/collect_snapshot.py"),
