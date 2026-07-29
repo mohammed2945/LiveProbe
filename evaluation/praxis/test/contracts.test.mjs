@@ -165,6 +165,18 @@ test("isolated eval broker explicitly opts out of production auth mode", async (
   assert.doesNotMatch(manifest, /LIVEPROBE_REQUIRE_AUTH/u);
 });
 
+test("Kind rollout uses the locally loaded instrumented image", async () => {
+  const enableScript = await readFile(
+    resolve(evaluationRoot, "scripts/enable-liveprobe.mjs"),
+    "utf8",
+  );
+  assert.match(enableScript, /imagePullPolicy: "IfNotPresent"/u);
+  assert.match(
+    enableScript,
+    /"patch",\s+"deployment\/recommendation",\s+"--type=strategic"/u,
+  );
+});
+
 test("snapshot collector accepts timezone-qualified ClickHouse windows", async () => {
   const collector = await readFile(
     resolve(evaluationRoot, "python/collect_snapshot.py"),

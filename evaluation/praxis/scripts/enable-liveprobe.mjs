@@ -83,6 +83,32 @@ async function main(argv) {
     [
       "-n",
       namespace,
+      "patch",
+      "deployment/recommendation",
+      "--type=strategic",
+      "-p",
+      JSON.stringify({
+        spec: {
+          template: {
+            spec: {
+              containers: [
+                {
+                  name: "recommendation",
+                  imagePullPolicy: "IfNotPresent",
+                },
+              ],
+            },
+          },
+        },
+      }),
+    ],
+    execute,
+  );
+  await run(
+    "kubectl",
+    [
+      "-n",
+      namespace,
       "set",
       "env",
       "deployment/recommendation",
