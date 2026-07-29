@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, posix, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import process from "node:process";
 
@@ -66,6 +66,112 @@ function run(command, args, { execute, capture = false }) {
           ),
     );
   });
+}
+
+function commandPathTokens(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) =>
+    String(item)
+      .split(/\s+/u)
+      .map((token) => token.replace(/^['"]|['",;]$/gu, ""))
+      .filter(Boolean),
+  );
+}
+
+export function runtimePathCandidates(imageConfig, artifactPath) {
+  const filename = posix.basename(artifactPath);
+  const workingDirectory =
+    typeof imageConfig?.WorkingDir === "string" &&
+    imageConfig.WorkingDir.startsWith("/")
+      ? imageConfig.WorkingDir
+      : "/";
+  const entrypointPaths = commandPathTokens([
+    ...(imageConfig?.Entrypoint ?? []),
+    ...(imageConfig?.Cmd ?? []),
+  ])
+    .filter(
+      (token) =>
+        token === filename ||
+        token.endsWith(`/${filename}`),
+    )
+    .map((token) =>
+      token.startsWith("/")
+        ? posix.normalize(token)
+        : posix.resolve(workingDirectory, token),
+    );
+  return [
+    ...new Set([
+      ...entrypointPaths,
+      posix.resolve(workingDirectory, filename),
+      posix.normalize(artifactPath),
+    ]),
+  ];
+}
+
+async function runtimeSourcePath(target, artifactPath, sourceSha256, options) {
+  const inspected = await run(
+    "docker",
+    ["image", "inspect", target, "--format={{json .Config}}"],
+    { ...options, capture: true },
+  );
+  const imageConfig = JSON.parse(inspected.stdout);
+  const candidates = runtimePathCandidates(imageConfig, artifactPath);
+  const filename = posix.basename(artifactPath);
+  try {
+    const discovered = await run(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "--entrypoint",
+        "find",
+        target,
+        "/",
+        "-type",
+        "f",
+        "-name",
+        filename,
+        "-print",
+      ],
+      { ...options, capture: true },
+    );
+    for (const path of discovered.stdout.split("\n").map((line) => line.trim())) {
+      if (path.startsWith("/")) candidates.push(posix.normalize(path));
+    }
+  } catch {
+    // Entrypoint and working-directory candidates remain authoritative for
+    // minimal/distroless images that do not carry `find`.
+  }
+
+  const checked = [];
+  for (const path of new Set(candidates)) {
+    try {
+      const result = await run(
+        "docker",
+        ["run", "--rm", "--entrypoint", "sha256sum", target, path],
+        { ...options, capture: true },
+      );
+      const sha256 = result.stdout.trim().split(/\s+/, 1)[0];
+      checked.push({ path, sha256 });
+      if (sha256 === sourceSha256) {
+        return {
+          path,
+          artifact_path: artifactPath,
+          resolution:
+            path === posix.normalize(artifactPath)
+              ? "artifact_path"
+              : "image_runtime_discovery",
+          checked,
+        };
+      }
+    } catch {
+      checked.push({ path, sha256: null });
+    }
+  }
+  throw new Error(
+    `instrumented image ${target} does not contain the locked source hash ` +
+      `${sourceSha256}; checked ${JSON.stringify(checked)}`,
+  );
 }
 
 export async function buildImages(options) {
@@ -146,26 +252,19 @@ export async function buildImages(options) {
       ],
       options,
     );
-    const inspected = await run(
-      "docker",
-      [
-        "run",
-        "--rm",
-        "--entrypoint",
-        "sha256sum",
+    let runtimeSource = {
+      path: metadata.deployed_file,
+      artifact_path: metadata.deployed_file,
+      resolution: "planned",
+      checked: [],
+    };
+    if (options.execute) {
+      runtimeSource = await runtimeSourcePath(
         target,
         metadata.deployed_file,
-      ],
-      { ...options, capture: true },
-    );
-    if (options.execute) {
-      const deployedSha256 = inspected.stdout.trim().split(/\s+/, 1)[0];
-      if (deployedSha256 !== sourceSha256) {
-        throw new Error(
-          `instrumented image ${target} source mismatch: ` +
-            `${deployedSha256} != ${sourceSha256}`,
-        );
-      }
+        sourceSha256,
+        options,
+      );
     }
     if (options.loadIntoKind) {
       await run(
@@ -186,7 +285,9 @@ export async function buildImages(options) {
       target,
       commit_sha: metadata.git_commit,
       source_sha256: sourceSha256,
-      deployed_file: metadata.deployed_file,
+      artifact_deployed_file: metadata.deployed_file,
+      runtime_deployed_file: runtimeSource.path,
+      runtime_source_resolution: runtimeSource.resolution,
       source_verified: options.execute,
     });
   }

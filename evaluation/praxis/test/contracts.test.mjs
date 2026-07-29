@@ -33,6 +33,7 @@ import {
 } from "../src/mcp-filter-proxy.mjs";
 import { OBSERVABILITY_TOOLS } from "../src/observability-mcp.mjs";
 import { buildOfficialOracle } from "../scripts/build-official-oracle.mjs";
+import { runtimePathCandidates } from "../scripts/build-instrumented-images.mjs";
 import { extractSources } from "../scripts/extract-sources.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -116,6 +117,41 @@ function rpcProcess(command, args) {
     },
   };
 }
+
+test("instrumented image source discovery follows the runtime entrypoint", () => {
+  const candidates = runtimePathCandidates(
+    {
+      WorkingDir: "/usr/src/app/",
+      Entrypoint: [
+        "opentelemetry-instrument",
+        "python",
+        "recommendation_server.py",
+      ],
+      Cmd: null,
+    },
+    "/root/Workspace/opentelemetry-demo/src/recommendation/recommendation_server.py",
+  );
+  assert.deepEqual(candidates, [
+    "/usr/src/app/recommendation_server.py",
+    "/root/Workspace/opentelemetry-demo/src/recommendation/recommendation_server.py",
+  ]);
+});
+
+test("instrumented image source discovery preserves absolute runtime commands", () => {
+  const candidates = runtimePathCandidates(
+    {
+      WorkingDir: "/workspace",
+      Entrypoint: ["python", "/opt/service/recommendation_server.py"],
+      Cmd: [],
+    },
+    "/source/recommendation_server.py",
+  );
+  assert.deepEqual(candidates, [
+    "/opt/service/recommendation_server.py",
+    "/workspace/recommendation_server.py",
+    "/source/recommendation_server.py",
+  ]);
+});
 
 test("evidence snapshots reject scorer leakage and preserve revisioned paging", async () => {
   const snapshot = await json(fixture401Path);
