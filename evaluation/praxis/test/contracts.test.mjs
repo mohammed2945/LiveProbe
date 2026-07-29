@@ -203,6 +203,21 @@ test("Python bootstrap coexists with OpenTelemetry auto-instrumentation", async 
   assert.equal(bootstrapHook.trim(), "import liveprobe_bootstrap");
 });
 
+test("runtime tripwire replays the failing recommendation route", async () => {
+  const tripwire = await readFile(
+    resolve(evaluationRoot, "scripts/remote-liveprobe-tripwire.mjs"),
+    "utf8",
+  );
+  assert.match(
+    tripwire,
+    /replayPath: "\/api\/recommendations\?productIds=0PUK6V6EV0"/u,
+  );
+  assert.doesNotMatch(
+    tripwire,
+    /replayPath: "\/api\/products\//u,
+  );
+});
+
 test("snapshot collector accepts timezone-qualified ClickHouse windows", async () => {
   const collector = await readFile(
     resolve(evaluationRoot, "python/collect_snapshot.py"),
