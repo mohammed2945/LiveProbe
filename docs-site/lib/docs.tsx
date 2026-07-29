@@ -356,7 +356,15 @@ export const docs: DocPage[] = [
           You need an invitation to a LiveProbe Clerk workspace, an MCP client
           that supports remote OAuth servers, and access to the deployment
           configuration for the service you want to observe. Runtime agents
-          support Node.js 20+, Python 3.12+, and Java 17+.
+          support Node.js 20+, Python 3.12+, and Java 17+. Rust and C++ use the
+          host-level eBPF agent instead, with no library added to your build.
+        </p>
+        <p>
+          Deploying into Kubernetes rather than onto a host or VM? Follow{" "}
+          <a href="/docs/kubernetes">Deploy on Kubernetes</a> — the native agent
+          becomes a per-node DaemonSet, executable paths refer to the container
+          rather than the node, and granting the agent its one capability takes a
+          step that fails silently if you miss it.
         </p>
         <Callout title="Use the deployed revision">
           <p>
@@ -546,6 +554,303 @@ Do not create a probe yet.`}
           <li>Probe TTL and hit limits automatically stop instrumentation.</li>
           <li>Removing a probe uninstalls it on the next agent poll.</li>
         </ul>
+      </>
+    ),
+  },
+  {
+    slug: "kubernetes",
+    title: "Deploy on Kubernetes",
+    section: "Get started",
+    description:
+      "Run the native agent as a per-node DaemonSet, put the JVM bridge in a sidecar, and avoid the two cluster-specific traps that fail silently.",
+    headings: [
+      { id: "what-differs", label: "What differs in a cluster" },
+      { id: "node-check", label: "Check the node" },
+      { id: "image", label: "Build the agent image" },
+      { id: "preflight", label: "Check the kernel accepts the program" },
+      { id: "credential", label: "Create the credential" },
+      { id: "daemonset", label: "Deploy the DaemonSet" },
+      { id: "in-process", label: "Node, Python, and the JVM" },
+      { id: "k8s-troubleshooting", label: "Troubleshooting" },
+    ],
+    content: (
+      <>
+        <h2 id="what-differs">What differs in a cluster</h2>
+        <p>
+          The language guidance in the SDK pages still applies. Two things change
+          when the target is a pod, and both cause failures that produce no error
+          message at all.
+        </p>
+        <Table
+          headers={["On a host or VM", "In a cluster"]}
+          rows={[
+            [
+              "One agent per machine, installed with make",
+              "One agent per node, run as a DaemonSet from an image",
+            ],
+            [
+              "executablePath is a path on that machine",
+              <>
+                <code>executablePath</code> is the path <em>inside the target
+                container</em>
+              </>,
+            ],
+            [
+              "Agent runs as the unprivileged liveprobe user",
+              "Same, but the capability needs a file capability to take effect",
+            ],
+          ]}
+        />
+        <Callout title="Verified configuration">
+          Kubernetes 1.36 (k3s) on an Ubuntu 24.04 x86-64 node, kernel 6.17,
+          probing unmodified upstream container images under live load.
+        </Callout>
+
+        <h2 id="node-check">Check the node</h2>
+        <CodeBlock
+          language="shell"
+          code={`uname -m                                   # x86_64 only
+test -r /sys/kernel/btf/vmlinux && echo "BTF ok"
+mountpoint -q /sys/kernel/tracing ||
+  sudo mount -t tracefs tracefs /sys/kernel/tracing`}
+        />
+        <p>
+          Node image: verified on Ubuntu, which on GKE means{" "}
+          <code>--image-type=UBUNTU_CONTAINERD</code>. Container-Optimized OS
+          ships BTF and may work now that the agent arrives as an image rather
+          than being compiled onto the node, but that is unverified.
+        </p>
+
+        <h2 id="image">Build the agent image</h2>
+        <p>
+          There is no published image yet. Both binaries go in one image;
+          the DaemonSet runs them as two containers so the privilege split
+          survives. <code>deploy/k8s/native-agent/Dockerfile</code> in the
+          repository builds it. Two lines in it are load-bearing:
+        </p>
+        <CodeBlock
+          language="dockerfile"
+          code={`# Runs the BPF audit first. Do not swap for a bare cargo build.
+RUN make native-release
+
+# Without this the agent can see every process and read none of them.
+RUN setcap cap_sys_ptrace=ep /usr/local/bin/liveprobe-native-agent`}
+        />
+        <Callout title="Do not test x86-64 images on Apple Silicon" warning>
+          Building them is fine. Running them locally is not: Docker executes
+          amd64 images under Rosetta, and <code>/proc/&lt;pid&gt;/exe</code> then
+          resolves to the translator instead of your service, so every discovery
+          result is meaningless.
+        </Callout>
+
+        <h2 id="preflight">Check the kernel accepts the program</h2>
+        <p>
+          The eBPF program must pass your kernel&rsquo;s verifier. That is a
+          property of the kernel, not of your manifests, and no configuration
+          works around a rejection. The loader loads the program at startup, so
+          running it is the check:
+        </p>
+        <CodeBlock
+          language="shell"
+          code={`# k3s
+sudo k3s ctr run --rm --privileged "$IMAGE" preflight \\
+  /usr/local/bin/liveprobe-bpf-loader /tmp/preflight.sock 0 0 /bin/true
+
+# containerd generally
+sudo ctr -n k8s.io run --rm --privileged "$IMAGE" preflight \\
+  /usr/local/bin/liveprobe-bpf-loader /tmp/preflight.sock 0 0 /bin/true`}
+        />
+        <Callout title="Use the Kubernetes image namespace" warning>
+          Plain <code>sudo ctr run</code> uses containerd&rsquo;s{" "}
+          <code>default</code> namespace, where the image is not present, and
+          fails in a way that looks nothing like a verifier problem.
+        </Callout>
+        <p>
+          If it stays running, the verifier accepted the program — press Ctrl-C.
+          A rejection exits at once with an instruction dump ending in{" "}
+          <code>failed to load: -EACCES</code>. <code>/bin/true</code> is a
+          placeholder allowlist entry; nothing is attached.
+        </p>
+        <p>
+          Simpler still: deploy step 4 and read{" "}
+          <code>kubectl logs -n liveprobe ds/liveprobe-native-agent -c loader</code>
+          . The loader loads the program before anything else, so a rejection is
+          the first thing it prints.
+        </p>
+
+        <h2 id="credential">Create the credential</h2>
+        <CodeBlock
+          language="shell"
+          code={`curl --fail --silent --show-error \\
+  -H "Authorization: Bearer $LIVEPROBE_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  --data '{"agentId":"node-agent","allowedServiceIds":["user-service"]}' \\
+  "$BROKER_URL/v1/native-credentials"
+
+kubectl create namespace liveprobe
+kubectl create secret generic liveprobe-native-credential -n liveprobe \\
+  --from-literal=credential='lp_native_...'`}
+        />
+        <p>
+          Confirm pods can reach the broker before blaming the agent — pod egress
+          often differs from your laptop&rsquo;s:
+        </p>
+        <CodeBlock
+          language="shell"
+          code={`kubectl run egress --rm -i --restart=Never --image=curlimages/curl -- \\
+  -sS -o /dev/null -w '%{http_code}\\n' "$BROKER_URL/healthz"`}
+        />
+
+        <h2 id="daemonset">Deploy the DaemonSet</h2>
+        <p>
+          Start from <code>deploy/k8s/native-agent/daemonset.yaml</code>. Three
+          parts of it matter.
+        </p>
+        <p>
+          <strong>
+            <code>hostPID: true</code>
+          </strong>{" "}
+          — procfs is per-PID-namespace, so this is what lets the pod&rsquo;s own{" "}
+          <code>/proc</code> list every process on the node. Without it the agent
+          discovers nothing. No separate proc-root mount is needed.
+        </p>
+        <Callout title="The capability pairing that fails silently" warning>
+          <CodeBlock
+            language="yaml"
+            code={`securityContext:
+  runAsUser: 10001
+  runAsGroup: 10001          # must match the gid passed to the loader
+  allowPrivilegeEscalation: true
+  capabilities:
+    add: ["SYS_PTRACE"]
+    drop: ["ALL"]`}
+          />
+          <p>
+            Kubernetes has no ambient-capability support, so for a non-root user{" "}
+            <code>capabilities.add</code> fills only the <em>bounding</em> set —{" "}
+            <code>CapPrm</code> and <code>CapEff</code> stay empty and the
+            capability is never held. The <code>setcap</code> in the image is
+            what grants it, and <code>allowPrivilegeEscalation: true</code> is
+            required or <code>NO_NEW_PRIVS</code> blocks the transition.
+          </p>
+          <p>
+            This does not make the agent root. The bounding set is still only{" "}
+            <code>SYS_PTRACE</code>, so that is the one capability it can ever
+            hold, and it still cannot load BPF.
+          </p>
+          <p>
+            Check the agent process, not a shell you <code>exec</code> into — the
+            file capability applies to that binary alone:
+          </p>
+          <CodeBlock
+            language="shell"
+            code={`pid=$(pgrep -f 'liveprobe-native-agent /etc')
+sudo grep -E '^Cap(Prm|Eff)' /proc/$pid/status
+# CapEff: 0000000000080000   <- CAP_SYS_PTRACE. Zeros mean setcap or the flag is missing.`}
+          />
+        </Callout>
+        <p>
+          <strong>Paths are in-container.</strong> Both the config and the loader
+          allowlist name the executable as the target process sees it, not as it
+          appears on the node. If you are used to the host install, this is the
+          likeliest thing to get wrong.
+        </p>
+        <CodeBlock
+          language="yaml"
+          code={`# ConfigMap
+{ "serviceId": "user-service", "language": "cpp",
+  "executablePath": "/usr/local/bin/UserService" }
+
+# Loader args — the attach allowlist. It attaches to nothing else.
+args: ["/run/liveprobe/loader.sock", "10001", "10001",
+       "/usr/local/bin/UserService"]`}
+        />
+        <p>To find the right value, from the node:</p>
+        <CodeBlock
+          language="shell"
+          code={`sudo readlink /proc/<pid>/exe`}
+        />
+
+        <h2 id="in-process">Node, Python, and the JVM</h2>
+        <p>
+          Node and Python need nothing cluster-specific: install the package and
+          supply <code>BROKER_URL</code>, <code>LIVEPROBE_API_KEY</code> and{" "}
+          <code>GIT_COMMIT</code> from a Secret and your image build.
+        </p>
+        <p>
+          The JVM bridge belongs in the same pod as a sidecar. Containers in a
+          pod share a network namespace, so JDWP stays on{" "}
+          <code>127.0.0.1:5005</code> and is never exposed — exactly the property
+          the JVM page asks for.
+        </p>
+        <CodeBlock
+          language="yaml"
+          code={`containers:
+  - name: inventory
+    args: ["-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:5005",
+           "-jar", "/app/application.jar"]
+  - name: liveprobe-bridge
+    args: ["--service", "inventory-service", "--attach", "127.0.0.1:5005",
+           "--broker", "$(BROKER_URL)", "--commit", "$(GIT_COMMIT)"]`}
+        />
+        <Callout title="Never expose JDWP publicly" warning>
+          Do not publish 5005 through a Service, and do not run the target pod
+          with <code>hostNetwork</code>.
+        </Callout>
+
+        <h2 id="k8s-troubleshooting">Troubleshooting</h2>
+        <Table
+          headers={["Symptom", "Cause"]}
+          rows={[
+            [
+              "Agent runs, logs nothing, no services appear",
+              <>
+                <code>CapEff</code> is zero. The <code>setcap</code> and{" "}
+                <code>allowPrivilegeEscalation</code> pairing. The most common
+                failure, and it prints no error.
+              </>,
+            ],
+            [
+              "Probe reports armed but never returns data",
+              <>
+                Check <code>get_safety_overview</code>. An <code>evidence</code>{" "}
+                block with <code>rejectedBatches</code> above zero means captured
+                evidence is being discarded, not that the line is cold.
+              </>,
+            ],
+            [
+              "Loader exits with a long instruction dump",
+              "The kernel refused the BPF program. Not configuration — see the preflight above.",
+            ],
+            [
+              <code>local-policy-denied: executable is not allowlisted</code>,
+              "The loader allowlist has a node path where it needs the in-container path.",
+            ],
+            [
+              "Service never appears, agent otherwise healthy",
+              <>
+                No running process matches <code>executablePath</code>, or{" "}
+                <code>hostPID</code> is missing.
+              </>,
+            ],
+            [
+              <code>source-file-not-found</code>,
+              "The file was found; that line has no code. Optimizing compilers routinely attribute a statement to a neighbouring line. Try adjacent lines.",
+            ],
+            [
+              "Permission denied on the loader socket",
+              <>
+                <code>runAsGroup</code> does not match the gid passed to the
+                loader, which chowns the socket <code>root:&lt;gid&gt;</code>{" "}
+                mode 0660.
+              </>,
+            ],
+            [
+              "Native services show no commitSha",
+              "Expected. Native agents do not report a deployed commit, unlike the in-process SDKs.",
+            ],
+          ]}
+        />
       </>
     ),
   },
@@ -1278,6 +1583,40 @@ readelf --notes target/release/my-service | grep 'Build ID:'`}
                 Cargo emits a build ID by default; <code>strip = false</code> is
                 what keeps it and the DWARF in place.
               </p>
+              <Callout title="This makes probes fire, not values trustworthy" warning>
+                <p>
+                  Lines resolve and probes hit at any optimization level. Reading
+                  captured <em>values</em> is a different matter. From{" "}
+                  <code>opt-level = 1</code> upward, LLVM often records a
+                  variable&rsquo;s location as a single stack slot with no
+                  validity range. When the variable is really in a register at
+                  that instruction, the slot holds something else, and the agent
+                  reports its contents as an ordinary number beside correct ones,
+                  with nothing marking it apart.
+                </p>
+                <p>
+                  Measured on a live service: a parameter alternating between 3
+                  and 7 was reported as a constant stack address, while another
+                  local in the same snapshot was correct. Counter and log probes
+                  are unaffected.
+                </p>
+                <p>
+                  For services where you intend to read values, build the crate
+                  under test unoptimized. A profile override leaves your
+                  dependencies optimized:
+                </p>
+                <CodeBlock
+                  language="toml"
+                  code={`[profile.release.package.my-service]
+opt-level = 0`}
+                />
+                <p>
+                  Expect a real cost — Rust leans on inlining, so unoptimized
+                  code can be substantially slower, though far less so for
+                  I/O-bound services than compute-heavy ones. A captured scalar
+                  near <code>0x7f0000000000</code> is an address, not data.
+                </p>
+              </Callout>
             </>
           }
         />
@@ -1324,6 +1663,22 @@ readelf --notes my-service | grep 'Build ID:'`}
                 <code>--build-id</code> is not always on by default, so pass it
                 explicitly.
               </p>
+              <Callout title="GCC is measured; clang is not">
+                <p>
+                  Every value captured from a GCC <code>-O3</code> build was
+                  correct in testing, including against an unmodified upstream
+                  image. GCC emits location lists carrying validity ranges, so
+                  the agent can always pick the location that is live at the
+                  probe address — no relaxed optimization needed.
+                </p>
+                <p>
+                  That result does not transfer to <strong>clang</strong>, which
+                  shares LLVM&rsquo;s backend with Rust and may emit locations
+                  without ranges. It has not been measured. If you build with
+                  clang, verify one captured value against something you already
+                  know before trusting the rest.
+                </p>
+              </Callout>
             </>
           }
         />
@@ -1886,6 +2241,36 @@ curl --fail https://liveprobe.tryastrea.tech/readyz`}
             ["error", "Inspect status detail and runtime logs"],
           ]}
         />
+        <Callout title="Armed but never returning data" warning>
+          <p>
+            A probe on a line that has not executed and a probe whose evidence is
+            being thrown away look identical from the outside — both sit at{" "}
+            <code>armed</code> forever. Distinguish them with{" "}
+            <code>get_safety_overview</code>: an <code>evidence</code> block
+            reporting <code>rejectedBatches</code> above zero means captured
+            evidence is not reaching storage, and a caveat on that service will
+            say so in words. No <code>evidence</code> block means nothing has
+            been lost and the line genuinely is not running.
+          </p>
+        </Callout>
+        <Callout title="source-file-not-found when the path is right">
+          <p>
+            The file was found. That <em>line</em> has no code. Optimizing
+            compilers routinely attribute a statement to a neighbouring line, so
+            the line you would point at by eye is often not the one in the line
+            table. Try adjacent lines — this is common in C++ and Rust and rare
+            in the interpreted runtimes.
+          </p>
+        </Callout>
+        <Callout title="A value that looks like a huge meaningless number" warning>
+          <p>
+            Probably a stale stack slot rather than the variable. Scalars near{" "}
+            <code>0x7f0000000000</code> are addresses, not data. This happens in
+            optimized Rust builds; see the Rust page for the cause and the fix.
+            Values reported alongside it may still be correct — the two are not
+            distinguishable from the output alone.
+          </p>
+        </Callout>
 
         <h2 id="runtime-specific">Runtime-specific checks</h2>
         <ul>

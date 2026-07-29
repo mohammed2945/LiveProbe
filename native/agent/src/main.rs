@@ -300,13 +300,22 @@ fn main() -> anyhow::Result<()> {
                     if instance.build_id != assignment.build_id {
                         continue;
                     }
+                    // Resolve configured symbol directories inside the target's
+                    // own filesystem. For a host process `/proc/<pid>/root` is
+                    // `/`, so this is a no-op and the configured paths are used
+                    // unchanged; for a container it finds the debug files that
+                    // ship in the image rather than same-named host paths.
+                    let target_root = instance.root_path();
                     let symbol_dirs = config
                         .symbol_directories
                         .iter()
-                        .map(PathBuf::from)
+                        .map(|directory| {
+                            discovery::rebase_under_root(&target_root, Path::new(directory))
+                        })
                         .collect::<Vec<_>>();
                     let debug = match symbols::find_or_fetch_debug_artifact(
-                        Path::new(&instance.executable_path),
+                        instance.open_path(),
+                        &instance.debug_search_root(),
                         &symbol_dirs,
                         config.debuginfod_url.as_deref(),
                         config.symbol_cache_directory.as_deref().map(Path::new),

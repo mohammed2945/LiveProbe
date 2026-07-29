@@ -1,0 +1,68 @@
+# Live traffic for the DeathStarBench social network.
+#
+# The Job seeds the social graph once; the Deployment then drives continuous
+# mixed read/write load so probes are placed on code that is actually executing.
+# Without the seed the compose-post and timeline paths return errors and the
+# interesting lines never run.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: socialnetwork-init
+  namespace: socialnetwork
+spec:
+  backoffLimit: 4
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: us-central1-docker.pkg.dev/totemic-studio-502902-u2/liveprobe/dsb-loader:v1
+          workingDir: /social-network-microservices
+          command: ["python3"]
+          args:
+            - scripts/init_social_graph.py
+            - --graph=socfb-Reed98
+            - --ip=nginx-thrift
+            - --port=8080
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: socialnetwork-traffic
+  namespace: socialnetwork
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: socialnetwork-traffic
+  template:
+    metadata:
+      labels:
+        app: socialnetwork-traffic
+    spec:
+      containers:
+        - name: wrk2
+          image: us-central1-docker.pkg.dev/totemic-studio-502902-u2/liveprobe/dsb-loader:v1
+          workingDir: /social-network-microservices
+          env:
+            # Matches the seeded socfb-Reed98 dataset.
+            - name: max_user_index
+              value: "962"
+          command: ["/bin/sh", "-c"]
+          # -R is the request rate wrk2 holds open-loop, which is what makes its
+          # latency numbers meaningful. Modest and continuous beats a burst here:
+          # the point is that probed lines keep executing, not to saturate.
+          args:
+            - |
+              while true; do
+                /usr/local/bin/wrk -D exp -t 4 -c 32 -d 300s -L \
+                  -s ./wrk2/scripts/social-network/mixed-workload.lua \
+                  http://nginx-thrift:8080 -R 40 || true
+                sleep 5
+              done
+          resources:
+            requests: { cpu: 300m, memory: 256Mi }
+            limits: { memory: 1Gi }

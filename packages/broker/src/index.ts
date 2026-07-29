@@ -147,6 +147,12 @@ const DEFAULT_RING_CAPACITY = 500;
 const DEFAULT_TTL_SWEEP_INTERVAL_MS = 10_000;
 const DEFAULT_SNAPSHOT_INTERVAL_MS = 15_000;
 const ACTIVE_AGENT_WINDOW_MS = 45_000;
+/**
+ * How long a removed probe's id is remembered so late events from an agent that
+ * has not yet detached its uprobe are recognised as a race rather than a fault.
+ * Comfortably longer than a poll cycle plus retry backoff.
+ */
+const REMOVED_PROBE_GRACE_MS = 600_000;
 const KNOWN_AGENT_CAPABILITIES = [
   "log-levels-v1",
   "expression-ast-v1",
@@ -1155,6 +1161,22 @@ function normalizeAgentCapabilities(
 type ScopedServiceRecord = ServiceRecord & ResourceScope;
 type NativeAgentRecord = z.infer<typeof persistedNativeAgentSchema>;
 type NativeInstanceRecord = z.infer<typeof persistedNativeInstanceSchema>;
+
+/**
+ * Native evidence that never reached storage, per service.
+ *
+ * `staleEventsDropped` is benign: late events from a probe that was removed
+ * before its uprobe detached. `rejectedBatches` is not — every event in a
+ * rejected batch is discarded by the agent, including evidence for probes that
+ * are perfectly healthy, and nothing about that surfaces to the client on its
+ * own.
+ */
+type NativeIngestHealth = {
+  staleEventsDropped: number;
+  rejectedBatches: number;
+  lastRejectionAt?: string;
+  lastRejectionCode?: string;
+};
 type ScopedServiceVersion = ResourceScope & {
   serviceId: string;
   version: number;
@@ -1344,6 +1366,23 @@ export class BrokerState {
   private readonly nativeAgents = new Map<string, NativeAgentRecord>();
   private readonly nativeInstances = new Map<string, NativeInstanceRecord>();
   private readonly nativeStatuses = new Map<string, ProbeStatus>();
+  /**
+   * Probe ids removed recently enough that an agent may still deliver events
+   * for them, mapped to when they were removed. Lets the detach race be
+   * distinguished from an unknown probe id, which stays a hard error.
+   */
+  private readonly recentlyRemovedProbes = new Map<string, number>();
+  /**
+   * Per-service record of native evidence that did not make it into storage.
+   *
+   * Exists because the failure it describes is otherwise invisible. A rejected
+   * ingest batch is discarded by the agent, so a probe keeps reporting `armed`
+   * while returning nothing, and neither the operator nor the MCP client has
+   * any way to tell that evidence is being thrown away. The broker is the party
+   * issuing the rejections, so it is the one that can count them without any
+   * protocol change.
+   */
+  private readonly nativeIngestHealth = new Map<string, NativeIngestHealth>();
   private readonly nativeAssignmentVersions = new Map<string, number>();
   private readonly listeners = new Map<string, Set<ActivityListener>>();
   private readonly clock: () => number;
@@ -1483,8 +1522,31 @@ export class BrokerState {
     this.probes.delete(id);
     this.events.delete(id);
     this.statuses.delete(id);
+    // Remember the removal. A native uprobe detaches only on the agent's next
+    // poll, so hits captured between here and then arrive for a probe that no
+    // longer exists. Without this the broker cannot tell that expected race
+    // from a genuinely unknown probe id, and treating both as fatal discards
+    // the valid evidence batched alongside.
+    this.recentlyRemovedProbes.set(id, this.now());
     this.signalActivity(id);
     return true;
+  }
+
+  /**
+   * Forget removals older than the window in which an agent could still be
+   * holding events for them. Generous relative to the agent poll interval, and
+   * bounded so a long-running broker cannot accumulate ids indefinitely.
+   */
+  private pruneRemovedProbes(): void {
+    if (this.recentlyRemovedProbes.size === 0) {
+      return;
+    }
+    const cutoff = this.now() - REMOVED_PROBE_GRACE_MS;
+    for (const [id, removedAt] of this.recentlyRemovedProbes) {
+      if (removedAt <= cutoff) {
+        this.recentlyRemovedProbes.delete(id);
+      }
+    }
   }
 
   public listProbes(
@@ -1900,7 +1962,44 @@ export class BrokerState {
     return { version, assignments };
   }
 
+  private nativeHealth(scope: ResourceScope, serviceId: string): NativeIngestHealth {
+    const key = this.serviceKey(scope, serviceId);
+    let health = this.nativeIngestHealth.get(key);
+    if (health === undefined) {
+      health = { staleEventsDropped: 0, rejectedBatches: 0 };
+      this.nativeIngestHealth.set(key, health);
+    }
+    return health;
+  }
+
   public ingestNative(
+    input: {
+      agentId: string;
+      serviceId: string;
+      instanceId: string;
+      buildId: string;
+      agentStatus: AgentStatus;
+      events: ProbeEvent[];
+    },
+    scope: ResourceScope,
+  ): number {
+    // Record every rejection this method raises. The agent discards the whole
+    // batch on a 4xx, so without a broker-side count the loss is observable
+    // nowhere: probes keep reporting `armed` and simply return no data.
+    try {
+      return this.ingestNativeChecked(input, scope);
+    } catch (error) {
+      if (error instanceof BrokerHttpError) {
+        const health = this.nativeHealth(scope, input.serviceId);
+        health.rejectedBatches += 1;
+        health.lastRejectionAt = new Date(this.now()).toISOString();
+        health.lastRejectionCode = error.code;
+      }
+      throw error;
+    }
+  }
+
+  private ingestNativeChecked(
     input: {
       agentId: string;
       serviceId: string;
@@ -1921,10 +2020,41 @@ export class BrokerState {
     ) {
       throw new BrokerHttpError(409, "target-instance-changed", "native instance identity changed");
     }
+    /**
+     * Events whose logical probe the broker no longer recognises are an
+     * expected race, not a protocol error. `remove_probe` deletes the probe
+     * immediately while the uprobe detaches only on the agent's next poll, so
+     * hits captured in that window necessarily arrive afterwards. The same
+     * applies to a probe that has just expired or been superseded by a new
+     * version.
+     *
+     * These must be skipped individually rather than rejecting the batch. A
+     * batch carries events for every probe on the instance, so failing the
+     * whole request for one stale event discards the valid evidence alongside
+     * it — and because the condition recurs on each flush, the agent stops
+     * delivering anything at all until it is restarted. Observed on the
+     * Kubernetes demo: probes reported `armed` indefinitely and returned no
+     * data, with no error surfaced to the client.
+     *
+     * A genuine inconsistency — another tenant's probe, another service's
+     * probe, a payload type that disagrees with the probe definition — is not
+     * a race and still fails the request loudly.
+     */
+    this.pruneRemovedProbes();
+    const accepted: ProbeEvent[] = [];
+    let skipped = 0;
     for (const event of input.events) {
       const stored = this.probes.get(event.probeId);
+      if (stored === undefined) {
+        if (this.recentlyRemovedProbes.has(event.probeId)) {
+          skipped += 1;
+          continue;
+        }
+        // Never seen, or removed long enough ago that no agent should still be
+        // holding it. That is an inconsistency rather than a race.
+        throw new BrokerHttpError(400, "invalid_request", "native event does not match its logical probe");
+      }
       if (
-        stored === undefined ||
         !sameResourceScope(stored.scope, scope) ||
         stored.probe.serviceId !== input.serviceId ||
         (event.type !== "status" && event.type !== stored.probe.type)
@@ -1932,6 +2062,10 @@ export class BrokerState {
         throw new BrokerHttpError(400, "invalid_request", "native event does not match its logical probe");
       }
       if (event.probeVersion !== stored.probe.version) {
+        // Left as a hard error deliberately. The probe still exists, so the
+        // broker can name the disagreement precisely and the agent re-reads its
+        // assignment. Unlike a removed probe this was never observed recurring
+        // in practice, so it does not warrant relaxing batch integrity.
         throw new BrokerHttpError(
           409,
           "probe_version_changed",
@@ -1947,8 +2081,12 @@ export class BrokerState {
           throw new BrokerHttpError(409, "target-instance-changed", "native status identity mismatch");
         }
       }
+      accepted.push(event);
     }
-    for (const event of input.events) {
+    if (skipped > 0) {
+      this.nativeHealth(scope, input.serviceId).staleEventsDropped += skipped;
+    }
+    for (const event of accepted) {
       this.appendEvent(event);
       if (event.type === "status") {
         const stored = this.probes.get(event.probeId)!;
@@ -2014,7 +2152,9 @@ export class BrokerState {
         agentStatus: input.agentStatus,
       });
     }
-    return input.events.length;
+    // The count the agent is told about is what was actually retained, so a
+    // silent divergence between "sent" and "stored" is visible at the caller.
+    return accepted.length;
   }
 
   public listServices(
@@ -2059,6 +2199,7 @@ export class BrokerState {
       caveats: string[];
       instanceCount?: number;
       buildIds?: string[];
+      evidence?: NativeIngestHealth;
     }>;
   } {
     this.expireDueProbes();
@@ -2101,6 +2242,24 @@ export class BrokerState {
             "Node red means event-loop lag safety protection suspended LiveProbe probes.",
           );
         }
+        // A probe reporting `armed` while its evidence is being rejected looks
+        // identical to a probe on a line that simply has not executed. Say so
+        // explicitly rather than leaving the client to infer it from silence.
+        const health = this.nativeIngestHealth.get(
+          this.serviceKey(scope, service.serviceId),
+        );
+        const evidence =
+          health === undefined ||
+          (health.rejectedBatches === 0 && health.staleEventsDropped === 0)
+            ? undefined
+            : { ...health };
+        if (evidence !== undefined && evidence.rejectedBatches > 0) {
+          caveats.push(
+            `Evidence is being discarded: ${evidence.rejectedBatches} ingest batch(es) rejected` +
+              `${evidence.lastRejectionCode === undefined ? "" : ` (last: ${evidence.lastRejectionCode})`}` +
+              ". Probes may report armed while returning no data.",
+          );
+        }
         const agent =
           service.agentStatus === undefined
             ? { state: "unknown" as const }
@@ -2135,6 +2294,7 @@ export class BrokerState {
           ...(service.buildIds === undefined ? {} : {
             buildIds: service.buildIds,
           }),
+          ...(evidence === undefined ? {} : { evidence }),
         };
       }),
     };
