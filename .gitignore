@@ -32,3 +32,4 @@ demo/cpp-service/liveprobe-cpp-demo
 .DS_Store
 *.log
 backups/
+.gstack/
