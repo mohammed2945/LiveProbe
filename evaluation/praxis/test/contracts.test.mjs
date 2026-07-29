@@ -360,6 +360,7 @@ test("runtime tripwire replays the failing recommendation route", async () => {
   );
   assert.match(tripwire, /response\.c\?\.products\?\.t === "arr"/u);
   assert.match(tripwire, /response\.c\.products_list === undefined/u);
+  assert.match(tripwire, /correlation_trace_id: identity\.traceId/u);
   assert.match(tripwire, /faultShapeSnapshots/u);
   assert.match(
     campaign,
@@ -454,9 +455,53 @@ test("registered replay identities are fresh and deterministic", async () => {
     }),
     /unknown replay recipe/,
   );
+
+  const executions = [];
+  const preparedStore = new EvidenceStore(snapshot, {
+    replayExecutor: async (execution) => {
+      executions.push(execution);
+      return { synthetic: false, status: "completed" };
+    },
+  });
+  const prepared = await preparedStore.replayIncident({
+    incident_id: "401",
+    recipe_id: "browse-product",
+    prepare_only: true,
+  });
+  assert.equal(prepared.replay.status, "prepared");
+  assert.equal(prepared.replay.executed, false);
+  assert.equal(executions.length, 0);
+  const executed = await preparedStore.replayIncident({
+    incident_id: "401",
+    recipe_id: "browse-product",
+    prepared_replay_id: prepared.replay.replay_id,
+  });
+  assert.equal(executed.replay.trace_id, prepared.replay.trace_id);
+  assert.equal(executed.replay.executed, true);
+  assert.equal(executions.length, 1);
+  assert.equal(executions[0].traceId, prepared.replay.trace_id);
+  await assert.rejects(
+    preparedStore.replayIncident({
+      incident_id: "401",
+      recipe_id: "browse-product",
+      prepared_replay_id: prepared.replay.replay_id,
+    }),
+    /unknown or already executed prepared replay/,
+  );
 });
 
 test("observability MCP exposes the immutable tool contract", async () => {
+  const replayTool = OBSERVABILITY_TOOLS.find(
+    ({ name }) => name === "replay_incident",
+  );
+  assert.equal(
+    replayTool.inputSchema.properties.prepare_only.type,
+    "boolean",
+  );
+  assert.equal(
+    replayTool.inputSchema.properties.prepared_replay_id.type,
+    "string",
+  );
   const server = rpcProcess(process.execPath, [
     resolve(evaluationRoot, "src/observability-mcp.mjs"),
     "--snapshot",
@@ -848,7 +893,7 @@ test("four arm capabilities and guidance remain intentionally distinct", async (
 
   const graph = await loadGuidance("graph_liveprobe");
   const raw = await loadGuidance("raw_liveprobe");
-  assert.match(graph, /liveprobe-investigation\/v1\.1/);
+  assert.match(graph, /liveprobe-investigation\/v1\.2/);
   for (const action of [
     "FOLLOW_PATH",
     "PROBE_REGION",

@@ -246,12 +246,14 @@ export async function runRemoteTripwire(options) {
     const legalSites = new Map(
       investigation.probe_bundle.sites.map((site) => [site.site_id, site]),
     );
+    const identity = exactTraceIdentity(options.incident);
     const deployed = await handlers.deploy_investigation_probes({
       repository_root: options.sourceRoot,
       investigation_id: investigation.investigation_id,
       service_map: [],
       ttl_seconds: Math.ceil(options.timeoutMs / 1000) + 60,
       hit_limit: 100,
+      correlation_trace_id: identity.traceId,
       created_by: "praxis-runtime-tripwire",
     });
     for (const item of deployed.probes) {
@@ -294,7 +296,6 @@ export async function runRemoteTripwire(options) {
     const expectedServiceInstances = await readyRecommendationEndpointPods(
       options.namespace,
     );
-    const identity = exactTraceIdentity(options.incident);
     const response = await fetch(
       new URL(options.replayPath, options.replayBaseUrl),
       {

@@ -162,6 +162,14 @@ def serialize(
         folded = key.casefold()
         return any(pattern in folded for pattern in redact_patterns)
 
+    def protobuf_field_is_repeated(field: object) -> bool:
+        modern = getattr(field, "is_repeated", None)
+        if isinstance(modern, bool):
+            return modern
+        label = getattr(field, "label", None)
+        repeated_label = getattr(field, "LABEL_REPEATED", 3)
+        return isinstance(label, int) and label == repeated_label
+
     def visit_protobuf_repeated(
         value: object,
         field: object,
@@ -234,7 +242,7 @@ def serialize(
                 if key_is_redacted(name):
                     children_by_key[name] = {"t": "redacted"}
                     continue
-                if bool(getattr(field, "is_repeated", False)):
+                if protobuf_field_is_repeated(field):
                     children_by_key[name] = visit_protobuf_repeated(
                         child,
                         field,

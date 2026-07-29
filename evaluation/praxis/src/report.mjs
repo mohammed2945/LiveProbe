@@ -193,7 +193,12 @@ function operationSummary(records, arm) {
   for (const record of selected) {
     const server = record.server ?? "unknown";
     byServer[server] = (byServer[server] ?? 0) + 1;
-    if (record.tool === "replay_incident") replays += 1;
+    if (
+      record.tool === "replay_incident" &&
+      record.arguments?.prepare_only !== true
+    ) {
+      replays += 1;
+    }
     probes += Number(record.deployed_probes ?? 0);
     watches += Number(record.deployed_watches ?? 0);
     if (record.tool === "collect_investigation_evidence") {

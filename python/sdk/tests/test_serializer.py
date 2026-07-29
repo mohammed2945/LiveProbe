@@ -88,6 +88,14 @@ def test_protobuf_adapter_is_bounded_redacted_and_not_duck_typed(
             self.is_repeated = repeated
             self.message_type = MessageType() if repeated else None
 
+    class LegacyField:
+        LABEL_REPEATED = 3
+
+        def __init__(self, name: str, *, repeated: bool = False) -> None:
+            self.name = name
+            self.label = self.LABEL_REPEATED if repeated else 1
+            self.message_type = MessageType() if repeated else None
+
     class TrustedMessage:
         def __init__(self, fields: list[tuple[Field, object]]) -> None:
             self.fields = fields
@@ -117,7 +125,7 @@ def test_protobuf_adapter_is_bounded_redacted_and_not_duck_typed(
         [(Field("products", repeated=True), products)]
     )
 
-    assert serialize(response, {"maxArray": 2}) == {
+    expected = {
         "t": "obj",
         "c": {
             "products": {
@@ -142,6 +150,11 @@ def test_protobuf_adapter_is_bounded_redacted_and_not_duck_typed(
             }
         },
     }
+    assert serialize(response, {"maxArray": 2}) == expected
+    legacy_response = TrustedMessage(
+        [(LegacyField("products", repeated=True), products)]
+    )
+    assert serialize(legacy_response, {"maxArray": 2}) == expected
     assert serialize(Lookalike()) == {"t": "obj", "c": {}}
 
 

@@ -5,7 +5,7 @@ description: Use LiveProbe's manual snapshot, log, counter, and metric probes af
 
 # Raw LiveProbe Investigation
 
-Protocol compatibility: `liveprobe-raw-investigation/v1.0`.
+Protocol compatibility: `liveprobe-raw-investigation/v1.1`.
 
 Use observability to find the failing service, operation, deployed revision, and trace or replay identity before adding probes. Raw LiveProbe supplies runtime values; it does not select a causal path or validate probe locations for you.
 
@@ -39,9 +39,9 @@ Raw probe locations are model-selected and therefore unvalidated. Recheck the de
 ## Run a correlated loop
 
 1. Call `list_services` and preserve its exact `serviceId` and revision metadata.
-2. Deploy a small probe batch for the current hypothesis.
+2. Deploy a small probe batch for the current hypothesis. If the observability replay tool supports preparation, first call `replay_incident` with `prepare_only=true`, then copy its returned `trace_id` into `correlation_trace_id` so unrelated hot-path traffic cannot spend the Python runtime's probe capacity. Never invent this identity; omit the filter if it cannot be known before arming.
 3. Wait until every probe is armed; remove and correct probes that report an error.
-4. Replay the registered failing occurrence with a fresh propagated correlation identity.
+4. Replay the registered failing occurrence with the prepared identity. In the evaluation harness, call `replay_incident` again with the exact returned `prepared_replay_id`.
 5. Call `get_probe_data` and retain only snapshots carrying that identity.
 6. Compare the observed values with the hypothesis. Eliminate a path only with correlated evidence.
 7. Read more source or add the next discriminating probes. Do not mechanically instrument every line.

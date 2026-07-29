@@ -163,6 +163,7 @@ const createCommonShape = {
   sourceCommit: sourceCommitSchema.optional(),
   file: sourceFileSchema,
   line: z.number().int().positive(),
+  correlationTraceId: z.string().trim().min(1).max(128).optional(),
   condition: ConditionSchema.optional(),
   ttlSeconds: z.number().int().positive().default(DEFAULT_TTL_SECONDS),
   createdBy: z.string().trim().min(1).max(500),
@@ -214,6 +215,7 @@ const definitionCommonShape = {
   runtimeLocation: sourceFileSchema.optional(),
   runtimeLine: z.number().int().positive().optional(),
   runtimeColumn: z.number().int().nonnegative().optional(),
+  correlationTraceId: z.string().trim().min(1).max(128).optional(),
   condition: ConditionSchema.optional(),
   ttlSeconds: z.number().int().positive(),
   hitLimit: z.number().int().positive(),
@@ -977,6 +979,18 @@ export class BrokerState {
   ): ProbeDefinition {
     const now = this.now();
     this.pruneDeletedProbeTombstones(now);
+    if (input.correlationTraceId !== undefined) {
+      const runtime = this.services.get(
+        this.serviceKey(scope, input.serviceId),
+      );
+      if (runtime?.sdk !== "python") {
+        throw new BrokerHttpError(
+          409,
+          "unsupported_correlation_filter_runtime",
+          `correlationTraceId requires an online Python runtime for service ${input.serviceId}`,
+        );
+      }
+    }
     let id = this.idGenerator(now);
     for (
       let attempt = 0;

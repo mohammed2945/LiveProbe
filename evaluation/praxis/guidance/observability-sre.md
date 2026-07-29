@@ -10,4 +10,6 @@ Evidence strength:
 
 Soft priors rank where to inspect; they do not eliminate a hypothesis. Keep unavailable facts unknown. Cite returned evidence IDs in propagation edges. Do not inspect the evaluation harness, oracle annotations, injection roles, sibling arms, or prior results.
 
+When runtime probes need a fresh replay identity before they are armed, call `replay_incident` with `prepare_only=true`, arm probes with the returned `trace_id`, then execute the same one-shot replay with its exact `prepared_replay_id`. Without runtime probes, the direct one-call replay remains valid.
+
 Return the earliest entity and code/config/resource location that creates the failure, not a downstream place that merely reports it. If the available mechanical evidence ends at an unsupported boundary, return `HANDOFF`. Return `INSUFFICIENT` when no affordable observation can distinguish the remaining explanations.

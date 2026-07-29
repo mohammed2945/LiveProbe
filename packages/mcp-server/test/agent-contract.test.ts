@@ -43,6 +43,8 @@ describe("LiveProbe agent contract", () => {
     expect(skill).toContain("Treat `actions` as a menu, not a template");
     expect(skill).toContain("Do not probe mechanically at every frontier");
     expect(skill).toContain("never deploy the stale bundle");
+    expect(skill).toContain("`correlation_trace_id`");
+    expect(skill).toContain("Never invent that identity");
     expect(skill).toContain(
       "if the selected direction depends on an unobserved runtime fact",
     );

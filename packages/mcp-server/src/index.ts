@@ -9,7 +9,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 
-export const LIVEPROBE_AGENT_SKILL_VERSION = "liveprobe-investigation/v1.1";
+export const LIVEPROBE_AGENT_SKILL_VERSION = "liveprobe-investigation/v1.2";
 export const LIVEPROBE_DECISION_PROTOCOL = "liveprobe-adaptive-v2";
 export const INVESTIGATION_ACTION_KINDS = [
   "FOLLOW_PATH",
@@ -82,6 +82,15 @@ const commonInputShape = {
   condition: McpConditionSchema.optional().describe(
     "Optional read-only post-capture condition; no target code is evaluated",
   ),
+  correlation_trace_id: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .optional()
+    .describe(
+      "Optional exact trace identity supplied by observability or a prepared replay. Python runtimes discard unrelated requests before safety limits are charged; never invent this value.",
+    ),
   hit_limit: z
     .number()
     .int()
@@ -571,6 +580,15 @@ export const DeployInvestigationProbesInputSchema = z
       .optional()
       .default(1)
       .describe("Captures per canonical site, normally 1 for a replay"),
+    correlation_trace_id: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .optional()
+      .describe(
+        "Optional exact trace identity supplied by observability or a prepared replay, for example 4c010000000000000000000000000001. On Python runtimes, unrelated requests are discarded before probe safety limits are charged; never invent this value.",
+      ),
     created_by: z
       .string()
       .trim()
@@ -728,6 +746,7 @@ const definitionCommonShape = {
   sourceCommit: commitHashSchema.optional(),
   file: sourceFileSchema,
   line: z.number().int().positive(),
+  correlationTraceId: z.string().trim().min(1).max(128).optional(),
   condition: conditionResponseSchema.optional(),
   hitLimit: z.number().int().positive(),
   ttlSeconds: z.number().int().positive(),
@@ -888,6 +907,7 @@ type InvestigationMetadata = {
   investigationId?: string;
   candidateId?: string;
   round?: number;
+  correlationTraceId?: string;
 };
 
 export type BrokerCreateProbeInput = InvestigationMetadata &
@@ -1557,15 +1577,20 @@ export type ProbeCreateResult = BrokerProbeDefinition & {
 
 function optionalCommonFields(input: {
   condition?: BrokerCondition | undefined;
+  correlation_trace_id?: string | undefined;
   hit_limit?: number | undefined;
 }): {
   condition?: BrokerCondition;
+  correlationTraceId?: string;
   hitLimit?: number;
 } {
   return {
     ...(input.condition === undefined
       ? {}
       : { condition: input.condition }),
+    ...(input.correlation_trace_id === undefined
+      ? {}
+      : { correlationTraceId: input.correlation_trace_id }),
     ...(input.hit_limit === undefined ? {} : { hitLimit: input.hit_limit }),
   };
 }
@@ -2025,14 +2050,23 @@ export function createToolHandlers(
       }
       const commit = commitHashSchema.parse(investigation.criterion["commit"]);
       const services = await client.listServices();
-      const serviceIds = new Set(
-        services.services.map(({ serviceId }) => serviceId),
+      const servicesById = new Map(
+        services.services.map((service) => [service.serviceId, service]),
       );
       const targets = bundle.sites.map((site) => {
         const serviceId = site.service_id;
-        if (!serviceIds.has(serviceId)) {
+        const service = servicesById.get(serviceId);
+        if (service === undefined) {
           throw new AnalyzerClientError(
             `traversal targets ${site.file} in offline service ${serviceId}; provide the deployed service in ownership_map when starting the investigation`,
+          );
+        }
+        if (
+          input.correlation_trace_id !== undefined &&
+          service.sdk !== "python"
+        ) {
+          throw new AnalyzerClientError(
+            `correlation_trace_id requires service ${serviceId} to report sdk=python; omit the filter or use a runtime that supports exact trace filtering`,
           );
         }
         return { site, serviceId };
@@ -2052,6 +2086,9 @@ export function createToolHandlers(
             investigationId: investigation.investigation_id,
             candidateId: site.site_id,
             round: bundle.round,
+            ...(input.correlation_trace_id === undefined
+              ? {}
+              : { correlationTraceId: input.correlation_trace_id }),
           });
           return {
             siteId: site.site_id,
@@ -2074,6 +2111,9 @@ export function createToolHandlers(
           replayRequired: true,
           occurrenceRole: "failing",
           correlation: "explicit-trace-occurrence",
+          ...(input.correlation_trace_id === undefined
+            ? {}
+            : { correlationTraceId: input.correlation_trace_id }),
         },
       };
     },
@@ -2581,7 +2621,7 @@ export function createMcpServer(
     {
       title: "Deploy investigation probe bundle",
       description:
-        "Deploys every site in the investigation's current immutable probe_bundle and returns the created probes with canonical site metadata. The investigation must exist and expose a nonempty bundle; never substitute model-created file/line/watch paths. Use get_investigation_context first when the bundle may have changed.",
+        "Deploys every site in the investigation's current immutable probe_bundle and returns the created probes with canonical site metadata. The investigation must exist and expose a nonempty bundle; never substitute model-created file/line/watch paths. correlation_trace_id, when copied from observability or a prepared replay, filters unrelated Python requests before safety capacity is consumed. Use get_investigation_context first when the bundle may have changed.",
       inputSchema: DeployInvestigationProbesInputSchema,
       annotations: { destructiveHint: false },
     },

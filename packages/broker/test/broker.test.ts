@@ -76,6 +76,66 @@ class EventBeforeRegistrationState extends BrokerState {
 }
 
 describe("broker validation and storage", () => {
+  it("retains Python trace targets and rejects unsupported runtimes", () => {
+    const traceId = "4c010000000000000000000000000001";
+    const pythonState = new BrokerState();
+    pythonState.ingest({
+      serviceId: "recommendation",
+      sdk: "python",
+      commitSha: "abcdef1234567890",
+      commitSource: "config",
+      agentStatus: { state: "green" },
+      events: [],
+    });
+    const created = pythonState.createProbe(
+      CreateProbeSchema.parse({
+        serviceId: "recommendation",
+        type: "snapshot",
+        file: "recommendation_server.py",
+        line: 96,
+        watchPaths: ["cat_response"],
+        correlationTraceId: traceId,
+        createdBy: "test",
+      }),
+    );
+    expect(created.correlationTraceId).toBe(traceId);
+    expect(pythonState.pollProbes("recommendation", 0)).toMatchObject({
+      probes: [{ id: created.id, correlationTraceId: traceId }],
+    });
+
+    const nodeState = new BrokerState();
+    nodeState.ingest({
+      serviceId: "frontend",
+      sdk: "node",
+      commitSha: "abcdef1234567890",
+      commitSource: "config",
+      agentStatus: { state: "green" },
+      events: [],
+    });
+    expect(() =>
+      nodeState.createProbe(
+        CreateProbeSchema.parse({
+          serviceId: "frontend",
+          type: "snapshot",
+          file: "frontend.ts",
+          line: 42,
+          correlationTraceId: traceId,
+          createdBy: "test",
+        }),
+      ),
+    ).toThrow(/requires an online Python runtime/u);
+    expect(() =>
+      CreateProbeSchema.parse({
+        serviceId: "recommendation",
+        type: "snapshot",
+        file: "recommendation_server.py",
+        line: 96,
+        correlationTraceId: "",
+        createdBy: "test",
+      }),
+    ).toThrow();
+  });
+
   it("closes its durable store during shutdown", async () => {
     let closeCalls = 0;
     const broker = await buildBroker({

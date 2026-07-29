@@ -208,6 +208,7 @@ export class EvidenceStore {
     this.maximumPageSize = maximumPageSize;
     this.replayExecutor = replayExecutor;
     this.replayCount = 0;
+    this.preparedReplays = new Map();
   }
 
   envelope(tool, args, payload) {
@@ -422,6 +423,18 @@ export class EvidenceStore {
     assertString(args.incident_id, "incident_id");
     assertString(args.recipe_id, "recipe_id");
     assert(
+      args.prepare_only === undefined ||
+        typeof args.prepare_only === "boolean",
+      "prepare_only must be a boolean",
+    );
+    if (args.prepared_replay_id !== undefined) {
+      assertString(args.prepared_replay_id, "prepared_replay_id");
+    }
+    assert(
+      !(args.prepare_only === true && args.prepared_replay_id !== undefined),
+      "prepare_only and prepared_replay_id are mutually exclusive",
+    );
+    assert(
       args.incident_id === this.snapshot.incident_id,
       "incident_id does not match the loaded snapshot",
     );
@@ -430,10 +443,44 @@ export class EvidenceStore {
     );
     assert(recipe !== undefined, `unknown replay recipe ${args.recipe_id}`);
     assert(recipe.enabled === true, `replay recipe ${args.recipe_id} is disabled`);
-    this.replayCount += 1;
-    const suffix = String(this.replayCount).padStart(8, "0");
-    const replayId = `replay-${this.snapshot.incident_id}-${suffix}`;
-    const traceId = sha256(`${this.snapshot.snapshot_id}:${suffix}`).slice(0, 32);
+    let replayId;
+    let traceId;
+    if (args.prepared_replay_id !== undefined) {
+      const prepared = this.preparedReplays.get(args.prepared_replay_id);
+      assert(
+        prepared !== undefined,
+        `unknown or already executed prepared replay ${args.prepared_replay_id}`,
+      );
+      assert(
+        prepared.recipeId === recipe.recipe_id,
+        "prepared replay belongs to a different recipe",
+      );
+      replayId = args.prepared_replay_id;
+      traceId = prepared.traceId;
+      this.preparedReplays.delete(replayId);
+    } else {
+      this.replayCount += 1;
+      const suffix = String(this.replayCount).padStart(8, "0");
+      replayId = `replay-${this.snapshot.incident_id}-${suffix}`;
+      traceId = sha256(`${this.snapshot.snapshot_id}:${suffix}`).slice(0, 32);
+    }
+    if (args.prepare_only === true) {
+      this.preparedReplays.set(replayId, {
+        recipeId: recipe.recipe_id,
+        traceId,
+      });
+      return this.envelope("replay_incident", args, {
+        replay: {
+          replay_id: replayId,
+          trace_id: traceId,
+          recipe_id: recipe.recipe_id,
+          synthetic: this.replayExecutor === undefined,
+          status: "prepared",
+          executed: false,
+        },
+        evidence_ids: [],
+      });
+    }
     const execution =
       this.replayExecutor === undefined
         ? { synthetic: true, status: "accepted_fixture_replay" }
@@ -444,6 +491,7 @@ export class EvidenceStore {
         trace_id: traceId,
         recipe_id: recipe.recipe_id,
         ...execution,
+        executed: true,
       },
       evidence_ids: [],
     });

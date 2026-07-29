@@ -5,7 +5,7 @@ description: Use LiveProbe's persistent runtime-guided investigation tools to tr
 
 # LiveProbe Investigation
 
-Protocol compatibility: `liveprobe-investigation/v1.1`.
+Protocol compatibility: `liveprobe-investigation/v1.2`.
 Expected decision packet protocol: `liveprobe-adaptive-v2`.
 
 Use LiveProbe after observability has answered where to begin. Treat it as the runtime-value and causal-provenance layer of an incident investigation, not as a replacement for metrics, logs, or traces.
@@ -47,8 +47,8 @@ Do not submit log IDs or metric IDs as LiveProbe `evidence_refs`.
 4. Expand without probing when an exact legal `FOLLOW_PATH` action continues a unique, trace-confirmed, or already evidence-supported direction and a later frontier is likely to be more discriminating. This is especially useful when the current sites are intermediate, repeat an established value, or sit before the branch, boundary, or mutation that matters.
 5. After expanding, refresh the investigation and use its new actions and `probe_bundle`; never deploy the stale bundle from the prior revision. Repeating legal expansion for several steps before probing is valid.
 6. Observe now when runtime values are needed to choose between plausible paths, when the frontier reaches branches, service or library boundaries, feature flags, mutable-state reads, unresolved dynamic calls, or when further expansion would merely encode a guess.
-7. When observing, deploy the whole current bundle with `deploy_investigation_probes` if it fits the budget. Seek the smallest returned observation set that can change the next decision. Do not replace a probe needed to distinguish current hypotheses with a logged value: the log may precede mutation or come from another revision.
-8. Replay the failing request with the same propagated correlation identity. Collect only the matching occurrence with `collect_investigation_evidence`.
+7. When observing, deploy the whole current bundle with `deploy_investigation_probes` if it fits the budget. If the observability replay tool supports preparation, call `replay_incident` with `prepare_only=true`, then copy its returned `trace_id` into `correlation_trace_id`; this keeps unrelated hot-path traffic from spending the Python runtime's probe capacity. Never invent that identity. If no replay identity can be known before arming, omit the filter and correlate retained evidence after replay. Seek the smallest returned observation set that can change the next decision. Do not replace a probe needed to distinguish current hypotheses with a logged value: the log may precede mutation or come from another revision.
+8. Execute the failing request with the same propagated correlation identity. For a prepared evaluation replay, call `replay_incident` again with the exact returned `prepared_replay_id`. Collect only the matching occurrence with `collect_investigation_evidence`.
 9. Let the correlated evidence choose among the current legal actions. Use soft priors only when the frontier is too wide or the evidence is ambiguous.
 10. Call `apply_investigation_decision` with the exact current `revision` as `based_on_revision` and exact `action_id` values from the current `actions` menu.
 11. Repeat until the result is `LOCALIZED`, `HANDOFF`, or `INSUFFICIENT`.
@@ -59,7 +59,7 @@ Use `get_investigation_result` for the terminal report. Remove deployed probes w
 
 ## Use only legal actions
 
-The action vocabulary for protocol `liveprobe-investigation/v1.1` is:
+The action vocabulary for protocol `liveprobe-investigation/v1.2` is:
 
 - `FOLLOW_PATH`: traverse a returned causal path.
 - `PROBE_REGION`: observe returned region ports or frontier outputs.
@@ -100,3 +100,4 @@ Stop with:
 - Illegal or unavailable action: refresh context and choose an exact current action ID; do not repair the ID.
 - Budget exceeded: choose a smaller returned cut, reduce supplied confirmation predictions, or rank the legal frontier with soft priors.
 - Missing capture: verify the deployed commit and service mapping, arm state, replay propagation, and correlation identity; do not reinterpret absence as a value.
+- Unsupported correlation filter runtime: exact pre-capture filtering currently requires a service reporting `sdk=python`; omit the filter or hand off instead of assuming another runtime honored it.

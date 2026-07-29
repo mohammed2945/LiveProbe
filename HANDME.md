@@ -66,7 +66,7 @@ observability narrows the incident
 ```
 
 Load `skills/liveprobe-investigation/SKILL.md` alongside the coding agent's
-observability tools. It is versioned as `liveprobe-investigation/v1.1`, expects
+observability tools. It is versioned as `liveprobe-investigation/v1.2`, expects
 decision packets using `liveprobe-adaptive-v2`, and is contract-tested against
 the six exported MCP action kinds. The skill specifies:
 

@@ -236,7 +236,7 @@ export const OBSERVABILITY_TOOLS = [
   {
     name: "replay_incident",
     description:
-      "Requests a pre-registered incident replay and returns its replay and trace correlation identities. incident_id and recipe_id must come from the task or loaded snapshot; arbitrary commands are never accepted.",
+      "Prepares or executes a pre-registered incident replay and returns its replay and trace correlation identities. For runtime probing, first set prepare_only=true, arm probes with the returned trace_id, then call again with that exact prepared_replay_id. With neither optional field, the replay executes immediately. incident_id and recipe_id must come from the task or loaded snapshot; arbitrary commands are never accepted.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -250,6 +250,16 @@ export const OBSERVABILITY_TOOLS = [
           type: "string",
           description:
             "Pre-registered recipe ID, for example astronomy-recommendations.",
+        },
+        prepare_only: {
+          type: "boolean",
+          description:
+            "Set true to reserve a fresh replay_id and trace_id without executing the request, so probes can be armed first.",
+        },
+        prepared_replay_id: {
+          type: "string",
+          description:
+            "Exact replay_id returned by an earlier prepare_only=true call. Executes that one-shot prepared replay with its reserved trace_id.",
         },
       },
     },

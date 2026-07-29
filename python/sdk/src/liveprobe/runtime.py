@@ -176,6 +176,7 @@ class Probe:
     ttl_seconds: int
     version: int
     created_by: str
+    correlation_trace_id: str | None = None
     condition: Condition | None = None
     watch_paths: tuple[str, ...] = ()
     template: str | None = None
@@ -219,6 +220,7 @@ class Probe:
             raise ValueError("watchPaths must contain non-empty strings")
         template = dict.get(raw, "template")
         metric_path = dict.get(raw, "metricPath")
+        correlation_trace_id = dict.get(raw, "correlationTraceId")
         investigation_id = dict.get(raw, "investigationId")
         candidate_id = dict.get(raw, "candidateId")
         round_number = dict.get(raw, "round")
@@ -228,6 +230,14 @@ class Probe:
             not isinstance(metric_path, str) or not metric_path
         ):
             raise ValueError("metric probes require metricPath")
+        if correlation_trace_id is not None and (
+            not isinstance(correlation_trace_id, str)
+            or not correlation_trace_id
+            or len(correlation_trace_id) > 128
+        ):
+            raise ValueError(
+                "correlationTraceId must be a non-empty string of at most 128 characters"
+            )
         if investigation_id is not None and (
             not isinstance(investigation_id, str) or not investigation_id
         ):
@@ -253,6 +263,7 @@ class Probe:
             ttl_seconds=ttl_seconds,
             version=version,
             created_by=created_by,
+            correlation_trace_id=correlation_trace_id,
             condition=Condition.parse(dict.get(raw, "condition")),
             watch_paths=tuple(watch_paths_raw),
             template=template if isinstance(template, str) else None,
@@ -701,7 +712,14 @@ class LiveProbe:
             if not matching:
                 return self._disable
 
+            correlation_context = current_correlation()
             for state in matching:
+                target_trace_id = state.probe.correlation_trace_id
+                if target_trace_id is not None and (
+                    correlation_context is None
+                    or correlation_context.trace_id != target_trace_id
+                ):
+                    continue
                 if not self._hit_bucket.consume():
                     continue
                 if state.probe.condition is not None:
@@ -736,7 +754,6 @@ class LiveProbe:
                 if capture.state.probe.kind == "snapshot"
             }
             stack = self._capture_stack(frame)
-            correlation_context = current_correlation()
             local_hit_sequence = next(self._local_hit_sequence)
             correlation = (
                 {

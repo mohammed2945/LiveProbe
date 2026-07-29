@@ -195,6 +195,66 @@ def test_callback_captures_request_identity_before_background_processing(
         agent._uninstall_monitoring()
 
 
+def test_trace_target_skips_unrelated_traffic_before_safety_budget(
+    fake_monitoring: Any,
+) -> None:
+    class CountingBucket:
+        calls = 0
+
+        def consume(self) -> bool:
+            self.calls += 1
+            return True
+
+    agent = make_agent(fake_monitoring)
+    agent._install_monitoring()
+    bucket = CountingBucket()
+    agent._hit_bucket = bucket  # type: ignore[assignment]
+    agent._reconcile(
+        [
+            probe(
+                "prb_trace_target",
+                "snapshot",
+                hit_limit=1,
+                correlationTraceId="a" * 32,
+            )
+        ]
+    )
+    unrelated = set_correlation(
+        CorrelationContext(
+            trace_id="b" * 32,
+            span_id="1" * 16,
+            source="liveprobe-w3c",
+        )
+    )
+    try:
+        trigger(agent)
+    finally:
+        reset_correlation(unrelated)
+    assert bucket.calls == 0
+
+    target = set_correlation(
+        CorrelationContext(
+            trace_id="a" * 32,
+            span_id="2" * 16,
+            source="liveprobe-w3c",
+        )
+    )
+    try:
+        trigger(agent)
+    finally:
+        reset_correlation(target)
+    try:
+        agent._drain_queue()
+        snapshots = [
+            event for event in agent._events if event["type"] == "snapshot"
+        ]
+        assert bucket.calls == 1
+        assert len(snapshots) == 1
+        assert snapshots[0]["correlation"]["traceId"] == "a" * 32
+    finally:
+        agent._uninstall_monitoring()
+
+
 def test_snapshot_watch_values_are_frozen_in_the_callback(
     fake_monitoring: Any,
 ) -> None:

@@ -372,6 +372,7 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     const deployed = await handlers.deploy_investigation_probes({
       repository_root: "/repo",
       investigation_id: INVESTIGATION_ID,
+      correlation_trace_id: "investigation-trace",
       service_map: [
         {
           source_root: "services/payments",
@@ -383,6 +384,16 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     const probe = deployed.probes[0]?.probe;
     if (probe === undefined) throw new Error("expected investigation probe");
     expect(probe.serviceId).toBe("payments");
+    expect(probe.correlationTraceId).toBe("investigation-trace");
+    const rawProbe = await handlers.set_snapshot_probe({
+      service_id: "payments",
+      commit_hash: NORMALIZED_COMMIT,
+      file: "services/payments/app.py",
+      line: 64,
+      watch_paths: ["amount"],
+      correlation_trace_id: "investigation-trace",
+    });
+    expect(rawProbe.probe.correlationTraceId).toBe("investigation-trace");
     const timestamp = new Date().toISOString();
     broker.liveprobeState.ingest({
       serviceId: "payments",
