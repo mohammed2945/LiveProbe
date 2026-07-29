@@ -16,12 +16,17 @@ import {
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const compiledCli = join(packageRoot, "dist", "cli.js");
-const toolNames = [
+// The superseded analyze/deploy/refine trio is off by default: it is 16% of
+// the tool surface, and the surface is re-sent on every model turn.
+const legacyToolNames = [
   "analyze_probe_candidates",
+  "deploy_probe_frontier",
+  "refine_probe_candidates",
+];
+const toolNames = [
   "apply_investigation_decision",
   "collect_investigation_evidence",
   "deploy_investigation_probes",
-  "deploy_probe_frontier",
   "get_investigation_context",
   "get_investigation_result",
   "get_probe_data",
@@ -31,7 +36,6 @@ const toolNames = [
   "list_services",
   "ping_broker",
   "prepare_repository_analysis",
-  "refine_probe_candidates",
   "remove_probe",
   "set_counter_probe",
   "set_log_probe",
@@ -66,6 +70,13 @@ describe("liveprobe-mcp CLI", () => {
     expect(() => parseCliArgs(["unexpected"])).toThrow(
       new CliUsageError("unexpected argument: unexpected"),
     );
+  });
+
+  it("keeps the superseded tool trio off unless explicitly requested", () => {
+    expect(parseCliArgs([]).includeLegacyTools).toBe(false);
+    expect(
+      parseCliArgs(["--include-legacy-tools"]).includeLegacyTools,
+    ).toBe(true);
   });
 
   it("prints help and exits cleanly", () => {

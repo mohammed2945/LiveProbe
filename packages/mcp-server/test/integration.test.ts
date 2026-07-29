@@ -516,11 +516,9 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     try {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
-        "analyze_probe_candidates",
         "apply_investigation_decision",
         "collect_investigation_evidence",
         "deploy_investigation_probes",
-        "deploy_probe_frontier",
         "get_investigation_context",
         "get_investigation_result",
         "get_probe_data",
@@ -530,7 +528,6 @@ describe("Phase 1 MCP and fake-agent integration", () => {
         "list_services",
         "ping_broker",
         "prepare_repository_analysis",
-        "refine_probe_candidates",
         "remove_probe",
         "set_counter_probe",
         "set_log_probe",
@@ -923,11 +920,9 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       await client.connect(clientTransport);
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
-        "analyze_probe_candidates",
         "apply_investigation_decision",
         "collect_investigation_evidence",
         "deploy_investigation_probes",
-        "deploy_probe_frontier",
         "get_investigation_context",
         "get_investigation_result",
         "get_probe_data",
@@ -937,7 +932,6 @@ describe("Phase 1 MCP and fake-agent integration", () => {
         "list_services",
         "ping_broker",
         "prepare_repository_analysis",
-        "refine_probe_candidates",
         "remove_probe",
         "set_counter_probe",
         "set_log_probe",

@@ -11,6 +11,7 @@ export const DEFAULT_BROKER_URL = "http://127.0.0.1:7070";
 export interface CliOptions {
   brokerUrl: string;
   help: boolean;
+  includeLegacyTools: boolean;
 }
 
 export class CliUsageError extends Error {
@@ -26,11 +27,16 @@ export function parseCliArgs(
 ): CliOptions {
   let brokerUrl: string | undefined;
   let help = false;
+  let includeLegacyTools = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === "--help" || argument === "-h") {
       help = true;
+      continue;
+    }
+    if (argument === "--include-legacy-tools") {
+      includeLegacyTools = true;
       continue;
     }
     if (argument === "--broker-url") {
@@ -54,6 +60,7 @@ export function parseCliArgs(
   return {
     brokerUrl: brokerUrl ?? envBrokerUrl ?? DEFAULT_BROKER_URL,
     help,
+    includeLegacyTools,
   };
 }
 
@@ -64,6 +71,11 @@ Run the LiveProbe MCP server over stdio.
 
 Options:
   --broker-url <url>  LiveProbe broker URL
+  --include-legacy-tools
+                      Also expose the superseded analyze_probe_candidates,
+                      deploy_probe_frontier and refine_probe_candidates tools.
+                      They cost 16% of the tool surface on every turn and are
+                      off by default; prefer the investigation tools.
   -h, --help          Show this help
 
 Environment:
@@ -83,7 +95,9 @@ export async function runCli(
     return 0;
   }
 
-  await startStdioServer(options.brokerUrl);
+  await startStdioServer(options.brokerUrl, {
+    includeLegacyTools: options.includeLegacyTools,
+  });
   return 0;
 }
 

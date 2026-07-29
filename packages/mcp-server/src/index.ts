@@ -2536,10 +2536,30 @@ function withEmptyStateGuidance(value: unknown): unknown {
 const MANUAL_PROBE_SCOPE =
   "This is a manual diagnostic probe: supply a known service, deployed commit, and source location. Do not use it to deploy a persistent investigation bundle; use deploy_investigation_probes, whose canonical sites are authoritative.";
 
+export interface CreateMcpServerOptions {
+  /**
+   * Expose the superseded `analyze_probe_candidates` /
+   * `deploy_probe_frontier` / `refine_probe_candidates` trio.
+   *
+   * Off by default. Every registered tool's name, description and input schema
+   * is re-sent on every model turn, and these three are 5,987 of the 37,137
+   * bytes the full surface costs — 16% spent describing tools whose own
+   * descriptions tell the caller to use the investigation tools instead.
+   * Offering a deprecated path beside its replacement also invites callers to
+   * take it and spend turns on the wrong protocol.
+   *
+   * The handlers remain available through `createToolHandlers` regardless, so
+   * a client that already drives the legacy protocol directly is unaffected.
+   */
+  includeLegacyTools?: boolean;
+}
+
 export function createMcpServer(
   client: BrokerClient,
   analyzer: AnalyzerClient = new AnalyzerRunner(),
+  options: CreateMcpServerOptions = {},
 ): McpServer {
+  const includeLegacyTools = options.includeLegacyTools ?? false;
   const handlers = createToolHandlers(client, analyzer);
   const server = new McpServer({
     name: "liveprobe",
@@ -2757,42 +2777,44 @@ export function createMcpServer(
     async (input) =>
       executeTool(() => handlers.get_investigation_result(input)),
   );
-  server.registerTool(
-    "analyze_probe_candidates",
-    {
-      title: "Analyze deterministic probe candidates",
-      description:
-        "Legacy stateless workflow: computes a backward slice and bounded canonical frontier from a known Python criterion, returning plan_id and candidates. Use start_probe_investigation for new agent-driven work; continue here only when a client already implements the legacy analyze/deploy/refine protocol.",
-      inputSchema: AnalyzeProbeCandidatesInputSchema,
-      annotations: { readOnlyHint: true },
-    },
-    async (input) =>
-      executeTool(() => handlers.analyze_probe_candidates(input)),
-  );
-  server.registerTool(
-    "deploy_probe_frontier",
-    {
-      title: "Deploy deterministic probe frontier",
-      description:
-        "Legacy stateless workflow: deploys the exact current frontier for plan_id and returns created probes. plan_id and source mappings must come from analyze_probe_candidates and list_services; do not invent candidate locations. Use deploy_investigation_probes for persistent investigations.",
-      inputSchema: DeployProbeFrontierInputSchema,
-      annotations: { destructiveHint: false },
-    },
-    async (input) =>
-      executeTool(() => handlers.deploy_probe_frontier(input)),
-  );
-  server.registerTool(
-    "refine_probe_candidates",
-    {
-      title: "Refine probe candidates",
-      description:
-        "Legacy stateless workflow: groups captures by explicit occurrence identity, applies assessments only to current candidate IDs, and returns the next frontier or terminal verdict. Use collect_investigation_evidence plus apply_investigation_decision for persistent investigations.",
-      inputSchema: RefineProbeCandidatesInputSchema,
-      annotations: { readOnlyHint: false },
-    },
-    async (input) =>
-      executeTool(() => handlers.refine_probe_candidates(input)),
-  );
+  if (includeLegacyTools) {
+    server.registerTool(
+      "analyze_probe_candidates",
+      {
+        title: "Analyze deterministic probe candidates",
+        description:
+          "Legacy stateless workflow: computes a backward slice and bounded canonical frontier from a known Python criterion, returning plan_id and candidates. Use start_probe_investigation for new agent-driven work; continue here only when a client already implements the legacy analyze/deploy/refine protocol.",
+        inputSchema: AnalyzeProbeCandidatesInputSchema,
+        annotations: { readOnlyHint: true },
+      },
+      async (input) =>
+        executeTool(() => handlers.analyze_probe_candidates(input)),
+    );
+    server.registerTool(
+      "deploy_probe_frontier",
+      {
+        title: "Deploy deterministic probe frontier",
+        description:
+          "Legacy stateless workflow: deploys the exact current frontier for plan_id and returns created probes. plan_id and source mappings must come from analyze_probe_candidates and list_services; do not invent candidate locations. Use deploy_investigation_probes for persistent investigations.",
+        inputSchema: DeployProbeFrontierInputSchema,
+        annotations: { destructiveHint: false },
+      },
+      async (input) =>
+        executeTool(() => handlers.deploy_probe_frontier(input)),
+    );
+    server.registerTool(
+      "refine_probe_candidates",
+      {
+        title: "Refine probe candidates",
+        description:
+          "Legacy stateless workflow: groups captures by explicit occurrence identity, applies assessments only to current candidate IDs, and returns the next frontier or terminal verdict. Use collect_investigation_evidence plus apply_investigation_decision for persistent investigations.",
+        inputSchema: RefineProbeCandidatesInputSchema,
+        annotations: { readOnlyHint: false },
+      },
+      async (input) =>
+        executeTool(() => handlers.refine_probe_candidates(input)),
+    );
+  }
   return server;
 }
 
@@ -2830,12 +2852,15 @@ export async function handleStatelessHttpMcpRequest(
 
 export async function startStdioServer(
   brokerUrl = process.env["BROKER_URL"] ?? "http://127.0.0.1:7070",
+  options: CreateMcpServerOptions = {},
 ): Promise<McpServer> {
   const apiKey = process.env["LIVEPROBE_API_KEY"];
   const server = createMcpServer(
     new BrokerClient(brokerUrl, {
       ...(apiKey === undefined || apiKey.length === 0 ? {} : { apiKey }),
     }),
+    new AnalyzerRunner(),
+    options,
   );
   await server.connect(new StdioServerTransport());
   return server;

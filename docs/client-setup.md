@@ -281,9 +281,26 @@ The server exposes fifteen tools:
 | `get_probe_data` | Read retained evidence, optionally long-polling for it. |
 | `remove_probe` | Remove a probe and uninstall it on the next agent poll. |
 | `prepare_repository_analysis` | Incrementally index the deployed Python checkout beside the MCP server. |
-| `analyze_probe_candidates` | Backward-slice a manifestation value and return a bounded hammock-aware frontier. |
-| `deploy_probe_frontier` | Map source roots to service IDs and create bounded snapshot probes for the frontier. |
-| `refine_probe_candidates` | Group only explicitly correlated captures and deterministically compute the next round. |
+
+### Superseded tools
+
+`analyze_probe_candidates`, `deploy_probe_frontier` and
+`refine_probe_candidates` implement the earlier stateless analyze/deploy/refine
+protocol. They are **no longer exposed by default**: every registered tool's
+name, description and input schema is re-sent on every model turn, and these
+three account for 16% of the tool surface. Prefer
+`start_probe_investigation`, `deploy_investigation_probes`,
+`collect_investigation_evidence` and `apply_investigation_decision`.
+
+Pass `--include-legacy-tools` to `liveprobe-mcp` if a client already drives the
+older protocol over MCP. Callers that use `createToolHandlers` directly are
+unaffected either way.
+
+| Superseded tool | Replacement |
+| --- | --- |
+| `analyze_probe_candidates` | `start_probe_investigation` |
+| `deploy_probe_frontier` | `deploy_investigation_probes` |
+| `refine_probe_candidates` | `collect_investigation_evidence` + `apply_investigation_decision` |
 
 Before creating a probe:
 
