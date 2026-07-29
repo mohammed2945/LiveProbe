@@ -1118,4 +1118,87 @@ describe("Phase 1 MCP and fake-agent integration", () => {
 
     await expect(client.ping()).rejects.toMatchObject({ name: "AbortError" });
   });
+
+  it("retries an idempotent read through a transient transport failure", async () => {
+    let attempts = 0;
+    const client = new BrokerClient("http://127.0.0.1:7070", {
+      retryBaseDelayMs: 0,
+      fetchImplementation: async () => {
+        attempts += 1;
+        if (attempts < 3) throw new TypeError("connection reset");
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await expect(client.ping()).resolves.toEqual({ ok: true });
+    expect(attempts).toBe(3);
+  });
+
+  it("retries an idempotent read through a transient 503", async () => {
+    let attempts = 0;
+    const client = new BrokerClient("http://127.0.0.1:7070", {
+      retryBaseDelayMs: 0,
+      fetchImplementation: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          return new Response("", { status: 503 });
+        }
+        return new Response(JSON.stringify({ services: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await expect(client.listServices()).resolves.toEqual({ services: [] });
+    expect(attempts).toBe(2);
+  });
+
+  it("does not retry a rejected request, so a wrong call fails once", async () => {
+    let attempts = 0;
+    const client = new BrokerClient("http://127.0.0.1:7070", {
+      retryBaseDelayMs: 0,
+      fetchImplementation: async () => {
+        attempts += 1;
+        return new Response(
+          JSON.stringify({
+            error: { code: "not_found", message: "no such probe" },
+          }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    await expect(client.listServices()).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(attempts).toBe(1);
+  });
+
+  it("never retries probe creation, so a retry cannot deploy a second probe", async () => {
+    let attempts = 0;
+    const client = new BrokerClient("http://127.0.0.1:7070", {
+      retryBaseDelayMs: 0,
+      fetchImplementation: async () => {
+        attempts += 1;
+        throw new TypeError("connection reset");
+      },
+    });
+
+    await expect(
+      client.createProbe({
+        serviceId: "recommendation",
+        sourceCommit: NORMALIZED_COMMIT,
+        type: "snapshot",
+        file: "recommendation_server.py",
+        line: 96,
+        ttlSeconds: 60,
+        createdBy: "retry-test",
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(attempts).toBe(1);
+  });
 });

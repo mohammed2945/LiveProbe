@@ -1257,13 +1257,26 @@ export interface BrokerClientOptions {
   fetchImplementation?: typeof fetch;
   apiKey?: string;
   requestTimeoutMs?: number;
+  maxAttempts?: number;
+  retryBaseDelayMs?: number;
 }
 
 export class BrokerClient {
+  /**
+   * Statuses that mean "the broker is not answering right now" rather than
+   * "the request was wrong". A broker that is restarting, or a proxy or
+   * port-forward that has not finished reattaching, produces these.
+   */
+  private static readonly retryableStatuses: ReadonlySet<number> = new Set([
+    502, 503, 504,
+  ]);
+
   private readonly baseUrl: string;
   private readonly fetchImplementation: typeof fetch;
   private readonly apiKey: string | undefined;
   private readonly requestTimeoutMs: number;
+  private readonly maxAttempts: number;
+  private readonly retryBaseDelayMs: number;
 
   public constructor(
     brokerUrl: string,
@@ -1292,6 +1305,19 @@ export class BrokerClient {
       this.requestTimeoutMs <= 0
     ) {
       throw new RangeError("requestTimeoutMs must be a positive safe integer");
+    }
+    this.maxAttempts = options.maxAttempts ?? 3;
+    if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1) {
+      throw new RangeError("maxAttempts must be a positive safe integer");
+    }
+    this.retryBaseDelayMs = options.retryBaseDelayMs ?? 150;
+    if (
+      !Number.isSafeInteger(this.retryBaseDelayMs) ||
+      this.retryBaseDelayMs < 0
+    ) {
+      throw new RangeError(
+        "retryBaseDelayMs must be a non-negative safe integer",
+      );
     }
   }
 
@@ -1377,19 +1403,23 @@ export class BrokerClient {
     schema: z.ZodType<T>,
     body?: unknown,
   ): Promise<T> {
-    const response = await this.fetchWithTimeout(`${this.baseUrl}${path}`, {
-      method,
-      headers: {
-        accept: "application/json",
-        ...(this.apiKey === undefined
-          ? {}
-          : { authorization: `Bearer ${this.apiKey}` }),
-        ...(body === undefined
-          ? {}
-          : { "content-type": "application/json" }),
+    const response = await this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      {
+        method,
+        headers: {
+          accept: "application/json",
+          ...(this.apiKey === undefined
+            ? {}
+            : { authorization: `Bearer ${this.apiKey}` }),
+          ...(body === undefined
+            ? {}
+            : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
+      { idempotent: method === "GET" },
+    );
     if (!response.ok) {
       throw await this.toClientError(response);
     }
@@ -1400,15 +1430,19 @@ export class BrokerClient {
     method: "DELETE",
     path: string,
   ): Promise<void> {
-    const response = await this.fetchWithTimeout(`${this.baseUrl}${path}`, {
-      method,
-      headers: {
-        accept: "application/json",
-        ...(this.apiKey === undefined
-          ? {}
-          : { authorization: `Bearer ${this.apiKey}` }),
+    const response = await this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      {
+        method,
+        headers: {
+          accept: "application/json",
+          ...(this.apiKey === undefined
+            ? {}
+            : { authorization: `Bearer ${this.apiKey}` }),
+        },
       },
-    });
+      { idempotent: true },
+    );
     if (!response.ok) {
       throw await this.toClientError(response);
     }
@@ -1420,21 +1454,80 @@ export class BrokerClient {
     }
   }
 
+  /**
+   * A transport-layer failure: the request never produced an HTTP response.
+   * `fetch` reports these as `TypeError`, and our own timeout surfaces as an
+   * `AbortError`. Neither tells us the broker rejected the request, so an
+   * idempotent call is safe to repeat.
+   */
+  private static isTransportFailure(error: unknown): boolean {
+    return (
+      error instanceof Error &&
+      (error.name === "AbortError" ||
+        error.name === "TypeError" ||
+        error.name === "FetchError")
+    );
+  }
+
+  private async delay(milliseconds: number): Promise<void> {
+    if (milliseconds <= 0) return;
+    await new Promise<void>((resolveDelay) => {
+      setTimeout(resolveDelay, milliseconds);
+    });
+  }
+
+  /**
+   * Retries only when the method is idempotent and the failure is transient.
+   * A broker restart, or a port-forward or proxy that has not finished
+   * reattaching, otherwise surfaces to the caller as a hard tool error even
+   * though repeating the request would have succeeded. Probe creation is a
+   * POST and is never retried, so a retry can never deploy a second probe.
+   */
   private async fetchWithTimeout(
     input: string,
     init: RequestInit,
+    { idempotent }: { idempotent: boolean },
   ): Promise<Response> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
-    timeout.unref();
-    try {
-      return await this.fetchImplementation(input, {
-        ...init,
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timeout);
+    const attempts = idempotent ? this.maxAttempts : 1;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        this.requestTimeoutMs,
+      );
+      timeout.unref();
+      try {
+        const response = await this.fetchImplementation(input, {
+          ...init,
+          signal: controller.signal,
+        });
+        if (
+          attempt < attempts &&
+          BrokerClient.retryableStatuses.has(response.status)
+        ) {
+          lastError = new BrokerClientError(
+            `broker request failed with HTTP ${response.status}`,
+            response.status,
+          );
+          await this.delay(this.retryBaseDelayMs * 2 ** (attempt - 1));
+          continue;
+        }
+        return response;
+      } catch (error: unknown) {
+        lastError = error;
+        if (
+          attempt >= attempts ||
+          !BrokerClient.isTransportFailure(error)
+        ) {
+          throw error;
+        }
+        await this.delay(this.retryBaseDelayMs * 2 ** (attempt - 1));
+      } finally {
+        clearTimeout(timeout);
+      }
     }
+    throw lastError;
   }
 
   private async toClientError(response: Response): Promise<BrokerClientError> {

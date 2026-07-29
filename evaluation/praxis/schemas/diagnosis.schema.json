@@ -33,7 +33,21 @@
       ],
       "properties": {
         "entity": {"type": "string"},
-        "kind": {"type": "string"},
+        "kind": {
+          "type": "string",
+          "enum": [
+            "Service",
+            "ServiceBoundary",
+            "ServiceOperation",
+            "Pod",
+            "Deployment",
+            "DeploymentConfiguration",
+            "ConfigMap",
+            "NetworkChaos",
+            "StressChaos",
+            "JVMChaos"
+          ]
+        },
         "service": {"type": ["string", "null"]},
         "file": {"type": ["string", "null"]},
         "line": {"type": ["integer", "null"]},

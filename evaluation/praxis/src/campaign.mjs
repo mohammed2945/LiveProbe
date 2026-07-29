@@ -290,17 +290,29 @@ async function waitForHttp(url, timeoutMs = 120_000) {
   );
 }
 
+/**
+ * Waits for a LiveProbe runtime to be registered and to *stay* registered.
+ *
+ * Returning on the first successful observation is not enough. Each arm is
+ * bracketed by a broker restart, and campaign r10 saw a LiveProbe call fail
+ * roughly sixteen seconds into an arm whose gate had already passed, which
+ * left that arm with zero probes and no usable LiveProbe evidence. Requiring
+ * consecutive clean observations means registration has settled rather than
+ * merely flickered into view once.
+ */
 export async function waitForLiveProbeService(
   brokerUrl,
   serviceId,
   expectedCommit,
   timeoutMs = 60_000,
-  { fetchImpl = fetch, pollMs = 500 } = {},
+  { fetchImpl = fetch, pollMs = 500, stableChecks = 3 } = {},
 ) {
   const url = `${brokerUrl.replace(/\/+$/, "")}/v1/services`;
   const deadline = Date.now() + timeoutMs;
   let lastError;
   let lastServices = [];
+  let consecutive = 0;
+  let matched;
   while (Date.now() < deadline) {
     try {
       const response = await fetchImpl(url, {
@@ -311,22 +323,30 @@ export async function waitForLiveProbeService(
       }
       const payload = await response.json();
       lastServices = Array.isArray(payload.services) ? payload.services : [];
-      const matched = lastServices.find(
+      const found = lastServices.find(
         (service) =>
           service.serviceId === serviceId &&
           (expectedCommit === undefined ||
             service.commitSha === expectedCommit),
       );
-      if (matched !== undefined) return matched;
+      if (found === undefined) {
+        consecutive = 0;
+      } else {
+        matched = found;
+        consecutive += 1;
+        if (consecutive >= stableChecks) return matched;
+      }
     } catch (error) {
       lastError = error;
+      consecutive = 0;
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, pollMs));
   }
   throw new Error(
     `LiveProbe service ${serviceId}` +
       (expectedCommit === undefined ? "" : ` at commit ${expectedCommit}`) +
-      ` did not re-register within ${timeoutMs}ms` +
+      ` did not stay registered for ${stableChecks} consecutive checks` +
+      ` within ${timeoutMs}ms` +
       ` (last services: ${lastServices
         .map(
           (service) =>

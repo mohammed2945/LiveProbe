@@ -862,7 +862,50 @@ test("LiveProbe arms wait for the exact runtime identity after broker reset", as
       },
     },
   );
-  assert.equal(calls, 2);
+  // Registration must be observed as settled, not merely seen once: one empty
+  // poll then three consecutive clean polls.
+  assert.equal(calls, 4);
+  assert.equal(service.commitSha, "commit-401");
+});
+
+test("LiveProbe readiness restarts its stability count when registration flickers", async () => {
+  // Campaign r10 lost an arm to a broker that answered the gate and then
+  // failed mid-arm. A registration that disappears has not settled, so the
+  // consecutive count must restart rather than carry forward.
+  const observations = [
+    ["recommendation"],
+    ["recommendation"],
+    [],
+    ["recommendation"],
+    ["recommendation"],
+    ["recommendation"],
+  ];
+  let calls = 0;
+  const service = await waitForLiveProbeService(
+    "http://broker.example",
+    "recommendation",
+    "commit-401",
+    1_000,
+    {
+      pollMs: 0,
+      fetchImpl: async () => {
+        const present = observations[calls] ?? ["recommendation"];
+        calls += 1;
+        return {
+          ok: true,
+          async json() {
+            return {
+              services: present.map((serviceId) => ({
+                serviceId,
+                commitSha: "commit-401",
+              })),
+            };
+          },
+        };
+      },
+    },
+  );
+  assert.equal(calls, 6);
   assert.equal(service.commitSha, "commit-401");
 });
 
