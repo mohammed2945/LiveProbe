@@ -238,6 +238,12 @@ test("runtime tripwire replays the failing recommendation route", async () => {
     /replayBaseUrl: "http:\/\/127\.0\.0\.1:8081"/u,
   );
   assert.match(
+    tripwire,
+    /liveprobe-praxis-runtime-tripwire:\$\{incident\}/u,
+  );
+  assert.match(tripwire, /"x-trace-id": identity\.traceId/u);
+  assert.doesNotMatch(tripwire, /randomUUID/u);
+  assert.match(
     campaign,
     /replayBaseUrl: "http:\/\/127\.0\.0\.1:8081"/u,
   );

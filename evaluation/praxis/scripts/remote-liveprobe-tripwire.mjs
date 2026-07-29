@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -94,8 +94,9 @@ async function waitFor(check, label, timeoutMs) {
 }
 
 function exactTraceIdentity(incident) {
-  const nonce = `${incident}:${randomUUID()}`;
-  const digest = createHash("sha256").update(nonce).digest("hex");
+  const digest = createHash("sha256")
+    .update(`liveprobe-praxis-runtime-tripwire:${incident}`)
+    .digest("hex");
   return {
     traceId: digest.slice(0, 32),
     spanId: digest.slice(32, 48),
@@ -244,6 +245,7 @@ export async function runRemoteTripwire(options) {
       {
         headers: {
           traceparent: `00-${identity.traceId}-${identity.spanId}-01`,
+          "x-trace-id": identity.traceId,
           "x-liveprobe-replay-id": identity.traceId,
         },
         signal: AbortSignal.timeout(options.timeoutMs),
@@ -251,25 +253,29 @@ export async function runRemoteTripwire(options) {
     );
     await response.arrayBuffer();
 
-    const snapshots = await waitFor(async () => {
-      const states = await Promise.all(
-        deployed.probes.map((item) =>
-          handlers.get_probe_data({
-            probe_id: item.probe.id,
-            wait_seconds: 0,
-          }),
-        ),
-      );
-      const matching = states.flatMap((state) =>
-        state.events.filter(
-          (event) =>
-            event.type === "snapshot" &&
-            event.correlation?.quality === "exact-execution" &&
-            event.correlation?.traceId === identity.traceId,
-        ),
-      );
-      return matching.length > 0 ? matching : false;
-    }, "correlated runtime snapshot", options.timeoutMs);
+    const snapshots = await waitFor(
+      async () => {
+        const states = await Promise.all(
+          deployed.probes.map((item) =>
+            handlers.get_probe_data({
+              probe_id: item.probe.id,
+              wait_seconds: 0,
+            }),
+          ),
+        );
+        const matching = states.flatMap((state) =>
+          state.events.filter(
+            (event) =>
+              event.type === "snapshot" &&
+              event.correlation?.quality === "exact-execution" &&
+              event.correlation?.traceId === identity.traceId,
+          ),
+        );
+        return matching.length > 0 ? matching : false;
+      },
+      `correlated runtime snapshot for trace ${identity.traceId}`,
+      options.timeoutMs,
+    );
 
     const collected = await handlers.collect_investigation_evidence({
       repository_root: options.sourceRoot,
