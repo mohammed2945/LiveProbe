@@ -248,7 +248,8 @@ export const OBSERVABILITY_TOOLS = [
         },
         recipe_id: {
           type: "string",
-          description: "Pre-registered recipe ID, for example browse-product.",
+          description:
+            "Pre-registered recipe ID, for example astronomy-recommendations.",
         },
       },
     },

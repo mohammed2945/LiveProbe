@@ -204,9 +204,14 @@ test("Python bootstrap coexists with OpenTelemetry auto-instrumentation", async 
 });
 
 test("runtime tripwire replays the failing recommendation route", async () => {
-  const [tripwire, compatibility] = await Promise.all([
+  const [tripwire, campaign, collector, compatibility] = await Promise.all([
     readFile(
       resolve(evaluationRoot, "scripts/remote-liveprobe-tripwire.mjs"),
+      "utf8",
+    ),
+    readFile(resolve(evaluationRoot, "src/campaign.mjs"), "utf8"),
+    readFile(
+      resolve(evaluationRoot, "python/collect_snapshot.py"),
       "utf8",
     ),
     json(resolve(evaluationRoot, "liveprobe-compatibility.json")),
@@ -228,6 +233,30 @@ test("runtime tripwire replays the failing recommendation route", async () => {
     /incidentCompatibility\.criterion\.expected_type \?\? "mapping"/u,
   );
   assert.match(tripwire, /hit_limit: 100/u);
+  assert.match(
+    tripwire,
+    /replayBaseUrl: "http:\/\/127\.0\.0\.1:8081"/u,
+  );
+  assert.match(
+    campaign,
+    /replayBaseUrl: "http:\/\/127\.0\.0\.1:8081"/u,
+  );
+  assert.match(
+    collector,
+    /"--replay-base-url", default="http:\/\/localhost:8081"/u,
+  );
+  assert.match(
+    collector,
+    /"recipe_id": "astronomy-recommendations"/u,
+  );
+  assert.match(
+    collector,
+    /"path": "\/api\/recommendations\?productIds=0PUK6V6EV0"/u,
+  );
+  assert.doesNotMatch(
+    collector,
+    /"path": "\/api\/products\//u,
+  );
 });
 
 test("snapshot collector accepts timezone-qualified ClickHouse windows", async () => {

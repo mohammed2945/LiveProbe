@@ -54,7 +54,7 @@ function parseArgs(argv) {
     brokerUrl: "http://127.0.0.1:7070",
     prometheusUrl: "http://127.0.0.1:8080",
     clickhouseUrl: "http://127.0.0.1:8080/clickhouse",
-    replayBaseUrl: "http://127.0.0.1:8080",
+    replayBaseUrl: "http://127.0.0.1:8081",
     alertTimeoutMs: 600_000,
     execute: false,
     allowPaidModel: false,
@@ -123,7 +123,7 @@ The default is a no-mutation plan. Real execution requires both --execute and
   --broker-url=http://127.0.0.1:7070
   --prometheus-url=http://127.0.0.1:8080
   --clickhouse-url=http://127.0.0.1:8080/clickhouse
-  --replay-base-url=http://127.0.0.1:8080
+  --replay-base-url=http://127.0.0.1:8081
   --alert-timeout-ms=600000
   --execute --allow-paid-model`;
 }

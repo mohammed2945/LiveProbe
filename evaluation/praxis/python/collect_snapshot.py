@@ -44,7 +44,7 @@ def parse_args():
     parser.add_argument("--span-limit", type=int, default=5000)
     parser.add_argument("--log-limit-per-service", type=int, default=500)
     parser.add_argument(
-        "--replay-base-url", default="http://localhost:8080"
+        "--replay-base-url", default="http://localhost:8081"
     )
     return parser.parse_args()
 
@@ -501,12 +501,12 @@ def main():
         "topology": topology(traces, resources),
         "replay_recipes": [
             {
-                "recipe_id": "astronomy-browse-product",
-                "description": "Replay the Astronomy Shop browse-product request",
+                "recipe_id": "astronomy-recommendations",
+                "description": "Replay the failing Astronomy Shop recommendation request",
                 "expected_root_service": "frontend",
                 "enabled": True,
                 "method": "GET",
-                "path": "/api/products/0PUK6V6EV0",
+                "path": "/api/recommendations?productIds=0PUK6V6EV0",
                 "base_url": args.replay_base_url,
             }
         ],

@@ -118,6 +118,18 @@ make praxis-eval-plan \
   PRAXIS_ARTIFACT_ROOT=/path/from/fetch-artifact
 ```
 
+Keep observability ingress and the application replay endpoint on separate
+local ports. Port `8080` serves Prometheus/ClickHouse through ingress; port
+`8081` must target Astronomy Shop directly:
+
+```sh
+kubectl -n ingress-nginx port-forward \
+  service/ingress-nginx-controller 8080:80
+
+kubectl -n otel-demo port-forward \
+  service/frontend-proxy 8081:8080
+```
+
 Use a fresh, empty results directory for the paid smoke:
 
 ```sh

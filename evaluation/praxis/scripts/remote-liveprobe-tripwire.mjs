@@ -20,7 +20,7 @@ function parseArgs(argv) {
     sourceRoot: undefined,
     compatibilityReport: undefined,
     brokerUrl: "http://127.0.0.1:7070",
-    replayBaseUrl: "http://127.0.0.1:8080",
+    replayBaseUrl: "http://127.0.0.1:8081",
     replayPath: "/api/recommendations?productIds=0PUK6V6EV0",
     output: undefined,
     python: "python3.12",
@@ -61,7 +61,7 @@ Required:
 Runtime:
   --incident=401
   --broker-url=http://127.0.0.1:7070
-  --replay-base-url=http://127.0.0.1:8080
+  --replay-base-url=http://127.0.0.1:8081
   --replay-path=/api/recommendations?productIds=0PUK6V6EV0
   --python=python3.12
   --timeout-ms=120000`;
