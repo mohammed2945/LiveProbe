@@ -3,10 +3,33 @@
 Last updated: 2026-07-29  
 Repository: `/Users/veer/Documents/StartUp/hackathon_stanford/LightProbe`  
 Branch: `praxis-eval`  
-Pushed HEAD: `80f1263484e1a64fbf0c7a8ab694e6660961a58a`  
-Status: the final four-arm smoke evaluation has **not** produced a valid
-leaderboard yet. A tested local fix is uncommitted and must be pushed before
-the next clean campaign.
+Pushed HEAD: `9137c31` (MCP approval + broker readiness fix)
+
+## STATUS: RESUME COMPLETE — campaign r10 executed
+
+The procedure below was carried out. Outcome, in brief:
+
+- The uncommitted fix was already committed and pushed as `9137c31`; contracts
+  pass 33/1 on both the laptop and the VM.
+- The one-call MCP approval diagnostic **passed**: `get_trace` completed,
+  `trace.status = ERROR`, one ledger record, zero cancellations, 11,029
+  weighted tokens against a 15,000 cap.
+- The interrupted r9 fault was removed and rolling alerts cleared.
+- Campaign `r10` completed all four arms with zero failures, zero timeouts, and
+  every arm under the 50,000 cap. Zero MCP cancellations.
+- **All four arms scored `Combined@1 = 0`.** The scorer was deliberately left
+  unchanged. Three arms were substantively correct; `Graph + LiveProbe` is
+  contaminated (its single LiveProbe call failed, zero probes deployed); PRAXIS
+  was substantively wrong.
+- Three defects remain open and are documented in `results/README.md`: the
+  scorer/guidance granularity mismatch, broker readiness not being maintained
+  *during* an arm, and incident 401 being non-discriminating because its logs
+  contain the full stack trace.
+
+Full analysis, per-arm inspection, token/time tables and overhead accounting:
+`evaluation/praxis/results/README.md`.
+
+The historical procedure and context are retained below.
 
 Read this document completely before running commands. It is intended to be
 self-contained for an agent with no prior conversation context.
