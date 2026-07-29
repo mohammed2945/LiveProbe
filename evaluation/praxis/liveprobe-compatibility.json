@@ -4,11 +4,11 @@
   "source_file": "recommendation_server.py",
   "criterion": {
     "function": "get_product_list",
-    "return_name": "prod_list",
-    "watch_path": "prod_list",
+    "assignment_name": "cat_response",
+    "watch_path": "cat_response",
     "service_id": "recommendation",
     "failure_class": "type_shape",
-    "expected_type": "sequence",
+    "expected_type": "mapping",
     "probe_budget": 5
   },
   "negative_controls": [

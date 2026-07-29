@@ -204,10 +204,13 @@ test("Python bootstrap coexists with OpenTelemetry auto-instrumentation", async 
 });
 
 test("runtime tripwire replays the failing recommendation route", async () => {
-  const tripwire = await readFile(
-    resolve(evaluationRoot, "scripts/remote-liveprobe-tripwire.mjs"),
-    "utf8",
-  );
+  const [tripwire, compatibility] = await Promise.all([
+    readFile(
+      resolve(evaluationRoot, "scripts/remote-liveprobe-tripwire.mjs"),
+      "utf8",
+    ),
+    json(resolve(evaluationRoot, "liveprobe-compatibility.json")),
+  ]);
   assert.match(
     tripwire,
     /replayPath: "\/api\/recommendations\?productIds=0PUK6V6EV0"/u,
@@ -215,6 +218,14 @@ test("runtime tripwire replays the failing recommendation route", async () => {
   assert.doesNotMatch(
     tripwire,
     /replayPath: "\/api\/products\//u,
+  );
+  assert.equal(compatibility.criterion.assignment_name, "cat_response");
+  assert.equal(compatibility.criterion.watch_path, "cat_response");
+  assert.equal(compatibility.criterion.expected_type, "mapping");
+  assert.equal(compatibility.criterion.return_name, undefined);
+  assert.match(
+    tripwire,
+    /incidentCompatibility\.criterion\.expected_type \?\? "mapping"/u,
   );
 });
 

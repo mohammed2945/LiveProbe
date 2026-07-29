@@ -171,8 +171,10 @@ export async function runRemoteTripwire(options) {
       line: incidentCompatibility.criterion.line,
       watch_path: incidentCompatibility.criterion.watch_path,
       symptom: "runtime compatibility tripwire for correlated PRAXIS request",
-      failure_class: "type_shape",
-      expected_type: "sequence",
+      failure_class:
+        incidentCompatibility.criterion.failure_class ?? "type_shape",
+      expected_type:
+        incidentCompatibility.criterion.expected_type ?? "mapping",
       probe_budget: 5,
       source_roots: [],
       ownership_map: [],

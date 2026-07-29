@@ -62,7 +62,11 @@ def git(root: Path, *arguments: str) -> str:
 
 
 def criterion_line(
-    source: str, function_name: str, return_name: str
+    source: str,
+    function_name: str,
+    *,
+    return_name: str | None = None,
+    assignment_name: str | None = None,
 ) -> int:
     tree = ast.parse(source)
     functions = [
@@ -75,6 +79,32 @@ def criterion_line(
         raise AssertionError(
             f"expected one {function_name} function, found {len(functions)}"
         )
+    if (return_name is None) == (assignment_name is None):
+        raise AssertionError(
+            "criterion must select exactly one return or assignment anchor"
+        )
+    if assignment_name is not None:
+        assignments = [
+            node
+            for node in ast.walk(functions[0])
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == assignment_name
+                for target in (
+                    list(node.targets)
+                    if isinstance(node, ast.Assign)
+                    else [node.target]
+                )
+            )
+        ]
+        if not assignments:
+            raise AssertionError(
+                f"expected an assignment to {assignment_name}"
+            )
+        # The recommendation source has cache-enabled and normal-flow calls.
+        # The last assignment is the normal path exercised by incident 401.
+        return max(int(node.lineno) for node in assignments)
     returns = [
         node
         for node in ast.walk(functions[0])
@@ -103,6 +133,8 @@ def is_response_get(target: str) -> bool:
 
 
 def encoded_value(watch_path: str) -> dict[str, Any]:
+    if watch_path == "cat_response":
+        return {"t": "obj", "c": {}}
     if watch_path.endswith(
         ("ids", "products", "product_ids", "prod_list", "filtered_products")
     ):
@@ -246,7 +278,8 @@ def inspect_incident(
     line = criterion_line(
         source,
         str(criterion["function"]),
-        str(criterion["return_name"]),
+        return_name=criterion.get("return_name"),
+        assignment_name=criterion.get("assignment_name"),
     )
     engine = InvestigationEngine(str(root), str(cache_path))
     view = engine.start(
@@ -319,6 +352,8 @@ def inspect_incident(
             "file": contract["source_file"],
             "line": line,
             "watch_path": criterion["watch_path"],
+            "failure_class": criterion["failure_class"],
+            "expected_type": criterion["expected_type"],
         },
         "graph_nodes": graph_nodes,
         "probe_sites": probe_sites,
