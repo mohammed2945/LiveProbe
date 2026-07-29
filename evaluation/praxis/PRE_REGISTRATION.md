@@ -196,6 +196,32 @@ A **log-richness** covariate is computed per incident before running — whether
 the snapshot logs already name the faulty file and line — and results are
 broken out by it. This is measured, not selected on.
 
+## Budget decisions, taken mid-r11 and recorded here
+
+PRAXIS failed on every incident with codex's `shared rollout token budget
+exhausted`. Cause: `fair_praxis_adapter.py:477` hands each of PRAXIS's ~5
+sequential calls the *remainder* of one 50,000 budget, while every coding arm
+is a single `codex exec` that gets the whole 50,000. Measured across 401, 403
+and 404, calls 1–2 complete on 17–23k and call 3 then exhausts the 27–33k
+remainder. In r10 PRAXIS finished five calls in 40,034 total; in r11 it reaches
+real code context and costs more.
+
+Decision (owner): **leave the cap at 50,000 for PRAXIS, mark it
+budget-exceeded, do not re-run it.** PRAXIS is a sanity check, not the
+comparison of interest. Its runs are excluded from leaderboard accuracy and
+reported as overhead, per the existing rule for invalid setup attempts.
+
+The comparison of interest is `normal_coding_sre` vs `raw_liveprobe` vs
+`graph_liveprobe`. The owner has approved raising the budget for **those three
+arms only** in a follow-up wave. Motivation is on record before that wave runs:
+no r11 arm was truncated (maxima 66.0%, 77.8% and 95.3% of cap), but
+`raw_liveprobe` at 95.3% was receiving codex budget-pressure reminders at 1/3,
+1/6 and 1/15 remaining, which can make an agent stop early. Raising the cap
+removes that pressure; it does not by itself create a gain.
+
+r11 itself remains a uniform 50,000 study for all arms. Any higher-budget wave
+is reported separately and never merged into r11's tables.
+
 ## What r11 cannot support
 
 n is still small. Single-seed results are anecdotes; any claim of a multiplier
