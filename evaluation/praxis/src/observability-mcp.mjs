@@ -40,7 +40,7 @@ const paging = {
   },
 };
 
-export const OBSERVABILITY_TOOLS = [
+const OBSERVABILITY_TOOL_DEFINITIONS = [
   {
     name: "get_incident_bootstrap",
     description:
@@ -265,6 +265,28 @@ export const OBSERVABILITY_TOOLS = [
     },
   },
 ];
+
+const readOnlyAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+export const OBSERVABILITY_TOOLS = OBSERVABILITY_TOOL_DEFINITIONS.map(
+  (tool) => ({
+    ...tool,
+    annotations:
+      tool.name === "replay_incident"
+        ? {
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
+          }
+        : readOnlyAnnotations,
+  }),
+);
 
 function parseArgs(argv) {
   const result = {};

@@ -290,6 +290,53 @@ async function waitForHttp(url, timeoutMs = 120_000) {
   );
 }
 
+export async function waitForLiveProbeService(
+  brokerUrl,
+  serviceId,
+  expectedCommit,
+  timeoutMs = 60_000,
+  { fetchImpl = fetch, pollMs = 500 } = {},
+) {
+  const url = `${brokerUrl.replace(/\/+$/, "")}/v1/services`;
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  let lastServices = [];
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetchImpl(url, {
+        signal: AbortSignal.timeout(Math.min(5_000, timeoutMs)),
+      });
+      if (!response.ok) {
+        throw new Error(`LiveProbe services returned HTTP ${response.status}`);
+      }
+      const payload = await response.json();
+      lastServices = Array.isArray(payload.services) ? payload.services : [];
+      const matched = lastServices.find(
+        (service) =>
+          service.serviceId === serviceId &&
+          (expectedCommit === undefined ||
+            service.commitSha === expectedCommit),
+      );
+      if (matched !== undefined) return matched;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, pollMs));
+  }
+  throw new Error(
+    `LiveProbe service ${serviceId}` +
+      (expectedCommit === undefined ? "" : ` at commit ${expectedCommit}`) +
+      ` did not re-register within ${timeoutMs}ms` +
+      ` (last services: ${lastServices
+        .map(
+          (service) =>
+            `${service.serviceId}@${service.commitSha ?? "unknown"}`,
+        )
+        .join(", ") || "none"})` +
+      (lastError === undefined ? "" : `: ${String(lastError)}`),
+  );
+}
+
 async function resetBroker(options, logPath) {
   await run(
     "kubectl",
@@ -1116,6 +1163,11 @@ export async function runCampaign(options) {
           try {
             if (usesLiveProbe) {
               await resetBroker(options, runLog);
+              await waitForLiveProbeService(
+                options.brokerUrl,
+                state.runtime_tripwire.service_id,
+                metadata.git_commit,
+              );
             }
             result =
               arm === "praxis"

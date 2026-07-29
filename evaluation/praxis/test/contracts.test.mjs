@@ -26,9 +26,11 @@ import {
 } from "../src/core.mjs";
 import {
   deterministicShuffle,
+  waitForLiveProbeService,
   usageFromLedger,
 } from "../src/campaign.mjs";
 import {
+  mcpConfigArgs,
   rolloutBudgetConfigArgs,
   usageFromEvents,
 } from "../src/agent-runner.mjs";
@@ -549,6 +551,12 @@ test("observability MCP exposes the immutable tool contract", async () => {
     replayTool.inputSchema.properties.prepared_replay_id.type,
     "string",
   );
+  assert.equal(replayTool.annotations.readOnlyHint, false);
+  assert.ok(
+    OBSERVABILITY_TOOLS.filter(({ name }) => name !== "replay_incident").every(
+      ({ annotations }) => annotations.readOnlyHint === true,
+    ),
+  );
   const server = rpcProcess(process.execPath, [
     resolve(evaluationRoot, "src/observability-mcp.mjs"),
     "--snapshot",
@@ -796,6 +804,66 @@ test("Codex arms receive a preemptive shared rollout budget", () => {
     () => rolloutBudgetConfigArgs(0),
     /tokenBudget must be an integer of at least 4/,
   );
+});
+
+test("Codex MCP servers are required and pre-approved for isolated eval calls", () => {
+  assert.deepEqual(
+    mcpConfigArgs([
+      {
+        name: "observability",
+        command: "/usr/local/bin/node",
+        args: ["/workspace/observability-mcp.mjs"],
+      },
+    ]),
+    [
+      "--config",
+      'mcp_servers.observability.command="/usr/local/bin/node"',
+      "--config",
+      'mcp_servers.observability.args=["/workspace/observability-mcp.mjs"]',
+      "--config",
+      "mcp_servers.observability.startup_timeout_sec=10",
+      "--config",
+      "mcp_servers.observability.tool_timeout_sec=60",
+      "--config",
+      "mcp_servers.observability.required=true",
+      "--config",
+      'mcp_servers.observability.default_tools_approval_mode="approve"',
+    ],
+  );
+});
+
+test("LiveProbe arms wait for the exact runtime identity after broker reset", async () => {
+  let calls = 0;
+  const service = await waitForLiveProbeService(
+    "http://broker.example",
+    "recommendation",
+    "commit-401",
+    1_000,
+    {
+      pollMs: 0,
+      fetchImpl: async () => {
+        calls += 1;
+        return {
+          ok: true,
+          async json() {
+            return {
+              services:
+                calls === 1
+                  ? []
+                  : [
+                      {
+                        serviceId: "recommendation",
+                        commitSha: "commit-401",
+                      },
+                    ],
+            };
+          },
+        };
+      },
+    },
+  );
+  assert.equal(calls, 2);
+  assert.equal(service.commitSha, "commit-401");
 });
 
 test("failed campaign arms recover exact usage from their ledger", async () => {

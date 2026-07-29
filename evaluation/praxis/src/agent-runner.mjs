@@ -10,7 +10,7 @@ function tomlString(value) {
   return JSON.stringify(String(value));
 }
 
-function mcpConfigArgs(servers) {
+export function mcpConfigArgs(servers) {
   return servers.flatMap((server) => {
     const prefix = `mcp_servers.${server.name}`;
     const args = [
@@ -22,6 +22,10 @@ function mcpConfigArgs(servers) {
       `${prefix}.startup_timeout_sec=${server.startupTimeoutSec ?? 10}`,
       "--config",
       `${prefix}.tool_timeout_sec=${server.toolTimeoutSec ?? 60}`,
+      "--config",
+      `${prefix}.required=true`,
+      "--config",
+      `${prefix}.default_tools_approval_mode="approve"`,
     ];
     if (server.env !== undefined) {
       const entries = Object.entries(server.env).map(
