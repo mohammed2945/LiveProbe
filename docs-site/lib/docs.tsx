@@ -351,13 +351,38 @@ export const docs: DocPage[] = [
     ],
     content: (
       <>
+        <p>
+          LiveProbe lets an AI client, connected over MCP (the Model Context
+          Protocol), attach short-lived, read-only probes to a service you
+          already have running in Node.js, Python, the JVM, Rust, or C++ —
+          then read back real captured values, log lines, execution counts,
+          or metrics from it. Nothing is redeployed and no probe ever calls,
+          assigns, or otherwise executes your code. There is no separate
+          LiveProbe dashboard: every action below, from creating a project to
+          reading evidence back, is one of the tools in the{" "}
+          <a href="/docs/tools">MCP tool reference</a>, run by asking your
+          connected AI client to call it. See{" "}
+          <a href="/docs/architecture">How LiveProbe works</a> for the full
+          request path and what a probe can and cannot do.
+        </p>
         <h2 id="before-you-start">Before you start</h2>
         <p>
-          You need an invitation to a LiveProbe Clerk workspace, an MCP client
-          that supports remote OAuth servers, and access to the deployment
-          configuration for the service you want to observe. Runtime agents
-          support Node.js 20+, Python 3.12+, and Java 17+. Rust and C++ use the
-          host-level eBPF agent instead, with no library added to your build.
+          You need a Clerk account with an active organization. Signing in
+          through the hosted MCP connection below handles this: sign up or
+          sign in when prompted, and create an organization there if you
+          don&apos;t already belong to one. If your team already has a
+          LiveProbe workspace, join that organization instead of creating a
+          new one.
+        </p>
+        <p>
+          You also need an MCP client that supports remote servers over
+          Streamable HTTP with OAuth — this guide uses Cursor as the worked
+          example, see <a href="/docs/mcp-setup">Connect MCP clients</a> for
+          other clients and the local stdio fallback — and access to the
+          deployment configuration for the service you want to observe.
+          Runtime agents support Node.js 20+, Python 3.12+, and Java 17+.
+          Rust and C++ use the host-level eBPF agent instead, with no library
+          added to your build.
         </p>
         <p>
           Deploying into Kubernetes rather than onto a host or VM? Follow{" "}
@@ -380,9 +405,9 @@ export const docs: DocPage[] = [
           </p>
           <CodeBlock code={hostedMcpConfig} language="json" />
           <p>
-            Choose <strong>Login</strong>, sign in through Clerk, and select the
-            workspace you were invited to. No shared API key or local npm
-            package is needed for hosted MCP access.
+            Choose <strong>Login</strong>, sign in through Clerk, and select or
+            create an organization. No shared API key or local npm package is
+            needed for hosted MCP access.
           </p>
         </QuickstartStep>
 
@@ -424,8 +449,10 @@ labeled "Acme API production".`}
         <QuickstartStep id="start-agent" title="Start one runtime agent">
           <p>
             Configure the same project, environment, service, credential, and
-            deployed commit in the application. The language guides contain
-            exact startup code.
+            deployed commit in the application. Follow the exact startup
+            steps for your runtime: <a href="/docs/node">Node.js</a>,{" "}
+            <a href="/docs/python">Python</a>, <a href="/docs/jvm">JVM</a>,{" "}
+            <a href="/docs/rust">Rust</a>, or <a href="/docs/cpp">C++</a>.
           </p>
           <CodeBlock code={commonRuntimeEnv} language="dotenv" />
           <p>
@@ -449,6 +476,12 @@ Do not create a probe yet.`}
             list means the agent has not successfully heartbeated in the
             selected project and environment.
           </p>
+          <p>
+            <code>get_safety_overview</code> reports whether LiveProbe&apos;s
+            own instrumentation is running within its limits for that service
+            — see <a href="/docs/safety">Runtime safety</a> for what each
+            state means.
+          </p>
         </QuickstartStep>
       </>
     ),
@@ -460,6 +493,7 @@ Do not create a probe yet.`}
     description:
       "Understand the control plane, runtime data path, tenancy boundary, and what a probe can and cannot do.",
     headings: [
+      { id: "overview", label: "What LiveProbe is" },
       { id: "request-path", label: "Request path" },
       { id: "resource-model", label: "Resource model" },
       { id: "runtime-boundary", label: "Runtime boundary" },
@@ -467,6 +501,51 @@ Do not create a probe yet.`}
     ],
     content: (
       <>
+        <h2 id="overview">What LiveProbe is</h2>
+        <p>
+          LiveProbe is a live debugger built for AI coding agents. Instead of
+          reading a stack trace or grepping logs after the fact, an agent
+          asks LiveProbe to place a temporary, read-only{" "}
+          <strong>probe</strong> on a line of your running service and reports
+          back what actually happened there — not what the source suggests
+          should happen.
+        </p>
+        <p>
+          There is no separate LiveProbe dashboard. Every action — creating a
+          project, issuing a credential, placing a probe, reading its
+          evidence — is an MCP tool call your AI client makes on your behalf,
+          typically from a plain-language request like &ldquo;list services in
+          project acme.&rdquo; The full catalog is in the{" "}
+          <a href="/docs/tools">MCP tool reference</a>.
+        </p>
+        <Table
+          headers={["Probe type", "What it tells you"]}
+          rows={[
+            [
+              <code key="snapshot">snapshot</code>,
+              "The bounded values of locals, a watch expression, or several stack frames at that line, the next time it executes.",
+            ],
+            [
+              <code key="log">log</code>,
+              "A structured debug/info/warn/error line, emitted as LiveProbe telemetry rather than through the application's own logger.",
+            ],
+            [
+              <code key="counter">counter</code>,
+              "How many times that line executed, pre-aggregated in the runtime.",
+            ],
+            [
+              <code key="metric">metric</code>,
+              "Count, sum, min, max, and last for a numeric path or expression over time.",
+            ],
+          ]}
+        />
+        <p>
+          A probe is temporary by design: it carries a hit limit and a TTL,
+          and removing it uninstalls the instrumentation on the next agent
+          poll — see <a href="/docs/probe-workflow">Run a probe
+          investigation</a> for the full lifecycle.
+        </p>
+
         <h2 id="request-path">Request path</h2>
         <div className="architecture" aria-label="LiveProbe request path">
           <div className="architecture-node">
@@ -1005,10 +1084,21 @@ args: ["/run/liveprobe/loader.sock", "10001", "10001",
           The npm package is intended for local development and the shared-key
           break-glass path. It requires Node.js 20+.
         </p>
+        <Callout title="Operator path, not a user credential" warning>
+          <p>
+            The key below is the same shared break-glass admin credential
+            described in{" "}
+            <a href="/docs/security">Authentication and security</a> — it
+            should not be distributed to ordinary application teams. If
+            you&apos;re connecting as an application developer, use hosted
+            OAuth above; this path is for local development against a broker
+            you operate yourself, or for an operator recovering access.
+          </p>
+        </Callout>
         <CodeBlock
           language="shell"
           code={`LIVEPROBE_API_KEY="<operator-key>" \\
-npx -y @doomslayer2945/liveprobe-mcp@0.4.0 \\
+npx -y @doomslayer2945/liveprobe-mcp@0.4.1 \\
   --broker-url https://liveprobe.tryastrea.tech`}
         />
         <CodeBlock
@@ -1019,7 +1109,7 @@ npx -y @doomslayer2945/liveprobe-mcp@0.4.0 \\
       "command": "npx",
       "args": [
         "-y",
-        "@doomslayer2945/liveprobe-mcp@0.4.0",
+        "@doomslayer2945/liveprobe-mcp@0.4.1",
         "--broker-url",
         "https://liveprobe.tryastrea.tech"
       ],
@@ -1042,8 +1132,8 @@ npx -y @doomslayer2945/liveprobe-mcp@0.4.0 \\
             ],
             [
               <code key="2">organization_required</code>,
-              "Clerk session has no active workspace",
-              "Select the invited Clerk organization and reconnect",
+              "Clerk session has no active organization",
+              "Select or create a Clerk organization and reconnect",
             ],
             [
               <code key="3">clerk_session_pending</code>,
@@ -1481,8 +1571,10 @@ LIVEPROBE_APP_ROOT=services/payments`}
         <p>
           The Maven coordinates are{" "}
           <code>io.liveprobe:liveprobe-bridge:0.3.0</code>. The pilot publishes
-          to GitHub Packages, so Maven needs a GitHub token with{" "}
-          <code>read:packages</code> and repository access.
+          to GitHub Packages, which requires an authenticated request even for
+          a public package. The repository is public, so any GitHub account
+          works — you do not need to be added as a collaborator, only a token
+          scoped to <code>read:packages</code>.
         </p>
         <CodeBlock
           language="shell"
@@ -2313,6 +2405,10 @@ curl --fail https://liveprobe.tryastrea.tech/readyz`}
           headers={["Variable", "Purpose"]}
           rows={[
             [
+              <code key="0">LIVEPROBE_BROKER_URL</code>,
+              "Broker endpoint the agent polls and reports to",
+            ],
+            [
               <code key="1">LIVEPROBE_API_KEY</code>,
               "Scoped service credential",
             ],
@@ -2332,14 +2428,18 @@ curl --fail https://liveprobe.tryastrea.tech/readyz`}
               <code key="5">LIVEPROBE_ENVIRONMENT</code>,
               "Deployment environment scope",
             ],
+            [
+              <code key="6">LIVEPROBE_SERVICE_ID</code>,
+              "Stable identity for this independently deployed process",
+            ],
           ]}
         />
         <p>
-          Node and Python application code also receive the broker URL and
-          service ID. The exact names may be passed as SDK options; this guide
-          uses <code>LIVEPROBE_BROKER_URL</code> and{" "}
-          <code>LIVEPROBE_SERVICE_ID</code> consistently in deployment
-          configuration.
+          Node and Python read the exact names above — see{" "}
+          <a href="/docs/python">Python</a> and <a href="/docs/node">Node.js</a>{" "}
+          for the call site. The JVM bridge and native agent take the
+          equivalent broker and service values as CLI flags or JSON config
+          instead; see their pages.
         </p>
 
         <h2 id="node">Node-specific variables</h2>
