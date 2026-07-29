@@ -594,9 +594,21 @@ class CodexCLIBackend:
                     f"{self.weighted_tokens} > {self.token_budget}"
                 )
             if result.returncode != 0 or not answer_path.exists():
+                # `codex exec --json` writes its event stream, including error
+                # events, to stdout and often exits non-zero with an empty
+                # stderr. Reporting stderr alone then yields "Codex backend
+                # failed (1): " with no cause, which is what campaign r11
+                # incident 401 produced. Fall back to stdout, and say so when
+                # the process succeeded but wrote no answer.
+                detail = result.stderr.strip() or result.stdout.strip()
+                reason = (
+                    f"exit {result.returncode}"
+                    if result.returncode != 0
+                    else f"exit 0 but no answer written to {answer_path}"
+                )
                 raise RuntimeError(
-                    f"Codex backend failed ({result.returncode}): "
-                    f"{result.stderr[-2000:]}"
+                    f"Codex backend failed ({reason}): "
+                    f"{detail[-4000:] or '<no stderr or stdout captured>'}"
                 )
             return answer_path.read_text()
 
