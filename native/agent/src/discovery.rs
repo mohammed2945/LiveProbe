@@ -18,12 +18,63 @@ pub struct DiscoveredInstance {
     pub pid: u32,
     pub process_start_time: String,
     pub executable_path: String,
+    /// Observer-visible path used for all content reads. Never sent to the
+    /// broker: it is an artefact of where the agent runs, not of the target.
+    #[serde(skip)]
+    pub resolved_path: String,
     pub executable_device: String,
     pub executable_inode: String,
     pub build_id: String,
     pub architecture: String,
     pub cgroup: Option<String>,
     pub last_seen: String,
+}
+
+impl DiscoveredInstance {
+    /// Path to open when reading the target's executable *content*.
+    ///
+    /// `executable_path` is the *value* of the `/proc/<pid>/exe` symlink, which
+    /// is only meaningful inside the target's mount namespace. A containerised
+    /// target reports something like `/usr/local/bin/UserService`, which does not
+    /// exist for an observer on the host. The magic symlink itself resolves to
+    /// the correct inode from any mount namespace, so content reads must go
+    /// through it rather than through the reported string.
+    ///
+    /// It is also race-free: the kernel pins the inode the process actually
+    /// executed, so a binary replaced on disk between discovery and attach cannot
+    /// be silently substituted.
+    pub fn open_path(&self) -> &Path {
+        Path::new(&self.resolved_path)
+    }
+
+    /// Filesystem root of the target, used to resolve separate debug artefacts
+    /// that live beside the executable inside its own namespace.
+    pub fn root_path(&self) -> PathBuf {
+        self.open_path()
+            .parent()
+            .unwrap_or(Path::new("/proc"))
+            .join("root")
+    }
+
+    /// Directory containing the executable, as seen from the observer.
+    ///
+    /// `open_path().parent()` is `/proc/<pid>`, which is not where sibling debug
+    /// files live. This rebases the in-namespace directory under the target's
+    /// root instead.
+    pub fn debug_search_root(&self) -> PathBuf {
+        let directory = Path::new(&self.executable_path)
+            .parent()
+            .unwrap_or(Path::new("/"));
+        rebase_under_root(&self.root_path(), directory)
+    }
+}
+
+/// Join an absolute in-namespace path onto an observer-visible root.
+pub fn rebase_under_root(root: &Path, path: &Path) -> PathBuf {
+    match path.strip_prefix("/") {
+        Ok(relative) => root.join(relative),
+        Err(_) => root.join(path),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,7 +126,10 @@ pub fn discover_with_known(
             continue;
         };
         let process_dir = entry.path();
-        let exe = match fs::read_link(process_dir.join("exe")) {
+        // Read content through the magic symlink, which resolves across mount
+        // namespaces; `exe` below is only the target's own view of its path.
+        let resolved = process_dir.join("exe");
+        let exe = match fs::read_link(&resolved) {
             Ok(exe) => exe,
             Err(error) if process_disappeared(&error) => continue,
             Err(error) if permission_denied(&error) => {
@@ -169,7 +223,7 @@ pub fn discover_with_known(
                 continue;
             }
         };
-        let metadata = match fs::metadata(&exe) {
+        let metadata = match fs::metadata(&resolved) {
             Ok(metadata) => metadata,
             Err(error) if process_disappeared(&error) => continue,
             Err(error) if permission_denied(&error) => {
@@ -193,7 +247,7 @@ pub fn discover_with_known(
                 continue;
             }
         };
-        let build_id = match symbols::build_id(&exe) {
+        let build_id = match symbols::build_id(&resolved) {
             Ok(build_id) => build_id,
             Err(error)
                 if error
@@ -238,7 +292,7 @@ pub fn discover_with_known(
             ));
             continue;
         }
-        let architecture = match symbols::architecture(&exe) {
+        let architecture = match symbols::architecture(&resolved) {
             Ok(architecture) => architecture,
             Err(error)
                 if error
@@ -279,6 +333,7 @@ pub fn discover_with_known(
             pid,
             process_start_time: start_time,
             executable_path: exe.to_string_lossy().into_owned(),
+            resolved_path: resolved.to_string_lossy().into_owned(),
             executable_device: format!(
                 "{}:{}",
                 libc::major(metadata.dev()),
@@ -409,6 +464,7 @@ mod tests {
             pid,
             process_start_time: "42".into(),
             executable_path: "/opt/test".into(),
+            resolved_path: format!("/proc/{pid}/exe"),
             executable_device: "1:2".into(),
             executable_inode: "3".into(),
             build_id: "0123456789abcdef".into(),
@@ -417,6 +473,67 @@ mod tests {
             last_seen: "now".into(),
         }
     }
+    #[test]
+    fn content_is_read_through_the_proc_entry_not_the_reported_path() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let directory = root.path().join("4242");
+        fs::create_dir(&directory).unwrap();
+        symlink(&executable, directory.join("exe")).unwrap();
+        fs::write(directory.join("cgroup"), "0::/kubepods/pod-abc/container\n").unwrap();
+        fs::write(
+            directory.join("stat"),
+            "4242 (svc) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 99",
+        )
+        .unwrap();
+        let service = ServiceConfig {
+            service_id: "svc".into(),
+            language: NativeLanguage::Cpp,
+            executable_path: None,
+            cgroup_prefix: Some("/kubepods".into()),
+        };
+        let found = discover(root.path(), &[service], "now").unwrap();
+        assert_eq!(found.len(), 1);
+        // The reported path stays the target's own view, for the broker and the
+        // loader allowlist. The resolved path is what the agent actually opens.
+        assert_eq!(found[0].executable_path, executable.to_string_lossy());
+        assert_eq!(
+            found[0].open_path(),
+            directory.join("exe"),
+            "content reads must go through the proc entry so that a container \
+             target, whose executable path does not exist for the agent, is readable"
+        );
+        assert!(!found[0].build_id.is_empty());
+    }
+
+    #[test]
+    fn debug_artefacts_resolve_inside_the_target_root() {
+        let mut instance = known(77);
+        instance.resolved_path = "/proc/77/exe".into();
+        instance.executable_path = "/usr/local/bin/UserService".into();
+        assert_eq!(instance.root_path(), Path::new("/proc/77/root"));
+        // Siblings live next to the executable inside the container, not next
+        // to /proc/77/exe.
+        assert_eq!(
+            instance.debug_search_root(),
+            Path::new("/proc/77/root/usr/local/bin")
+        );
+    }
+
+    #[test]
+    fn rebasing_keeps_paths_under_the_given_root() {
+        assert_eq!(
+            rebase_under_root(Path::new("/proc/9/root"), Path::new("/usr/lib/debug")),
+            Path::new("/proc/9/root/usr/lib/debug")
+        );
+        assert_eq!(
+            rebase_under_root(Path::new("/proc/9/root"), Path::new("relative/dir")),
+            Path::new("/proc/9/root/relative/dir")
+        );
+    }
+
     #[test]
     fn parses_start_time_with_spaces_in_comm() {
         assert_eq!(

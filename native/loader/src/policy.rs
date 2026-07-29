@@ -15,10 +15,13 @@ impl LoaderPolicy {
             !allowed_targets.is_empty(),
             "loader target allowlist must not be empty"
         );
+        // Allowlist entries may name a path inside a container's mount namespace,
+        // which does not resolve here. Canonicalise what exists locally so host
+        // targets still tolerate symlinked paths, and keep the rest literal.
         let allowed_targets = allowed_targets
             .into_iter()
-            .map(fs::canonicalize)
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|target| fs::canonicalize(&target).unwrap_or(target))
+            .collect::<Vec<_>>();
         Ok(Self {
             allowed_targets,
             worker_uid,
@@ -57,17 +60,21 @@ impl LoaderPolicy {
             request.sample_every > 0,
             "local-policy-denied: invalid sampling plan"
         );
-        let target = fs::canonicalize(&request.target.executable_path)?;
+        // Ask the kernel what this process is actually running rather than
+        // trusting the path the agent sent. `/proc/<pid>/exe` opens the executed
+        // inode from any mount namespace, so a containerised target is readable
+        // here even though its own path does not exist in the loader's root.
+        let target = proc_exe_path(request.target.pid);
+        let in_namespace = fs::read_link(&target)?;
+        anyhow::ensure!(
+            in_namespace == PathBuf::from(&request.target.executable_path),
+            "target-instance-changed: proc executable changed"
+        );
         anyhow::ensure!(
             self.allowed_targets
                 .iter()
-                .any(|allowed| allowed == &target),
+                .any(|allowed| allowed == &in_namespace),
             "local-policy-denied: executable is not allowlisted"
-        );
-        let proc_exe = fs::canonicalize(format!("/proc/{}/exe", request.target.pid))?;
-        anyhow::ensure!(
-            proc_exe == target,
-            "target-instance-changed: proc executable changed"
         );
         let stat = fs::read_to_string(format!("/proc/{}/stat", request.target.pid))?;
         let start = liveprobe_proc_start_time(&stat)?;
@@ -99,6 +106,13 @@ impl LoaderPolicy {
         );
         Ok(())
     }
+}
+
+/// The kernel's magic symlink for a process's executable. Resolves to the
+/// executed inode regardless of which mount namespace the reader is in, and is
+/// race-free against the on-disk file being replaced after discovery.
+pub fn proc_exe_path(pid: u32) -> PathBuf {
+    PathBuf::from(format!("/proc/{pid}/exe"))
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {

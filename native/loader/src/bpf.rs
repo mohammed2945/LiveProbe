@@ -115,9 +115,13 @@ impl BpfManager {
                 ..Default::default()
             };
             let offset = usize::try_from(request.offset)?;
+            // Attach through `/proc/<pid>/exe`, not the target's own path string.
+            // uprobes register against an inode, and the magic symlink resolves
+            // to the right one even when the executable lives in a container's
+            // mount namespace that the loader cannot otherwise reach.
             Ok(program.attach_uprobe_with_opts(
                 request.target.pid as i32,
-                &request.target.executable_path,
+                crate::policy::proc_exe_path(request.target.pid),
                 offset,
                 opts,
             )?)

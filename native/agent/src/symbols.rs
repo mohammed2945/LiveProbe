@@ -48,8 +48,15 @@ pub fn has_embedded_dwarf(path: &Path) -> anyhow::Result<bool> {
     Ok(file.section_by_name(".debug_info").is_some())
 }
 
+/// Locate DWARF for `executable`.
+///
+/// `executable` is the path the agent opens, which for a containerised target is
+/// `/proc/<pid>/exe`. Its `parent()` is therefore `/proc/<pid>` and not where
+/// sibling debug files live, so the directory to search for GNU debuglink
+/// artefacts is passed separately as `executable_directory`.
 pub fn find_debug_artifact(
     executable: &Path,
+    executable_directory: &Path,
     symbol_dirs: &[PathBuf],
 ) -> anyhow::Result<Option<PathBuf>> {
     if has_embedded_dwarf(executable)? {
@@ -69,15 +76,8 @@ pub fn find_debug_artifact(
             "no-debug-info: invalid GNU debuglink filename"
         );
         for candidate in [
-            executable
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(name.as_ref()),
-            executable
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(".debug")
-                .join(name.as_ref()),
+            executable_directory.join(name.as_ref()),
+            executable_directory.join(".debug").join(name.as_ref()),
         ] {
             if candidate.is_file()
                 && debug_artifact_is_valid(&candidate, Some(crc), executable_build_id)?
@@ -147,11 +147,12 @@ fn gnu_debuglink_crc32(bytes: &[u8]) -> u32 {
 
 pub fn find_or_fetch_debug_artifact(
     executable: &Path,
+    executable_directory: &Path,
     symbol_dirs: &[PathBuf],
     debuginfod_url: Option<&str>,
     cache_directory: Option<&Path>,
 ) -> anyhow::Result<Option<PathBuf>> {
-    if let Some(local) = find_debug_artifact(executable, symbol_dirs)? {
+    if let Some(local) = find_debug_artifact(executable, executable_directory, symbol_dirs)? {
         return Ok(Some(local));
     }
     let (Some(base_url), Some(cache_directory), Some(id)) =
@@ -350,12 +351,15 @@ mod tests {
         );
 
         assert_eq!(
-            find_debug_artifact(&executable, &[]).unwrap(),
+            find_debug_artifact(&executable, executable.parent().unwrap(), &[]).unwrap(),
             Some(debug.clone())
         );
         let valid_debug = fs::read(&debug).unwrap();
         fs::write(&debug, [valid_debug.as_slice(), b"stale"].concat()).unwrap();
-        assert_eq!(find_debug_artifact(&executable, &[]).unwrap(), None);
+        assert_eq!(
+            find_debug_artifact(&executable, executable.parent().unwrap(), &[]).unwrap(),
+            None
+        );
 
         let id = build_id(&executable).unwrap().unwrap();
         let symbols = directory.path().join("symbols");
@@ -366,7 +370,7 @@ mod tests {
         fs::create_dir_all(fallback.parent().unwrap()).unwrap();
         fs::write(&fallback, valid_debug).unwrap();
         assert_eq!(
-            find_debug_artifact(&executable, &[symbols]).unwrap(),
+            find_debug_artifact(&executable, executable.parent().unwrap(), &[symbols]).unwrap(),
             Some(fallback)
         );
     }

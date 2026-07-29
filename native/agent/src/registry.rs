@@ -62,6 +62,7 @@ mod tests {
             pid,
             process_start_time: start.into(),
             executable_path: "/opt/svc".into(),
+            resolved_path: format!("/proc/{pid}/exe"),
             executable_device: "1:2".into(),
             executable_inode: "3".into(),
             build_id: "abcd".into(),

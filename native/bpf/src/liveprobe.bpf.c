@@ -6,6 +6,12 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
+// Stops the compiler reloading a value from map memory after it has been range
+// checked, which would discard the verifier's knowledge of its bounds.
+#ifndef barrier_var
+#define barrier_var(var) asm volatile("" : "+r"(var))
+#endif
+
 struct liveprobe_probe_state {
     __u32 generation;
     __u32 disabled;
@@ -28,21 +34,33 @@ static __always_inline void increment(void *map, __u64 cookie) {
     if (value) __sync_fetch_and_add(value, 1); else bpf_map_update_elem(map, &cookie, &one, BPF_NOEXIST);
 }
 
+// Selecting a pt_regs field by a runtime index invites clang to compute
+// `ctx + offset[reg]` and issue one load through that pointer. The verifier
+// refuses to dereference a ctx pointer carrying a computed offset
+// ("dereference of modified ctx ptr"), so each case must produce its own load
+// with the offset encoded in the instruction. Fencing the loaded value forces
+// that: the reads can no longer be folded into a single pointer-select.
+#define LIVEPROBE_CTX_FIELD(ctx, field) ({ \
+    unsigned long __value = (ctx)->field;  \
+    barrier_var(__value);                  \
+    __value;                               \
+})
+
 static __always_inline unsigned long register_value(struct pt_regs *ctx, __u8 reg) {
 #if defined(__TARGET_ARCH_x86)
     switch (reg) {
-    case 0: return ctx->rax; case 1: return ctx->rdx;
-    case 2: return ctx->rcx; case 3: return ctx->rbx;
-    case 4: return ctx->rsi; case 5: return ctx->rdi;
-    case 6: return ctx->rbp; case 7: return ctx->rsp;
-    case 8: return ctx->r8; case 9: return ctx->r9;
-    case 10: return ctx->r10; case 11: return ctx->r11;
-    case 12: return ctx->r12; case 13: return ctx->r13;
-    case 14: return ctx->r14; case 15: return ctx->r15;
+    case 0: return LIVEPROBE_CTX_FIELD(ctx, rax); case 1: return LIVEPROBE_CTX_FIELD(ctx, rdx);
+    case 2: return LIVEPROBE_CTX_FIELD(ctx, rcx); case 3: return LIVEPROBE_CTX_FIELD(ctx, rbx);
+    case 4: return LIVEPROBE_CTX_FIELD(ctx, rsi); case 5: return LIVEPROBE_CTX_FIELD(ctx, rdi);
+    case 6: return LIVEPROBE_CTX_FIELD(ctx, rbp); case 7: return LIVEPROBE_CTX_FIELD(ctx, rsp);
+    case 8: return LIVEPROBE_CTX_FIELD(ctx, r8); case 9: return LIVEPROBE_CTX_FIELD(ctx, r9);
+    case 10: return LIVEPROBE_CTX_FIELD(ctx, r10); case 11: return LIVEPROBE_CTX_FIELD(ctx, r11);
+    case 12: return LIVEPROBE_CTX_FIELD(ctx, r12); case 13: return LIVEPROBE_CTX_FIELD(ctx, r13);
+    case 14: return LIVEPROBE_CTX_FIELD(ctx, r14); case 15: return LIVEPROBE_CTX_FIELD(ctx, r15);
     default: return 0;
     }
 #else
-    return reg < 8 ? ctx->regs[reg] : 0;
+    return reg < 8 ? LIVEPROBE_CTX_FIELD(ctx, regs[reg]) : 0;
 #endif
 }
 
@@ -161,7 +179,11 @@ int liveprobe_snapshot(struct pt_regs *ctx) {
     event->generation = plan->generation; event->pid = pid; event->tid = (__u32)pid_tgid;
     event->timestamp_ns = bpf_ktime_get_ns(); event->cookie = cookie;
     unsigned long value = 0;
-#pragma unroll
+    // Deliberately not unrolled. Unrolling replicates the capture switch eight
+    // times, and the register pressure that creates makes clang spill a computed
+    // ctx pointer, which the verifier rejects with "dereference of modified ctx
+    // ptr". The bound is a compile-time constant, so the verifier walks the loop
+    // without difficulty on any kernel that supports bounded loops (5.3+).
     for (int index = 0; index < LIVEPROBE_MAX_OPS; index++) {
         if (index >= plan->operation_count) break;
         struct liveprobe_capture_op *op = &plan->operations[index];
@@ -173,11 +195,68 @@ int liveprobe_snapshot(struct pt_regs *ctx) {
             if (!add_user_offset(&value, op->offset)) { event->flags |= 8; continue; }
         }
         else if (op->code == LIVEPROBE_DEREFERENCE_FIXED) {
-            if (op->width != 1 && op->width != 2 && op->width != 4 && op->width != 8 && op->width != LIVEPROBE_SLOT_BYTES) { event->flags |= 2; continue; }
-            if (!valid_user_read(value, op->width)) { event->flags |= 8; continue; }
-            if (bpf_probe_read_user(event->values[destination], op->width, (void *)value)) { event->flags |= 4; continue; }
-            event->widths[destination] = op->width;
-            if (op->width <= sizeof(value)) __builtin_memcpy(&value, event->values[destination], sizeof(value));
+            // Copy the width out of the map value before validating it. Reading
+            // op->width again at the call site lets the compiler reload it from
+            // map memory, and the verifier then treats it as an unconstrained
+            // __u8 (0-255) regardless of the checks above.
+            __u32 width = op->width;
+            barrier_var(width);
+            if (!valid_user_read(value, width)) { event->flags |= 8; continue; }
+            // Read with a compile-time constant size per approved width. A
+            // variable size cannot be verified here: the verifier tracks ranges
+            // rather than sets, so it learns nothing from the != chain that used
+            // to guard this, and clang sinks the reload of op->width past any
+            // explicit bound we add. Linux 6.17 rejects the result with
+            // "invalid access to memory, mem_size=552 off=488 size=255".
+            // Constant sizes make the bound trivial and enforce the approved
+            // width set in the same switch.
+            // Each arm reads into a differently typed local. Reading straight
+            // into event->values[destination] with only the size differing lets
+            // clang tail-merge the arms back into one call with a variable size
+            // register, which reintroduces the very thing this switch exists to
+            // avoid. Distinct destinations keep the arms structurally different.
+            // Each scratch local is scoped to its own arm so their live ranges do
+            // not overlap. Declaring all five together costs 79 bytes of stack in
+            // every one of the eight unrolled iterations, and the resulting
+            // register pressure makes clang spill and reload ctx, which the
+            // verifier then rejects with "dereference of modified ctx ptr".
+            long failed;
+            switch (width) {
+                case 1: {
+                    __u8 read;
+                    failed = bpf_probe_read_user(&read, sizeof(read), (void *)value);
+                    if (!failed) __builtin_memcpy(event->values[destination], &read, sizeof(read));
+                    break;
+                }
+                case 2: {
+                    __u16 read;
+                    failed = bpf_probe_read_user(&read, sizeof(read), (void *)value);
+                    if (!failed) __builtin_memcpy(event->values[destination], &read, sizeof(read));
+                    break;
+                }
+                case 4: {
+                    __u32 read;
+                    failed = bpf_probe_read_user(&read, sizeof(read), (void *)value);
+                    if (!failed) __builtin_memcpy(event->values[destination], &read, sizeof(read));
+                    break;
+                }
+                case 8: {
+                    __u64 read;
+                    failed = bpf_probe_read_user(&read, sizeof(read), (void *)value);
+                    if (!failed) __builtin_memcpy(event->values[destination], &read, sizeof(read));
+                    break;
+                }
+                case LIVEPROBE_SLOT_BYTES: {
+                    __u8 read[LIVEPROBE_SLOT_BYTES];
+                    failed = bpf_probe_read_user(read, sizeof(read), (void *)value);
+                    if (!failed) __builtin_memcpy(event->values[destination], read, sizeof(read));
+                    break;
+                }
+                default: event->flags |= 2; continue;
+            }
+            if (failed) { event->flags |= 4; continue; }
+            event->widths[destination] = width;
+            if (width <= sizeof(value)) __builtin_memcpy(&value, event->values[destination], sizeof(value));
         } else if (op->code == LIVEPROBE_READ_PIECE) {
             event->flags |= 8;
             continue;

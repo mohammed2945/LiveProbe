@@ -138,10 +138,7 @@ pub fn plan_probe(
         planned.push(PlannedSite {
             cookie: cookie(&probe.id, &site_id, &instance.build_id),
             generation: probe.version as u32,
-            offset: symbols::executable_file_offset(
-                &Path::new(&instance.executable_path),
-                site.address,
-            )?,
+            offset: symbols::executable_file_offset(instance.open_path(), site.address)?,
             probe: probe.clone(),
             site_id,
             operations,
@@ -428,6 +425,7 @@ mod tests {
             pid,
             process_start_time: start.into(),
             executable_path: "/opt/svc".into(),
+            resolved_path: format!("/proc/{pid}/exe"),
             executable_device: "1:2".into(),
             executable_inode: "3".into(),
             build_id: "same-build".into(),
