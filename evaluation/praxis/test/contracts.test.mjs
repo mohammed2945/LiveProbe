@@ -352,9 +352,11 @@ test("runtime tripwire replays the failing recommendation route", async () => {
   assert.match(tripwire, /"x-trace-id": identity\.traceId/u);
   assert.doesNotMatch(tripwire, /randomUUID/u);
   assert.match(tripwire, /Date\.parse\(item\.lastSeen\) >= heartbeatNotBefore/u);
-  assert.match(tripwire, /response\.status >= 500/u);
   assert.match(tripwire, /readyRecommendationEndpointPods/u);
   assert.match(tripwire, /snapshotServiceInstances/u);
+  assert.match(tripwire, /response\.c\?\.products\?\.t === "arr"/u);
+  assert.match(tripwire, /response\.c\.products_list === undefined/u);
+  assert.match(tripwire, /faultShapeSnapshots/u);
   assert.match(
     campaign,
     /replayBaseUrl: "http:\/\/127\.0\.0\.1:8081"/u,

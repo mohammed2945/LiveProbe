@@ -136,6 +136,15 @@ function exactTraceIdentity(incident) {
   };
 }
 
+function isIncident401ShapeEvidence(snapshot) {
+  const response = snapshot.watches?.cat_response;
+  return (
+    response?.t === "obj" &&
+    response.c?.products?.t === "arr" &&
+    response.c.products_list === undefined
+  );
+}
+
 async function removeProbes(handlers, probeIds) {
   for (const probeId of probeIds) {
     await handlers.remove_probe({ probe_id: probeId }).catch(() => undefined);
@@ -290,15 +299,6 @@ export async function runRemoteTripwire(options) {
       },
     );
     await response.arrayBuffer();
-    assert(
-      response.status >= 500,
-      "registered replay did not exercise the incident-401 failure",
-      {
-        status: response.status,
-        traceId: identity.traceId,
-        endpointPods: expectedServiceInstances,
-      },
-    );
 
     const snapshots = await waitFor(
       async () => {
@@ -337,6 +337,12 @@ export async function runRemoteTripwire(options) {
         ),
       "correlated snapshot came from a pod outside the ready service route",
       { expectedServiceInstances, snapshotServiceInstances },
+    );
+    const faultShapeSnapshots = snapshots.filter(isIncident401ShapeEvidence);
+    assert(
+      faultShapeSnapshots.length > 0,
+      "correlated probe did not capture the incident-401 response-shape mismatch",
+      snapshots.map((snapshot) => snapshot.watches?.cat_response),
     );
 
     const collected = await handlers.collect_investigation_evidence({
@@ -408,6 +414,8 @@ export async function runRemoteTripwire(options) {
         url: new URL(options.replayPath, options.replayBaseUrl).toString(),
         http_status: response.status,
         trace_id: identity.traceId,
+        fault_oracle:
+          "cat_response contains products and lacks source-read products_list",
       },
       graph: {
         nodes: investigation.stats.graphNodes,
@@ -417,6 +425,7 @@ export async function runRemoteTripwire(options) {
         canonical_sites: legalSites.size,
         deployed_probes: deployed.probes.length,
         correlated_snapshots: snapshots.length,
+        fault_shape_snapshots: faultShapeSnapshots.length,
         typed_dossiers: dossiers.length,
         judgments: investigation.judgments.length,
         active_actions: investigation.actions.length,
