@@ -54,6 +54,23 @@ async function json(path) {
 }
 
 function assertStrictOutputSchema(node, path = "$") {
+  const providerKeywords = new Set([
+    "$schema",
+    "$id",
+    "title",
+    "type",
+    "additionalProperties",
+    "required",
+    "properties",
+    "enum",
+    "items",
+  ]);
+  for (const keyword of Object.keys(node ?? {})) {
+    assert.ok(
+      providerKeywords.has(keyword),
+      `${path} uses unsupported provider schema keyword ${keyword}`,
+    );
+  }
   if (node?.type === "object") {
     const properties = Object.keys(node.properties ?? {}).sort();
     const required = [...(node.required ?? [])].sort();

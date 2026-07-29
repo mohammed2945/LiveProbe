@@ -14,6 +14,7 @@
   ],
   "properties": {
     "status": {
+      "type": "string",
       "enum": ["LOCALIZED", "HANDOFF", "INSUFFICIENT"]
     },
     "root_cause": {
@@ -31,11 +32,11 @@
         "config_path"
       ],
       "properties": {
-        "entity": {"type": "string", "minLength": 1},
-        "kind": {"type": "string", "minLength": 1},
+        "entity": {"type": "string"},
+        "kind": {"type": "string"},
         "service": {"type": ["string", "null"]},
         "file": {"type": ["string", "null"]},
-        "line": {"type": ["integer", "null"], "minimum": 1},
+        "line": {"type": ["integer", "null"]},
         "function": {"type": ["string", "null"]},
         "namespace": {"type": ["string", "null"]},
         "resource": {"type": ["string", "null"]},
@@ -43,8 +44,7 @@
       }
     },
     "mechanism": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     },
     "propagation": {
       "type": "array",
@@ -53,25 +53,21 @@
         "additionalProperties": false,
         "required": ["from", "to", "evidence_ids", "explanation"],
         "properties": {
-          "from": {"type": "string", "minLength": 1},
-          "to": {"type": "string", "minLength": 1},
+          "from": {"type": "string"},
+          "to": {"type": "string"},
           "evidence_ids": {
             "type": "array",
-            "items": {"type": "string", "minLength": 1},
-            "uniqueItems": true
+            "items": {"type": "string"}
           },
           "explanation": {"type": ["string", "null"]}
         }
       }
     },
     "remediation": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     },
     "confidence": {
-      "type": "number",
-      "minimum": 0,
-      "maximum": 1
+      "type": "number"
     }
   }
 }
