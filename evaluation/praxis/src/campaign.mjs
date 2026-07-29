@@ -6,6 +6,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readFile,
   readdir,
   rm,
   writeFile,
@@ -18,6 +19,7 @@ import process from "node:process";
 import { ARM_NAMES } from "./arms.mjs";
 import {
   RESULT_SCHEMA_VERSION,
+  normalizeUsage,
   readJson,
   scoreDiagnosis,
   sha256,
@@ -358,7 +360,17 @@ function failureResult({ incidentId, arm, seed, model, error }) {
     model,
     answer: {
       status: "INSUFFICIENT",
-      root_cause: { entity: "unknown", kind: "Unknown" },
+      root_cause: {
+        entity: "unknown",
+        kind: "Unknown",
+        service: null,
+        file: null,
+        line: null,
+        function: null,
+        namespace: null,
+        resource: null,
+        config_path: null,
+      },
       mechanism: "The evaluation run failed before a diagnosis was returned.",
       propagation: [],
       remediation: "Retry only after resolving the recorded runner failure.",
@@ -376,6 +388,40 @@ function failureResult({ incidentId, arm, seed, model, error }) {
       timeout: error.timedOut === true,
     },
   };
+}
+
+function addUsage(target, delta) {
+  for (const key of Object.keys(target)) {
+    target[key] += Number(delta[key] ?? 0);
+  }
+  return target;
+}
+
+export async function usageFromLedger(path) {
+  const usage = zeroUsage();
+  let text;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return usage;
+    throw error;
+  }
+  for (const line of text.split("\n")) {
+    if (line.trim() === "") continue;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (record.kind === "model_call") {
+      addUsage(usage, normalizeUsage(record.usage));
+    } else if (record.kind === "tool_call") {
+      usage.tool_calls += 1;
+      usage.tool_response_bytes += Number(record.response_bytes ?? 0);
+    }
+  }
+  return usage;
 }
 
 async function writeState(state, output) {
@@ -533,34 +579,43 @@ async function executeCodingArm({
   const clone = await cleanAgentClone(source, metadata.git_commit);
   try {
     const output = resolve(runDirectory, `${arm}.json`);
-    const ledgerCache = resolve(runDirectory, `${arm}-analysis.sqlite3`);
-    await run(
-      process.execPath,
-      [
-        resolve(evaluationRoot, "src/benchmark.mjs"),
-        "--mode=codex",
-        `--incidents=${incidentId}`,
-        `--arms=${arm}`,
-        `--seed=${seed}`,
-        `--model=${options.model}`,
-        `--source-root=${clone.checkout}`,
-        `--snapshot=${snapshotPath}`,
-        `--broker-url=${options.brokerUrl}`,
-        `--budget-tier=${defaults.budgetTier}`,
-        "--enable-live-replay",
-        "--defer-scoring",
-        `--output=${output}`,
-        "--allow-paid-model",
-      ],
-      {
-        cwd: repositoryRoot,
-        timeoutMs: defaults.timeoutMs + 60_000,
-        logPath,
-        env: {
-          LIVEPROBE_ANALYSIS_CACHE: ledgerCache,
-        },
-      },
+    const ledger = output.replace(
+      /\.json$/,
+      `.${incidentId}.${arm}.jsonl`,
     );
+    const ledgerCache = resolve(runDirectory, `${arm}-analysis.sqlite3`);
+    try {
+      await run(
+        process.execPath,
+        [
+          resolve(evaluationRoot, "src/benchmark.mjs"),
+          "--mode=codex",
+          `--incidents=${incidentId}`,
+          `--arms=${arm}`,
+          `--seed=${seed}`,
+          `--model=${options.model}`,
+          `--source-root=${clone.checkout}`,
+          `--snapshot=${snapshotPath}`,
+          `--broker-url=${options.brokerUrl}`,
+          `--budget-tier=${defaults.budgetTier}`,
+          "--enable-live-replay",
+          "--defer-scoring",
+          `--output=${output}`,
+          "--allow-paid-model",
+        ],
+        {
+          cwd: repositoryRoot,
+          timeoutMs: defaults.timeoutMs + 60_000,
+          logPath,
+          env: {
+            LIVEPROBE_ANALYSIS_CACHE: ledgerCache,
+          },
+        },
+      );
+    } catch (error) {
+      error.usage = await usageFromLedger(ledger);
+      throw error;
+    }
     const artifact = await readJson(output);
     if (artifact.results.length !== 1) {
       throw new Error("coding arm did not emit exactly one result");
@@ -582,31 +637,36 @@ async function executePraxisArm({
 }) {
   const output = resolve(runDirectory, "praxis.json");
   const ledger = resolve(runDirectory, "praxis.ledger.jsonl");
-  await run(
-    process.execPath,
-    [
-      resolve(evaluationRoot, "src/praxis-runner.mjs"),
-      "--mode=fair",
-      `--artifact-root=${options.artifactRoot}`,
-      `--snapshot=${snapshotPath}`,
-      `--output=${output}`,
-      `--ledger=${ledger}`,
-      `--model=${options.model}`,
-      `--seed=${seed}`,
-      `--python=${options.python}`,
-      `--timeout-ms=${defaults.timeoutMs}`,
-      `--token-budget=${defaults.tokenBudget}`,
-      "--allow-paid-model",
-    ],
-    {
-      cwd: repositoryRoot,
-      timeoutMs: defaults.timeoutMs + 60_000,
-      logPath,
-      env: {
-        EVAL_INCIDENT_ID: incidentId,
+  try {
+    await run(
+      process.execPath,
+      [
+        resolve(evaluationRoot, "src/praxis-runner.mjs"),
+        "--mode=fair",
+        `--artifact-root=${options.artifactRoot}`,
+        `--snapshot=${snapshotPath}`,
+        `--output=${output}`,
+        `--ledger=${ledger}`,
+        `--model=${options.model}`,
+        `--seed=${seed}`,
+        `--python=${options.python}`,
+        `--timeout-ms=${defaults.timeoutMs}`,
+        `--token-budget=${defaults.tokenBudget}`,
+        "--allow-paid-model",
+      ],
+      {
+        cwd: repositoryRoot,
+        timeoutMs: defaults.timeoutMs + 60_000,
+        logPath,
+        env: {
+          EVAL_INCIDENT_ID: incidentId,
+        },
       },
-    },
-  );
+    );
+  } catch (error) {
+    error.usage = await usageFromLedger(ledger);
+    throw error;
+  }
   return readJson(output);
 }
 

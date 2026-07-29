@@ -276,6 +276,10 @@ async function codexRun({
   ledgerPath,
 }) {
   const runId = `codex-${incidentId}-${arm}-${options.seed}`;
+  const tokenBudget =
+    options.budgetTier === "smoke"
+      ? config.budgets.smoke_llm_total_tokens
+      : config.budgets.llm_total_tokens;
   const ledger = new EvaluationLedger({
     run_id: runId,
     arm,
@@ -284,17 +288,19 @@ async function codexRun({
     model: options.model,
     path: ledgerPath,
     budget: {
-      llm_total_tokens:
-        options.budgetTier === "smoke"
-          ? config.budgets.smoke_llm_total_tokens
-          : config.budgets.llm_total_tokens,
+      llm_total_tokens: tokenBudget,
       observability_queries: config.budgets.observability_queries,
     },
   });
   const store = new EvidenceStore(snapshot);
   const bootstrap = store.getBootstrap({ incident_id: incidentId });
   const guidance = await loadGuidance(arm);
-  const prompt = buildTaskPrompt({ arm, guidance, bootstrap });
+  const prompt = buildTaskPrompt({
+    arm,
+    guidance,
+    bootstrap,
+    tokenBudget,
+  });
   const mcpServers = [
     observabilityMcpServer({
       snapshotPath,
@@ -346,6 +352,7 @@ async function codexRun({
       options.budgetTier === "smoke"
         ? config.budgets.smoke_wall_time_ms
         : config.budgets.wall_time_ms,
+    tokenBudget,
     ledger,
   });
   return {

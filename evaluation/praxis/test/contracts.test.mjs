@@ -24,8 +24,14 @@ import {
   validateEvidenceSnapshot,
   zeroUsage,
 } from "../src/core.mjs";
-import { deterministicShuffle } from "../src/campaign.mjs";
-import { usageFromEvents } from "../src/agent-runner.mjs";
+import {
+  deterministicShuffle,
+  usageFromLedger,
+} from "../src/campaign.mjs";
+import {
+  rolloutBudgetConfigArgs,
+  usageFromEvents,
+} from "../src/agent-runner.mjs";
 import { ARM_NAMES, armCapabilities, loadGuidance } from "../src/arms.mjs";
 import {
   RAW_LIVEPROBE_TOOLS,
@@ -775,6 +781,65 @@ test("Codex event accounting separates exact tokens from sample lower bound", ()
   assert.equal(usage.new_input_tokens, 40);
   assert.equal(usage.reasoning_tokens, 7);
   assert.equal(usage.tool_calls, 1);
+});
+
+test("Codex arms receive a preemptive shared rollout budget", () => {
+  assert.deepEqual(rolloutBudgetConfigArgs(30_000), [
+    "--config",
+    "features.rollout_budget.enabled=true",
+    "--config",
+    "features.rollout_budget.limit_tokens=30000",
+    "--config",
+    "features.rollout_budget.reminder_at_remaining_tokens=[10000,5000,2000]",
+  ]);
+  assert.throws(
+    () => rolloutBudgetConfigArgs(0),
+    /tokenBudget must be an integer of at least 4/,
+  );
+});
+
+test("failed campaign arms recover exact usage from their ledger", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "praxis-ledger-usage-"));
+  const ledger = resolve(temporary, "run.jsonl");
+  try {
+    await writeFile(
+      ledger,
+      [
+        JSON.stringify({
+          kind: "tool_call",
+          response_bytes: 321,
+        }),
+        JSON.stringify({
+          kind: "model_call",
+          usage: {
+            model_calls: 1,
+            model_samples: 4,
+            input_tokens: 29_000,
+            cached_input_tokens: 20_000,
+            output_tokens: 800,
+            reasoning_tokens: 200,
+            model_ms: 12_000,
+          },
+        }),
+        "",
+      ].join("\n"),
+    );
+    assert.deepEqual(await usageFromLedger(ledger), {
+      model_calls: 1,
+      model_samples: 4,
+      retries: 0,
+      input_tokens: 29_000,
+      cached_input_tokens: 20_000,
+      new_input_tokens: 9_000,
+      output_tokens: 800,
+      reasoning_tokens: 200,
+      model_ms: 12_000,
+      tool_calls: 1,
+      tool_response_bytes: 321,
+    });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });
 
 test("alias-aware multi-root scoring accepts only evidence-backed answers", () => {

@@ -45,6 +45,29 @@ function parseEvents(stdout) {
   return events;
 }
 
+export function rolloutBudgetConfigArgs(tokenBudget) {
+  if (!Number.isSafeInteger(tokenBudget) || tokenBudget < 4) {
+    throw new Error("tokenBudget must be an integer of at least 4");
+  }
+  const reminders = [
+    Math.floor(tokenBudget / 3),
+    Math.floor(tokenBudget / 6),
+    Math.floor(tokenBudget / 15),
+  ]
+    .filter((value, index, values) =>
+      value > 0 && value < tokenBudget && values.indexOf(value) === index
+    )
+    .sort((left, right) => right - left);
+  return [
+    "--config",
+    "features.rollout_budget.enabled=true",
+    "--config",
+    `features.rollout_budget.limit_tokens=${tokenBudget}`,
+    "--config",
+    `features.rollout_budget.reminder_at_remaining_tokens=[${reminders.join(",")}]`,
+  ];
+}
+
 export function usageFromEvents(events) {
   let raw = {};
   let completedTurns = 0;
@@ -151,6 +174,7 @@ export async function runCodexAgent({
   skill,
   mcpServers,
   timeoutMs,
+  tokenBudget,
   ledger,
 }) {
   const temporaryRoot = await mkdtemp(
@@ -161,6 +185,7 @@ export async function runCodexAgent({
   await writeFile(schemaPath, JSON.stringify(schema));
   const args = [
     "exec",
+    "--strict-config",
     "--ignore-user-config",
     "--ignore-rules",
     "--ephemeral",
@@ -178,6 +203,7 @@ export async function runCodexAgent({
     'web_search="disabled"',
     "--config",
     "agents.enabled=false",
+    ...rolloutBudgetConfigArgs(tokenBudget),
     ...mcpConfigArgs(mcpServers),
     "--output-schema",
     schemaPath,
