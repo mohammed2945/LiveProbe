@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
@@ -72,8 +73,14 @@ def http_json(url: str, query: dict[str, str] | None = None):
     request = urllib.request.Request(
         url, headers={"Accept": "application/json"}
     )
-    with urllib.request.urlopen(request, timeout=300) as response:
-        return json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"HTTP {error.code} from {error.url}: {body[:4000]}"
+        ) from error
 
 
 def kubectl_json(args: list[str]):
@@ -184,8 +191,8 @@ SELECT
   TraceId, SpanId, ParentSpanId, ServiceName, SpanName, SpanKind,
   Timestamp, Duration, StatusCode, StatusMessage, SpanAttributes
 FROM {table}
-WHERE Timestamp >= toDateTime64('{start.isoformat()}', 9)
-  AND Timestamp <= toDateTime64('{end.isoformat()}', 9)
+WHERE Timestamp >= parseDateTime64BestEffort('{start.isoformat()}', 9)
+  AND Timestamp <= parseDateTime64BestEffort('{end.isoformat()}', 9)
 ORDER BY Timestamp DESC
 LIMIT {int(limit)}
 FORMAT JSON

@@ -165,6 +165,25 @@ test("isolated eval broker explicitly opts out of production auth mode", async (
   assert.doesNotMatch(manifest, /LIVEPROBE_REQUIRE_AUTH/u);
 });
 
+test("snapshot collector accepts timezone-qualified ClickHouse windows", async () => {
+  const collector = await readFile(
+    resolve(evaluationRoot, "python/collect_snapshot.py"),
+    "utf8",
+  );
+  assert.match(
+    collector,
+    /Timestamp >= parseDateTime64BestEffort\('\{start\.isoformat\(\)\}', 9\)/u,
+  );
+  assert.match(
+    collector,
+    /Timestamp <= parseDateTime64BestEffort\('\{end\.isoformat\(\)\}', 9\)/u,
+  );
+  assert.doesNotMatch(
+    collector,
+    /Timestamp (?:>=|<=) toDateTime64\('\{(?:start|end)\.isoformat\(\)\}', 9\)/u,
+  );
+});
+
 test("evidence snapshots reject scorer leakage and preserve revisioned paging", async () => {
   const snapshot = await json(fixture401Path);
   validateEvidenceSnapshot(snapshot);
