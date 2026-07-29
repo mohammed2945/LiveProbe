@@ -362,6 +362,7 @@ test("runtime tripwire replays the failing recommendation route", async () => {
   assert.match(tripwire, /response\.c\.products_list === undefined/u);
   assert.match(tripwire, /correlation_trace_id: identity\.traceId/u);
   assert.match(tripwire, /faultShapeSnapshots/u);
+  assert.match(tripwire, /item\.interpretation === "UNKNOWN"/u);
   assert.match(
     campaign,
     /replayBaseUrl: "http:\/\/127\.0\.0\.1:8081"/u,

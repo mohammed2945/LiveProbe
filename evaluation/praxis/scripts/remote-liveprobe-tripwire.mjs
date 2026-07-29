@@ -387,10 +387,17 @@ export async function runRemoteTripwire(options) {
       "runtime values were not typed",
       dossiers,
     );
+    const judgmentDossierIds = new Set(
+      investigation.judgments.map((judgment) => judgment.dossier_id),
+    );
     assert(
-      investigation.judgments.length > 0,
-      "typed values did not receive mechanical/UNKNOWN judgments",
-      investigation,
+      dossiers.every(
+        (item) =>
+          item.interpretation === "UNKNOWN" ||
+          judgmentDossierIds.has(item.dossier_id),
+      ),
+      "typed values did not receive an explicit mechanical or UNKNOWN interpretation",
+      { dossiers, judgments: investigation.judgments },
     );
     const activeActionIds = new Set(
       investigation.actions.map((action) => action.action_id),
@@ -437,6 +444,9 @@ export async function runRemoteTripwire(options) {
         fault_shape_snapshots: faultShapeSnapshots.length,
         typed_dossiers: dossiers.length,
         judgments: investigation.judgments.length,
+        unknown_dossiers: dossiers.filter(
+          (item) => item.interpretation === "UNKNOWN",
+        ).length,
         active_actions: investigation.actions.length,
         deferred_actions:
           investigation.decision_context?.deferred?.count ?? 0,
