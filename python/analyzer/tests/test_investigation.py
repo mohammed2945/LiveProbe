@@ -99,6 +99,75 @@ def quote(user, trip, config):
     assert not any(value.startswith("user") for value in amount.input_paths)
 
 
+@pytest.mark.parametrize(
+    ("source", "expected_boundary"),
+    [
+        (
+            """
+import requests
+
+def load(url):
+    response = requests.get(url)
+    payload = response.json()
+    result = payload["value"]
+    return result
+""",
+            "http",
+        ),
+        (
+            """
+import socket
+
+def load(address):
+    with socket.socket() as channel:
+        channel.connect(address)
+        raw = channel.recv(1024)
+    result = raw.decode()
+    return result
+""",
+            "service",
+        ),
+    ],
+)
+def test_unresolved_external_value_exposes_boundary_handoff(
+    tmp_path: Path,
+    source: str,
+    expected_boundary: str,
+) -> None:
+    root, commit = make_repository(tmp_path, source)
+    cache_path = tmp_path / "analysis.sqlite3"
+    with AnalysisCache(root, cache_path) as cache:
+        cache.prepare(commit)
+    engine = InvestigationEngine(str(root), str(cache_path))
+    return_line = len(source.strip().splitlines())
+    view = engine.start(
+        InvestigationCriterion(
+            repository_root=str(root),
+            commit=commit,
+            service_id="consumer",
+            file="service.py",
+            line=return_line,
+            watch_path="result",
+            symptom="returned value is wrong",
+        )
+    )
+    view = record_initial_evidence(engine, view, "obs_boundary")
+    handoffs = [
+        action
+        for action in view["actions"]
+        if action["kind"] == "HANDOFF_BOUNDARY"
+    ]
+
+    assert any(
+        action["boundary_kind"] == expected_boundary
+        for action in handoffs
+    )
+    assert any(
+        "outside indexed code" in action["reason"]
+        for action in handoffs
+    )
+
+
 def test_runtime_traversals_merge_equivalent_contexts_and_split_services(
     tmp_path: Path,
 ) -> None:

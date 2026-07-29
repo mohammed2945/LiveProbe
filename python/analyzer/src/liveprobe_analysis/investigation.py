@@ -264,6 +264,24 @@ class LazyGraphStore:
             {summary.function_id: summary for summary, _ in matches}.values()
         )
 
+    def resolve_service_producers(
+        self, call: CallSite
+    ) -> list[FunctionSummary]:
+        if call.boundary_kind != "service":
+            return []
+        detail = call.boundary_detail or ""
+        if not detail.startswith("rpc:"):
+            return []
+        operation = detail.split(":", 1)[1]
+        return list(
+            {
+                summary.function_id: summary
+                for summary, route in self.routes
+                if getattr(route, "method") == "RPC"
+                and getattr(route, "path") == operation
+            }.values()
+        )
+
     def resolve_durable_writers(
         self, resource: str, fields: tuple[str, ...]
     ) -> list[tuple[FunctionSummary, str, tuple[str, ...]]]:
@@ -1174,6 +1192,62 @@ class InvestigationEngine:
                     state["coverage_notes"].append(
                         f"unresolved HTTP producer for {call.target}"
                     )
+                    self._add_boundary_handoff(
+                        state,
+                        call.node_id,
+                        "http",
+                        (
+                            "origin is outside indexed code behind "
+                            f"{call.boundary_detail or call.target}"
+                        ),
+                    )
+            elif call.boundary_kind == "service":
+                producers = store.resolve_service_producers(call)
+                for producer in producers:
+                    self._add_follow_action(
+                        state,
+                        producer,
+                        "service response producer",
+                        call.node_id,
+                        tracked,
+                        source_traversal_id=traversal_id,
+                        boundary_kind="service",
+                        boundary_detail=call.boundary_detail,
+                        target_service_id=_runtime_service(
+                            producer.file,
+                            state["criterion"].get("ownership_map", ()),
+                            _source_root(producer.file),
+                        ),
+                        anchor_kind="return",
+                        dependency_role=call.contribution_role,
+                        estimated_nodes=max(
+                            1, producer.end_line - producer.start_line
+                        ),
+                    )
+                if not producers:
+                    state["coverage_notes"].append(
+                        f"unresolved service producer for {call.target}"
+                    )
+                    self._add_boundary_handoff(
+                        state,
+                        call.node_id,
+                        "service",
+                        (
+                            "origin is outside indexed code behind "
+                            f"{call.boundary_detail or call.target}"
+                        ),
+                    )
+            elif call.boundary_kind == "unknown":
+                state["coverage_notes"].append(
+                    call.boundary_detail
+                    or f"unresolved client call {call.target}"
+                )
+                self._add_boundary_handoff(
+                    state,
+                    call.node_id,
+                    "unknown",
+                    "client-like call target could not be resolved mechanically",
+                )
 
         for access in fragment.durable_accesses:
             if access.node_id not in nodes or access.operation != "read":
@@ -1639,6 +1713,7 @@ class InvestigationEngine:
                     "CONTROL",
                     "CALL_RETURN",
                     "HTTP_BOUNDARY",
+                    "SERVICE_BOUNDARY",
                     "DURABLE_BOUNDARY",
                 }:
                     continue
@@ -1760,6 +1835,14 @@ class InvestigationEngine:
             if pair[1]["public"]["kind"] == "INSPECT_MECHANISM"
             and is_current(pair[1])
         ]
+        witnessed_handoffs = [
+            pair
+            for pair in available
+            if pair[1]["public"]["kind"] == "HANDOFF_BOUNDARY"
+            and is_current(pair[1])
+            and pair[1]["public"].get("anchor_node_id")
+            in latest_provenance_nodes
+        ]
         probes = [
             pair
             for pair in available
@@ -1776,6 +1859,11 @@ class InvestigationEngine:
         ]
         if blocking:
             eligible = [*blocking, *probes[:1]]
+        elif witnessed_handoffs:
+            # A boundary handoff is terminal only after the correlated
+            # occurrence witnesses that boundary on the active causal cut.
+            # Static boundaries elsewhere in the slice remain deferred.
+            eligible = witnessed_handoffs
         elif inspections:
             # Revealing one bounded witnessed cut is a deterministic transition;
             # control contributors remain recoverable if adjudication needs them.
@@ -1810,10 +1898,10 @@ class InvestigationEngine:
             action_id, branch = pair
             public = branch["public"]
             kind_rank = {
-                "INSPECT_MECHANISM": 0,
-                "FOLLOW_PATH": 1,
-                "PROBE_REGION": 2,
-                "HANDOFF_BOUNDARY": 3,
+                "HANDOFF_BOUNDARY": 0,
+                "INSPECT_MECHANISM": 1,
+                "FOLLOW_PATH": 2,
+                "PROBE_REGION": 3,
             }.get(public["kind"], 4)
             distance = int(
                 state["node_distances"].get(
@@ -2056,6 +2144,8 @@ class InvestigationEngine:
         kind = (
             "HTTP_BOUNDARY"
             if boundary == "http"
+            else "SERVICE_BOUNDARY"
+            if boundary == "service"
             else "DURABLE_BOUNDARY"
             if boundary == "durable"
             else "CALL_RETURN"
@@ -2091,7 +2181,9 @@ class InvestigationEngine:
                             kind=kind,
                             variable=path,
                             certainty=(
-                                "MAY" if kind == "DURABLE_BOUNDARY" else "MUST"
+                                "MAY"
+                                if kind == "DURABLE_BOUNDARY"
+                                else "MUST"
                             ),
                             detail=meta.get("boundaryDetail"),
                             edge_id=edge_id,

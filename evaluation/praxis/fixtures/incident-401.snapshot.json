@@ -1,0 +1,161 @@
+{
+  "schema_version": "observability-snapshot/v1",
+  "snapshot_id": "fixture-401-seed-10",
+  "revision": "sha256:fixture401",
+  "incident_id": "401",
+  "detected_at": "2026-07-28T18:10:00.000Z",
+  "window": {
+    "start": "2026-07-28T18:00:00.000Z",
+    "end": "2026-07-28T18:10:00.000Z"
+  },
+  "synthetic": true,
+  "bootstrap": {
+    "alerts": [
+      {
+        "evidence_id": "evt_401_alert_recommendation",
+        "name": "RequestErrorRate",
+        "service": "recommendation",
+        "state": "firing",
+        "description": "Error rate is above threshold"
+      },
+      {
+        "evidence_id": "evt_401_alert_frontend",
+        "name": "RequestErrorRate",
+        "service": "frontend",
+        "state": "firing",
+        "description": "Error rate is above threshold"
+      }
+    ],
+    "failing_trace_summaries": [
+      {
+        "evidence_id": "trace_401_summary",
+        "trace_id": "4c010000000000000000000000000001",
+        "root_service": "frontend",
+        "root_operation": "GET /api/products",
+        "status": "ERROR",
+        "error_path": [
+          "frontend",
+          "recommendation"
+        ]
+      }
+    ]
+  },
+  "logs": [
+    {
+      "evidence_id": "log_401_1",
+      "timestamp": "2026-07-28T18:09:58.100Z",
+      "service": "recommendation",
+      "severity": "INFO",
+      "trace_id": "4c010000000000000000000000000001",
+      "message": "ListRecommendations called from upstream service"
+    },
+    {
+      "evidence_id": "log_401_2",
+      "timestamp": "2026-07-28T18:09:58.114Z",
+      "service": "recommendation",
+      "severity": "ERROR",
+      "trace_id": "4c010000000000000000000000000001",
+      "message": "ListRecommendations failed while reading the product catalog response",
+      "attributes": {
+        "exception.type": "AttributeError",
+        "exception.message": "products_list"
+      }
+    },
+    {
+      "evidence_id": "log_401_3",
+      "timestamp": "2026-07-28T18:09:58.118Z",
+      "service": "frontend",
+      "severity": "ERROR",
+      "trace_id": "4c010000000000000000000000000001",
+      "message": "recommendation RPC returned INTERNAL"
+    }
+  ],
+  "traces": [
+    {
+      "evidence_id": "trace_401",
+      "trace_id": "4c010000000000000000000000000001",
+      "started_at": "2026-07-28T18:09:58.080Z",
+      "duration_ms": 43,
+      "status": "ERROR",
+      "spans": [
+        {
+          "span_id": "401-front",
+          "parent_span_id": null,
+          "service": "frontend",
+          "operation": "GET /api/products",
+          "status": "ERROR",
+          "duration_ms": 43
+        },
+        {
+          "span_id": "401-recommendation",
+          "parent_span_id": "401-front",
+          "service": "recommendation",
+          "operation": "ListRecommendations",
+          "status": "ERROR",
+          "duration_ms": 20
+        },
+        {
+          "span_id": "401-catalog",
+          "parent_span_id": "401-recommendation",
+          "service": "product-catalog",
+          "operation": "ListProducts",
+          "status": "OK",
+          "duration_ms": 7
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "evidence_id": "metric_401_recommendation_errors",
+      "service": "recommendation",
+      "name": "request_error_rate",
+      "unit": "ratio",
+      "points": [
+        ["2026-07-28T18:05:00.000Z", 0.02],
+        ["2026-07-28T18:10:00.000Z", 0.91]
+      ]
+    }
+  ],
+  "events": [],
+  "resources": [
+    {
+      "evidence_id": "resource_401_recommendation",
+      "namespace": "otel-demo",
+      "kind": "Deployment",
+      "name": "recommendation",
+      "state": {
+        "ready_replicas": 1,
+        "desired_replicas": 1
+      }
+    }
+  ],
+  "deployments": [
+    {
+      "evidence_id": "deploy_401_recommendation",
+      "service": "recommendation",
+      "deployed_at": "2026-07-28T17:55:00.000Z",
+      "revision": "recommendation@sha256:fixture401",
+      "change_summary": "recommendation image updated"
+    }
+  ],
+  "topology": {
+    "nodes": [
+      {"id": "frontend", "kind": "Service", "namespace": "otel-demo"},
+      {"id": "recommendation", "kind": "Service", "namespace": "otel-demo"},
+      {"id": "product-catalog", "kind": "Service", "namespace": "otel-demo"}
+    ],
+    "edges": [
+      {"from": "frontend", "to": "recommendation", "kind": "RPC"},
+      {"from": "recommendation", "to": "product-catalog", "kind": "RPC"}
+    ]
+  },
+  "replay_recipes": [
+    {
+      "recipe_id": "browse-product",
+      "description": "Issue the failing product browse request",
+      "expected_root_service": "frontend",
+      "enabled": true
+    }
+  ]
+}

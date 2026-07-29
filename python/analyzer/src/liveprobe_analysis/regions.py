@@ -22,6 +22,7 @@ _DEPENDENCE_KINDS = {
     "CONTROL",
     "CALL_RETURN",
     "HTTP_BOUNDARY",
+    "SERVICE_BOUNDARY",
     "DURABLE_BOUNDARY",
     "MEMORY_MAY",
     "UNKNOWN",
@@ -59,7 +60,11 @@ def _region_kind(
     edge_kinds = {str(edge.get("kind", "")) for edge in incident_edges}
     if "UNKNOWN" in edge_kinds:
         return "UNKNOWN"
-    if edge_kinds & {"HTTP_BOUNDARY", "DURABLE_BOUNDARY"}:
+    if edge_kinds & {
+        "HTTP_BOUNDARY",
+        "SERVICE_BOUNDARY",
+        "DURABLE_BOUNDARY",
+    }:
         return "BOUNDARY"
     if "CALL_RETURN" in edge_kinds:
         return "CALL"
@@ -283,7 +288,13 @@ def build_segment_projection(
             uncertain = any(
                 str(edge.get("certainty", "MUST")) != "MUST"
                 or str(edge.get("kind", ""))
-                in {"MEMORY_MAY", "UNKNOWN", "HTTP_BOUNDARY", "DURABLE_BOUNDARY"}
+                in {
+                    "MEMORY_MAY",
+                    "UNKNOWN",
+                    "HTTP_BOUNDARY",
+                    "SERVICE_BOUNDARY",
+                    "DURABLE_BOUNDARY",
+                }
                 for edge in incident
             )
             if (
@@ -442,7 +453,11 @@ def build_segment_projection(
                                 for edge in incident
                                 if edge.get("detail")
                                 and str(edge.get("kind"))
-                                in {"HTTP_BOUNDARY", "DURABLE_BOUNDARY"}
+                                in {
+                                    "HTTP_BOUNDARY",
+                                    "SERVICE_BOUNDARY",
+                                    "DURABLE_BOUNDARY",
+                                }
                             }
                         )
                     ),
@@ -571,6 +586,8 @@ def build_function_projection(
         kind: EdgeKind = (
             "HTTP_BOUNDARY"
             if boundary == "http"
+            else "SERVICE_BOUNDARY"
+            if boundary == "service"
             else "DURABLE_BOUNDARY"
             if boundary == "durable"
             else "CALL_RETURN"
@@ -761,7 +778,13 @@ def build_boundary_projection(
         add_group(
             producer_owner,
             consumer_owner,
-            "HTTP_BOUNDARY" if boundary == "http" else "CALL_RETURN",
+            (
+                "HTTP_BOUNDARY"
+                if boundary == "http"
+                else "SERVICE_BOUNDARY"
+                if boundary == "service"
+                else "CALL_RETURN"
+            ),
             paths,
         )
 

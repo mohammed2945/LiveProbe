@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveprobe.dev/schemas/observability-snapshot-v1.json",
+  "title": "Immutable incident observability snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "revision",
+    "incident_id",
+    "detected_at",
+    "window",
+    "synthetic",
+    "bootstrap",
+    "logs",
+    "traces",
+    "metrics",
+    "events",
+    "resources",
+    "deployments",
+    "topology",
+    "replay_recipes"
+  ],
+  "properties": {
+    "schema_version": {"const": "observability-snapshot/v1"},
+    "snapshot_id": {"type": "string", "minLength": 1},
+    "revision": {"type": "string", "minLength": 1},
+    "incident_id": {"type": "string", "minLength": 1},
+    "detected_at": {"type": "string", "format": "date-time"},
+    "window": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "string", "format": "date-time"},
+        "end": {"type": "string", "format": "date-time"}
+      }
+    },
+    "synthetic": {"type": "boolean"},
+    "bootstrap": {
+      "type": "object",
+      "required": ["alerts", "failing_trace_summaries"],
+      "properties": {
+        "alerts": {"type": "array"},
+        "failing_trace_summaries": {"type": "array", "maxItems": 3}
+      }
+    },
+    "logs": {"type": "array"},
+    "traces": {"type": "array"},
+    "metrics": {"type": "array"},
+    "events": {"type": "array"},
+    "resources": {"type": "array"},
+    "deployments": {"type": "array"},
+    "topology": {
+      "type": "object",
+      "required": ["nodes", "edges"],
+      "properties": {
+        "nodes": {"type": "array"},
+        "edges": {"type": "array"}
+      }
+    },
+    "replay_recipes": {"type": "array"}
+  }
+}

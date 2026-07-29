@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: liveprobe-broker
+  namespace: otel-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: liveprobe-broker
+  template:
+    metadata:
+      labels:
+        app: liveprobe-broker
+    spec:
+      containers:
+        - name: broker
+          image: liveprobe-broker:praxis-eval
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "7070"
+            - name: LIVEPROBE_REQUIRE_AUTH
+              value: "false"
+          ports:
+            - name: http
+              containerPort: 7070
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: liveprobe-broker
+  namespace: otel-demo
+spec:
+  selector:
+    app: liveprobe-broker
+  ports:
+    - name: http
+      port: 7070
+      targetPort: http

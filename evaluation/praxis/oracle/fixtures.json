@@ -1,0 +1,53 @@
+{
+  "schema_version": "praxis-oracle-fixtures/v1",
+  "incidents": {
+    "3": {
+      "entity": "flagd-config",
+      "aliases": ["flagd-config-1"],
+      "kind": "ConfigMap",
+      "locations": [
+        {
+          "resource": "flagd-config",
+          "config_path": "flags.adHighCpu"
+        }
+      ],
+      "propagation": [
+        {"from": "flagd-config", "to": "ad"},
+        {"from": "ad", "to": "frontend"}
+      ],
+      "expected_status": "LOCALIZED"
+    },
+    "401": {
+      "entity": "recommendation",
+      "aliases": ["recommendation-service-1"],
+      "kind": "Service",
+      "locations": [
+        {
+          "file": "recommendation_server.py",
+          "lines": [85, 96],
+          "function": "get_product_list"
+        }
+      ],
+      "propagation": [
+        {"from": "recommendation", "to": "frontend"}
+      ],
+      "expected_status": "LOCALIZED"
+    },
+    "405": {
+      "entity": "neo4j-productdb",
+      "aliases": ["neo4j-productdb-service-1"],
+      "kinds": ["Service", "ServiceBoundary"],
+      "kind": "ServiceBoundary",
+      "locations": [
+        {
+          "resource": "neo4j-productdb"
+        }
+      ],
+      "propagation": [
+        {"from": "neo4j-productdb", "to": "recommendation"},
+        {"from": "recommendation", "to": "frontend"}
+      ],
+      "expected_statuses": ["HANDOFF", "LOCALIZED"]
+    }
+  }
+}

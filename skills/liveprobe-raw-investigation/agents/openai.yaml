@@ -1,0 +1,4 @@
+interface:
+  display_name: "Raw LiveProbe Investigation"
+  short_description: "Investigate incidents with manual runtime probes"
+  default_prompt: "Use $liveprobe-raw-investigation to investigate this incident with observability and manual LiveProbe evidence."

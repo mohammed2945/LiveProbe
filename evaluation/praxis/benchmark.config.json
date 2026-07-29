@@ -1,0 +1,68 @@
+{
+  "schema_version": "liveprobe-praxis-eval/v1",
+  "benchmark_id": "praxis-astronomy-shop-4arm-v1",
+  "decision_model": {
+    "default": "gpt-5.4-mini",
+    "reasoning_effort": "low",
+    "temperature": 0,
+    "require_version_pin_for_claims": true,
+    "paid_runs_require_explicit_opt_in": true
+  },
+  "seeds": {
+    "smoke": [10],
+    "pilot": [10, 20, 30],
+    "claim": [10, 20, 30, 40, 50]
+  },
+  "budgets": {
+    "wall_time_ms": 1800000,
+    "sensitivity_wall_time_ms": 3000000,
+    "llm_total_tokens": 250000,
+    "observability_queries": 100,
+    "incident_replays": 10,
+    "liveprobe_rounds": 10,
+    "liveprobe_watches": 50,
+    "smoke_llm_total_tokens": 30000,
+    "smoke_wall_time_ms": 180000
+  },
+  "evidence": {
+    "bootstrap_trace_limit": 3,
+    "default_page_size": 50,
+    "maximum_page_size": 200,
+    "praxis_native_log_limit": 50,
+    "praxis_fair_log_limit": 40
+  },
+  "arms": {
+    "normal_coding_sre": {
+      "repository": true,
+      "observability": true,
+      "incident_replay": true,
+      "liveprobe": false,
+      "liveprobe_graph": false,
+      "praxis_graphs": false
+    },
+    "praxis": {
+      "repository": false,
+      "observability": true,
+      "incident_replay": false,
+      "liveprobe": false,
+      "liveprobe_graph": false,
+      "praxis_graphs": true
+    },
+    "graph_liveprobe": {
+      "repository": true,
+      "observability": true,
+      "incident_replay": true,
+      "liveprobe": true,
+      "liveprobe_graph": true,
+      "praxis_graphs": false
+    },
+    "raw_liveprobe": {
+      "repository": true,
+      "observability": true,
+      "incident_replay": true,
+      "liveprobe": true,
+      "liveprobe_graph": false,
+      "praxis_graphs": false
+    }
+  }
+}

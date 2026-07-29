@@ -12,6 +12,12 @@ ifeq ($(GCP_DATABASE_BACKEND),cloud-sql)
 GCP_COMPOSE += -f deploy/gcp/docker-compose.cloud-sql.yml
 endif
 GCP_LOGS_ARGS ?= --tail=200
+PRAXIS_ARTIFACT_ROOT ?=
+PRAXIS_ARTIFACT_ARCHIVE ?=
+PRAXIS_SOURCE_ROOT ?= .eval-cache/praxis-sources
+PRAXIS_CAMPAIGN_ROOT ?= evaluation/praxis/results/campaign
+PRAXIS_MODEL ?= gpt-5.4-mini
+PRAXIS_ALLOW_PAID_MODEL ?= 0
 
 .PHONY: \
 	test fixtures-test typescript-test python-test python-analysis-test java-test demo-unit-test \
@@ -22,6 +28,10 @@ GCP_LOGS_ARGS ?= --tail=200
 	python-probe-bundle-bench ride-analysis-e2e ride-analysis-tracks \
 	ride-investigation-smoke ride-investigation-e2e ride-runtime-model-track ride-adaptive-comparison \
 	ride-four-method-benchmark ride-four-method-benchmark-codex \
+	praxis-eval-contract praxis-eval-compat praxis-eval-artifact-compat \
+	praxis-eval-fixture praxis-eval-preflight \
+	praxis-eval-gates praxis-eval-report praxis-eval-plan praxis-eval-smoke \
+	praxis-eval-extract \
 	e2e-node e2e-python e2e-jvm \
 	demo-prerequisites demo demo-down \
 	gcp-demo-prerequisites gcp-demo-up gcp-demo-status gcp-demo-logs gcp-demo-down \
@@ -139,6 +149,70 @@ ride-four-method-benchmark-codex:
 	node demo/ride-analysis/four-method-benchmark.mjs \
 		--decision-mode=codex \
 		--repetitions=3
+
+praxis-eval-contract:
+	@if [ -n "$(PRAXIS_ARTIFACT_ROOT)" ]; then \
+		PRAXIS_ARTIFACT_ROOT="$(PRAXIS_ARTIFACT_ROOT)" \
+			node --test evaluation/praxis/test/contracts.test.mjs; \
+	else \
+		node --test evaluation/praxis/test/contracts.test.mjs; \
+	fi
+
+praxis-eval-extract:
+	@test -n "$(PRAXIS_ARTIFACT_ROOT)" || { echo "Set PRAXIS_ARTIFACT_ROOT"; exit 2; }
+	node evaluation/praxis/scripts/extract-sources.mjs \
+		--artifact-root "$(PRAXIS_ARTIFACT_ROOT)" \
+		--output "$(PRAXIS_SOURCE_ROOT)"
+
+praxis-eval-compat:
+	python3.12 evaluation/praxis/python/check_liveprobe_compatibility.py \
+		--source-root "$(PRAXIS_SOURCE_ROOT)" \
+		--output evaluation/praxis/results/liveprobe-compatibility.json
+
+praxis-eval-artifact-compat:
+	@test -n "$(PRAXIS_ARTIFACT_ROOT)" || { echo "Set PRAXIS_ARTIFACT_ROOT"; exit 2; }
+	python3.12 evaluation/praxis/python/check_praxis_artifact_compatibility.py \
+		--artifact-root "$(PRAXIS_ARTIFACT_ROOT)" \
+		--output evaluation/praxis/results/praxis-artifact-compatibility.json
+
+praxis-eval-fixture:
+	node evaluation/praxis/src/benchmark.mjs \
+		--mode=fixture \
+		--output=evaluation/praxis/results/fixture.json
+
+praxis-eval-preflight:
+	node evaluation/praxis/scripts/remote-preflight.mjs
+
+praxis-eval-gates:
+	@test -n "$(PRAXIS_ARTIFACT_ROOT)" || { echo "Set PRAXIS_ARTIFACT_ROOT"; exit 2; }
+	node evaluation/praxis/scripts/local-gates.mjs \
+		--artifact-root="$(PRAXIS_ARTIFACT_ROOT)" \
+		$(if $(strip $(PRAXIS_ARTIFACT_ARCHIVE)),--artifact-archive="$(PRAXIS_ARTIFACT_ARCHIVE)") \
+		--source-root="$(PRAXIS_SOURCE_ROOT)"
+
+praxis-eval-report:
+	node evaluation/praxis/src/report.mjs
+
+praxis-eval-plan:
+	@test -n "$(PRAXIS_ARTIFACT_ROOT)" || { echo "Set PRAXIS_ARTIFACT_ROOT"; exit 2; }
+	node evaluation/praxis/src/campaign.mjs \
+		--artifact-root="$(PRAXIS_ARTIFACT_ROOT)" \
+		--source-root="$(PRAXIS_SOURCE_ROOT)" \
+		--results-root="$(PRAXIS_CAMPAIGN_ROOT)" \
+		--model="$(PRAXIS_MODEL)" \
+		--tier=smoke
+
+praxis-eval-smoke:
+	@test "$(PRAXIS_ALLOW_PAID_MODEL)" = "1" || { echo "Set PRAXIS_ALLOW_PAID_MODEL=1"; exit 2; }
+	@test -n "$(PRAXIS_ARTIFACT_ROOT)" || { echo "Set PRAXIS_ARTIFACT_ROOT"; exit 2; }
+	node evaluation/praxis/src/campaign.mjs \
+		--artifact-root="$(PRAXIS_ARTIFACT_ROOT)" \
+		--source-root="$(PRAXIS_SOURCE_ROOT)" \
+		--results-root="$(PRAXIS_CAMPAIGN_ROOT)" \
+		--model="$(PRAXIS_MODEL)" \
+		--tier=smoke \
+		--execute \
+		--allow-paid-model
 
 ride-analysis-scale:
 	PYTHONPATH=python/analyzer/src sh scripts/python312.sh \

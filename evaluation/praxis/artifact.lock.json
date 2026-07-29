@@ -1,0 +1,22 @@
+{
+  "schema_version": "praxis-artifact-lock/v1",
+  "record_id": "19247887",
+  "concept_record_id": "19163486",
+  "doi": "10.5281/zenodo.19247887",
+  "paper": {
+    "title": "PRAXIS: Integrating Program Analysis with Observability for Root-Cause Analysis",
+    "arxiv_id": "2512.22113",
+    "version": "v3",
+    "url": "https://arxiv.org/abs/2512.22113"
+  },
+  "artifact": {
+    "title": "DSN 2026 Artifact Evaluation for Paper: PRAXIS: Integrating Program Analysis with Observability for Root-Cause Analysis",
+    "published": "2026-03-27",
+    "license": "Apache-2.0",
+    "filename": "dsn26-praxis-ae.zip",
+    "url": "https://zenodo.org/api/records/19247887/files/dsn26-praxis-ae.zip/content",
+    "size_bytes": 950447,
+    "md5": "8da2e642753b810a10145a5385df96e5",
+    "sha256": "438709b4b4b43467ec384de8ee398b2cc75f2e495a57514fd57784021af7814f"
+  }
+}

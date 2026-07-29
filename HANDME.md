@@ -3,6 +3,139 @@
 Read this file before changing or benchmarking the current investigation
 architecture.
 
+## Latest session: controlled PRAXIS evaluation
+
+The PRAXIS/Astronomy Shop four-arm evaluation is implemented under
+`evaluation/praxis/`. Read its `README.md` and `CHECKPOINT.md` before trying a
+paid run.
+
+The controlled leaderboard compares:
+
+1. a normal coding SRE with repository, observability, and replay;
+2. PRAXIS with its native reasoning loop backed by the same immutable evidence;
+3. a coding SRE with observability plus LiveProbe's causal graph;
+4. a coding SRE with observability plus raw LiveProbe only.
+
+Evidence is captured once per real incident. Coding arms receive a small
+bootstrap followed by a read-only observability MCP; the fair PRAXIS adapter
+uses the same snapshot through its collector interfaces. Ground truth is never
+mounted or prompted and the official scorer oracle is generated only after all
+model attempts.
+
+The remote campaign now enforces exact instrumented-source identity, all 16
+released incident-specific PRAXIS graphs and anchors, the exact release import
+contract, a pre-model runtime LiveProbe tripwire, a deterministic zero-model
+PRAXIS-loop tripwire, deterministic randomized arm order, clean tracked-only
+agent clones, broker isolation around every LiveProbe arm, alert clearing
+between incidents, full failure denominators, and scorer-only post-run
+evaluation. The cost-controlled default is `gpt-5.4-mini` with low reasoning,
+and paid execution requires two explicit flags.
+
+Latest zero-token validation:
+
+```text
+required gates:          31/31 passed
+analyzer tests:          41 passed
+MCP server tests:        22 passed
+evaluation contracts:   20/20 passed
+source variants:         16/16 passed
+PRAXIS release checks:   36/36; 16/16 incident graphs
+fixture tripwire:        12/12, zero model calls
+```
+
+The current Mac is not a valid PRAXIS cluster host (Darwin, 8 CPUs, 16 GiB,
+no Kind, no Helm 3.18.4, and an incomplete released Python dependency set), so
+no real four-arm model results were fabricated. `evaluation/praxis/results/README.md`
+reports the measured gates and leaves the leaderboard pending. Resume on Linux
+with at least 16 CPUs and 32 GiB.
+
+## Latest session: agent-facing production workflow
+
+This session made the existing investigation pipeline usable by a coding agent
+that arrives with metrics, logs, traces, and deploy context. It did not add an
+ablation or change the four-method benchmark.
+
+The agent contract is now:
+
+```text
+observability narrows the incident
+  -> exact service/file/line/value/occurrence criterion
+  -> LiveProbe graph and legal frontier
+  -> correlated runtime values choose the path
+  -> LOCALIZED, HANDOFF, or INSUFFICIENT
+```
+
+Load `skills/liveprobe-investigation/SKILL.md` alongside the coding agent's
+observability tools. It is versioned as `liveprobe-investigation/v1.1`, expects
+decision packets using `liveprobe-adaptive-v2`, and is contract-tested against
+the six exported MCP action kinds. The skill specifies:
+
+- observability-first ordering and the concrete starting criterion;
+- hard, near-hard, and soft-prior evidence ranking;
+- unique-chain traversal, legal frontier probing, and evidence-led decisions;
+- canonical probe locations only, with no model-created file/line/expression;
+- UNKNOWN-first hypothesis and confirmation semantics;
+- localization, boundary handback, and honest insufficient stopping rules;
+- recovery for stale revisions, illegal actions, budget limits, and missing
+  captures.
+
+`packages/mcp-server/src/index.ts` now documents the MCP surface as a
+self-contained model interface. Input fields say whether values come from
+observability, `list_services`, or prior investigation output and include
+concrete examples. Tool descriptions distinguish manual probes, the persistent
+investigation loop, and the legacy stateless workflow; describe return shapes;
+and give recovery for the rejections an agent will encounter.
+
+Use this fast production tripwire on every workflow change:
+
+```bash
+make ride-investigation-smoke
+```
+
+It runs the real RideRush gateway-to-pricing path without writing a repository
+result artifact. It asserts criterion-to-graph construction, frontier
+generation, canonical legal-site deployment, exact replay correlation, typed
+captured values, UNKNOWN-to-supported verdicts, preserved deferred frontiers,
+and final localization at the known line-74 `surge_poison` mechanism.
+
+The latest run passed in 3.45 seconds with 18 graph nodes, 38 edges, two
+correlated failing occurrences, 11 typed values, 10 deferred alternatives,
+six deployed probes, and terminal `LOCALIZED`.
+
+## Latest session: exact current-workflow audit
+
+This session did not change product code. It reconstructed the current
+unknown-first RideRush investigation revision by revision and documented the
+implemented performance work.
+
+Start with these two new documents:
+
+1. `demo/ride-analysis/CURRENT_UNKNOWN_FIRST_ARCHITECTURE_TRACE.md`
+   - the current workflow in the same packet-trace style as the older
+     architecture document;
+   - all six investigation revisions, the 18-node/38-edge source graph,
+     runtime traversal identities, projections, probe batches, observed
+     values, deterministic transitions, and the exact mechanism-model
+     request/schema/result;
+   - separate accounting for graph preparation, runtime replay, model time,
+     public diagnostic views, and the compact model packet;
+   - an explicit audit list of design choices that may still look suspicious.
+2. `demo/ride-analysis/GRAPH_LIVEPROBE_INEFFICIENCIES_FIXED.md`
+   - the general implementation inefficiencies found in the earlier traces;
+   - why each existed, the concrete fix, and how the fix changes cost without
+     relying on RideRush-specific names or values;
+   - before/after measurements and the remaining non-reward-hacked work.
+
+The current trace was reconstructed from the latest localized RideRush
+artifact and the analyzer's cached graph. A temporary reconstruction script
+and JSON snapshot were placed under `/tmp`; neither is a repository artifact.
+No application replay or model resampling was needed to write the documents.
+
+At the start of this documentation work, `improvements` already contained and
+had pushed product commit `77df9f7` (`Implement adaptive graph investigation
+improvements`). The two new documents and this handoff update are newer local
+documentation changes and should be reviewed before committing.
+
 ## Current state
 
 LiveProbe now implements a failing-only, unknown-first localization loop over
@@ -23,8 +156,9 @@ deterministic gateway -> pricing static closure
   -> deterministic completion
 ```
 
-The PRAXIS + LiveProbe hybrid is deliberately not implemented. The product
-focus is one clean graph + LiveProbe architecture.
+PRAXIS is not part of the product runtime. Its released reasoning loop is used
+only as an evaluation arm; the product remains one clean graph + LiveProbe
+architecture.
 
 ## Repository and worktree
 
@@ -33,7 +167,7 @@ repository:
   /Users/veer/Documents/StartUp/hackathon_stanford/LightProbe
 
 current branch:
-  improvements
+  skills
 
 RideRush test repository:
   /Users/veer/Documents/StartUp/hackathon_stanford/ride_sharing_probe_demo
@@ -171,7 +305,7 @@ Implemented performance changes:
 - graph model calls are fresh and self-contained rather than resumed coding
   agent chats.
 
-The analyzer cache schema is version 16. Older call summaries are rebuilt so
+The analyzer cache schema is version 17. Older call summaries are rebuilt so
 the contribution-role field is never silently absent.
 
 ### Runtime, broker, and MCP
@@ -270,13 +404,17 @@ explicit request per run:  6,124 bytes
 
 ```text
 python analyzer:
-  37 tests passed
+  41 tests passed
 
 MCP server:
   typecheck passed
-  17 tests passed
+  22 tests passed
 
 RideRush failing-only investigation:
+  smoke tripwire passed
+  18 graph nodes / 38 graph edges
+  2 correlated failing occurrences / 11 typed values
+  canonical deployments and deferred frontiers preserved
   LOCALIZED
 
 four-method oracle harness:
@@ -293,16 +431,22 @@ local ports.
 
 Read in this order:
 
-1. `demo/ride-analysis/GRAPH_LIVEPROBE_IMPROVEMENTS.md`
+1. `demo/ride-analysis/CURRENT_UNKNOWN_FIRST_ARCHITECTURE_TRACE.md`
+   - exact current graph, traversals, packets, probes, evidence, decisions,
+     model call, confirmation, and cost trace.
+2. `demo/ride-analysis/GRAPH_LIVEPROBE_INEFFICIENCIES_FIXED.md`
+   - concise before/after ledger of every general inefficiency fixed.
+3. `demo/ride-analysis/GRAPH_LIVEPROBE_IMPROVEMENTS.md`
    - original traces, general defects, implemented changes, gates, and
      post-improvement results.
-2. `demo/ride-analysis/FOUR_METHOD_BENCHMARK.md`
+4. `demo/ride-analysis/FOUR_METHOD_BENCHMARK.md`
    - current method contracts, accounting, comparison, and caveats.
-3. `demo/ride-analysis/CURRENT_ARCHITECTURE_PACKET_TRACE.md`
-   - detailed pre-improvement trace that motivated the optimization work.
-4. `docs/liveprobe-investigation-loop-adversarial-review.md`
+5. `demo/ride-analysis/CURRENT_ARCHITECTURE_PACKET_TRACE.md`
+   - historical pre-improvement trace that motivated the optimization work;
+     do not confuse it with the current unknown-first trace.
+6. `docs/liveprobe-investigation-loop-adversarial-review.md`
    - adversarial review of evidence and confirmation semantics.
-5. `demo/ride-analysis/README.md`
+7. `demo/ride-analysis/README.md`
    - commands and experiment inventory.
 
 `adaptive-comparison.mjs` and

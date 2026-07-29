@@ -32,3 +32,8 @@ target/
 *.log
 backups/
 demo/ride-analysis/results/
+
+# PRAXIS evaluation downloads and run artifacts
+.eval-cache/
+evaluation/praxis/results/*
+!evaluation/praxis/results/README.md

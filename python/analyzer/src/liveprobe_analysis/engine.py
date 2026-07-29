@@ -53,12 +53,14 @@ class ProjectGraph:
             for call in fragment.calls:
                 self.calls_by_target[call.target].append((fragment, call))
                 if (
-                    call.boundary_kind in {"http", "durable"}
+                    call.boundary_kind
+                    in {"http", "service", "durable", "unknown"}
                     and call.result_paths
                 ):
                     self.external_input_nodes.add(call.node_id)
         self._compose_calls()
         self._compose_http_boundaries()
+        self._compose_service_boundaries()
         self._compose_durable_boundaries()
         self._compose_module_memory()
 
@@ -94,6 +96,19 @@ class ProjectGraph:
         for caller in self.fragments:
             for call in caller.calls:
                 if call.boundary_kind != "local":
+                    if call.boundary_kind == "unknown":
+                        self.add_edge(
+                            FlowEdge(
+                                source=caller.entry_node,
+                                target=call.node_id,
+                                kind="UNKNOWN",
+                                certainty="UNKNOWN",
+                                detail=(
+                                    call.boundary_detail
+                                    or f"unresolved call target {call.target}"
+                                ),
+                            )
+                        )
                     continue
                 short = call.target.rsplit(".", 1)[-1]
                 if call.target.startswith("self."):
@@ -144,17 +159,6 @@ class ProjectGraph:
                                     detail="return to call result",
                                 )
                             )
-                if not unique and call.boundary_kind == "unknown":
-                    self.add_edge(
-                        FlowEdge(
-                            source=caller.entry_node,
-                            target=call.node_id,
-                            kind="UNKNOWN",
-                            certainty="UNKNOWN",
-                            detail=f"unresolved call target {call.target}",
-                        )
-                    )
-
     def _compose_durable_boundaries(self) -> None:
         reads = []
         writes = []
@@ -194,8 +198,12 @@ class ProjectGraph:
             for call in caller.calls:
                 if call.boundary_kind != "http":
                     continue
-                method = call.target.rsplit(".", 1)[-1].upper()
                 detail = call.boundary_detail or ""
+                method = (
+                    detail.split(":", 2)[1].upper()
+                    if detail.startswith("http:") and detail.count(":") >= 2
+                    else call.target.rsplit(".", 1)[-1].upper()
+                )
                 matches = [
                     (callee, route)
                     for callee, route in routes
@@ -229,6 +237,52 @@ class ProjectGraph:
                                 variable="response",
                                 certainty=certainty,
                                 detail=f"{method} {route.path}: response",
+                            )
+                        )
+
+    def _compose_service_boundaries(self) -> None:
+        routes = [
+            (fragment, route)
+            for fragment in self.fragments
+            for route in fragment.routes
+            if route.method == "RPC"
+        ]
+        for caller in self.fragments:
+            for call in caller.calls:
+                if call.boundary_kind != "service":
+                    continue
+                detail = call.boundary_detail or ""
+                if not detail.startswith("rpc:"):
+                    continue
+                operation = detail.split(":", 1)[1]
+                matches = [
+                    (callee, route)
+                    for callee, route in routes
+                    if route.path == operation
+                ]
+                certainty = "MUST" if len(matches) == 1 else "MAY"
+                for callee, route in matches:
+                    self.add_edge(
+                        FlowEdge(
+                            source=call.node_id,
+                            target=callee.entry_node,
+                            kind="SERVICE_BOUNDARY",
+                            variable="request",
+                            certainty=certainty,
+                            detail=f"RPC {route.path}: request",
+                        )
+                    )
+                    for return_node in callee.nodes:
+                        if return_node.kind != "Return":
+                            continue
+                        self.add_edge(
+                            FlowEdge(
+                                source=return_node.node_id,
+                                target=call.node_id,
+                                kind="SERVICE_BOUNDARY",
+                                variable="response",
+                                certainty=certainty,
+                                detail=f"RPC {route.path}: response",
                             )
                         )
 
@@ -462,7 +516,14 @@ class AnalysisEngine:
                 incoming_data = [
                     edge
                     for edge in graph.incoming.get(bad, [])
-                    if edge.kind in {"DATA", "CALL_RETURN", "DURABLE_BOUNDARY"}
+                    if edge.kind
+                    in {
+                        "DATA",
+                        "CALL_RETURN",
+                        "HTTP_BOUNDARY",
+                        "SERVICE_BOUNDARY",
+                        "DURABLE_BOUNDARY",
+                    }
                 ]
                 if incoming_data and all(edge.source in good_nodes for edge in incoming_data):
                     likely_hammock = graph.smallest_hammock(bad).hammock_id
@@ -537,6 +598,7 @@ class AnalysisEngine:
             "CONTROL",
             "CALL_RETURN",
             "HTTP_BOUNDARY",
+            "SERVICE_BOUNDARY",
             "DURABLE_BOUNDARY",
             "MEMORY_MAY",
             "UNKNOWN",
@@ -615,7 +677,7 @@ class AnalysisEngine:
                     ):
                         continue
                 if (
-                    edge.kind == "HTTP_BOUNDARY"
+                    edge.kind in {"HTTP_BOUNDARY", "SERVICE_BOUNDARY"}
                     and edge.detail
                     and edge.detail.endswith(": response")
                     and tracked
@@ -758,6 +820,7 @@ class AnalysisEngine:
                 uncertainty[edge.target] += 1
             if edge.kind in {
                 "HTTP_BOUNDARY",
+                "SERVICE_BOUNDARY",
                 "DURABLE_BOUNDARY",
                 "MEMORY_MAY",
             }:

@@ -17,7 +17,7 @@ from .frontend import PythonFrontend
 from .model import FunctionFragment, FunctionSummary
 from .summary import build_function_summary
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 EXCLUDED_PARTS = {
     ".git",
     ".venv",

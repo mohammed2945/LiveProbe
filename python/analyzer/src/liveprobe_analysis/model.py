@@ -11,6 +11,7 @@ EdgeKind = Literal[
     "CONTROL",
     "CALL_RETURN",
     "HTTP_BOUNDARY",
+    "SERVICE_BOUNDARY",
     "DURABLE_BOUNDARY",
     "MEMORY_MAY",
     "UNKNOWN",
@@ -136,7 +137,9 @@ class CallSite:
     keyword_paths: tuple[tuple[str, tuple[str, ...]], ...]
     result_paths: tuple[str, ...]
     contribution_role: CallContributionRole = "VALUE_PRODUCER"
-    boundary_kind: Literal["local", "http", "durable", "unknown"] = "local"
+    boundary_kind: Literal[
+        "local", "http", "service", "durable", "unknown"
+    ] = "local"
     boundary_detail: str | None = None
 
 

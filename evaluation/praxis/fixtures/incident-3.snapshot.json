@@ -1,0 +1,132 @@
+{
+  "schema_version": "observability-snapshot/v1",
+  "snapshot_id": "fixture-3-seed-10",
+  "revision": "sha256:fixture003",
+  "incident_id": "3",
+  "detected_at": "2026-07-28T18:30:00.000Z",
+  "window": {
+    "start": "2026-07-28T18:20:00.000Z",
+    "end": "2026-07-28T18:30:00.000Z"
+  },
+  "synthetic": true,
+  "bootstrap": {
+    "alerts": [
+      {
+        "evidence_id": "evt_3_alert_frontend",
+        "name": "RequestErrorRate",
+        "service": "frontend",
+        "state": "firing",
+        "description": "Error rate is above threshold"
+      }
+    ],
+    "failing_trace_summaries": [
+      {
+        "evidence_id": "trace_3_summary",
+        "trace_id": "30000000000000000000000000000001",
+        "root_service": "frontend",
+        "root_operation": "GET /api/products",
+        "status": "ERROR",
+        "error_path": ["frontend", "ad"]
+      }
+    ]
+  },
+  "logs": [
+    {
+      "evidence_id": "log_3_1",
+      "timestamp": "2026-07-28T18:29:58.000Z",
+      "service": "ad",
+      "severity": "WARN",
+      "trace_id": "30000000000000000000000000000001",
+      "message": "ad request exceeded CPU execution budget"
+    }
+  ],
+  "traces": [
+    {
+      "evidence_id": "trace_3",
+      "trace_id": "30000000000000000000000000000001",
+      "started_at": "2026-07-28T18:29:57.000Z",
+      "duration_ms": 1000,
+      "status": "ERROR",
+      "spans": [
+        {
+          "span_id": "3-front",
+          "parent_span_id": null,
+          "service": "frontend",
+          "operation": "GET /api/products",
+          "status": "ERROR",
+          "duration_ms": 1000
+        },
+        {
+          "span_id": "3-ad",
+          "parent_span_id": "3-front",
+          "service": "ad",
+          "operation": "GetAds",
+          "status": "ERROR",
+          "duration_ms": 990
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "evidence_id": "metric_3_ad_cpu",
+      "service": "ad",
+      "name": "container_cpu_utilization",
+      "unit": "ratio",
+      "points": [
+        ["2026-07-28T18:25:00.000Z", 0.13],
+        ["2026-07-28T18:30:00.000Z", 0.99]
+      ]
+    }
+  ],
+  "events": [
+    {
+      "evidence_id": "event_3_flagd_config",
+      "timestamp": "2026-07-28T18:22:00.000Z",
+      "namespace": "otel-demo",
+      "kind": "ConfigMap",
+      "name": "flagd-config",
+      "reason": "Updated",
+      "message": "ConfigMap data updated"
+    }
+  ],
+  "resources": [
+    {
+      "evidence_id": "resource_3_flagd",
+      "namespace": "otel-demo",
+      "kind": "ConfigMap",
+      "name": "flagd-config",
+      "state": {
+        "resource_version": "fixture-3-rv2",
+        "data_keys": ["flags.json"]
+      }
+    },
+    {
+      "evidence_id": "resource_3_ad",
+      "namespace": "otel-demo",
+      "kind": "Deployment",
+      "name": "ad",
+      "state": {"ready_replicas": 1, "desired_replicas": 1}
+    }
+  ],
+  "deployments": [],
+  "topology": {
+    "nodes": [
+      {"id": "frontend", "kind": "Service", "namespace": "otel-demo"},
+      {"id": "ad", "kind": "Service", "namespace": "otel-demo"},
+      {"id": "flagd-config", "kind": "ConfigMap", "namespace": "otel-demo"}
+    ],
+    "edges": [
+      {"from": "frontend", "to": "ad", "kind": "RPC"},
+      {"from": "flagd-config", "to": "ad", "kind": "CONFIGURES"}
+    ]
+  },
+  "replay_recipes": [
+    {
+      "recipe_id": "browse-product",
+      "description": "Issue the product browse request",
+      "expected_root_service": "frontend",
+      "enabled": true
+    }
+  ]
+}

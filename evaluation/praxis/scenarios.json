@@ -1,0 +1,295 @@
+{
+  "schema_version": "praxis-scenarios/v1",
+  "source": {
+    "artifact_record": "19247887",
+    "ground_truth_path": "itbench-lite-ae/sre/ground_truths_all.json"
+  },
+  "incidents": [
+    {
+      "id": "3",
+      "name": "Ad Service CPU",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Java", "Node.js"],
+      "root_kind": "ConfigMap",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "5",
+      "name": "Ad Service Failure",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Java", "Node.js"],
+      "root_kind": "ConfigMap",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "6",
+      "name": "Ad Service Manual Garbage Collection",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Java", "Node.js"],
+      "root_kind": "ConfigMap",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "17",
+      "name": "ProductCatalog Network Delay Chaos",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Go", "Python", "Node.js"],
+      "root_kind": "NetworkChaos",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "20",
+      "name": "productcatalogservice Corrupt Image",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Go", "Node.js"],
+      "root_kind": "Pod",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "25",
+      "name": "recommendationservice CPU Stress Chaos",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Python", "Node.js"],
+      "root_kind": "StressChaos",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "29",
+      "name": "JVM code injection fault",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Java", "Node.js"],
+      "root_kind": "JVMChaos",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "32",
+      "name": "Downgrade Ad Service",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Java", "Node.js"],
+      "root_kind": "Deployment",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "401",
+      "name": "recommendation Return Type Incompatible Image (strace)",
+      "stratum": "direct_code",
+      "four_arm": true,
+      "source_variant": "strace",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "Service",
+      "expected_liveprobe_terminal": "LOCALIZED"
+    },
+    {
+      "id": "402",
+      "name": "recommendation Return Type Incompatible Image (errlog)",
+      "stratum": "direct_code",
+      "four_arm": true,
+      "source_variant": "errlog",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "Service",
+      "expected_liveprobe_terminal": "LOCALIZED"
+    },
+    {
+      "id": "403",
+      "name": "recommendation Return Type Incompatible Image (errcode)",
+      "stratum": "direct_code",
+      "four_arm": true,
+      "source_variant": "errcode",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "Service",
+      "expected_liveprobe_terminal": "LOCALIZED"
+    },
+    {
+      "id": "404",
+      "name": "recommendation Return Type Incompatible Image (monzo)",
+      "stratum": "direct_code",
+      "four_arm": true,
+      "source_variant": "monzo",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "Service",
+      "expected_liveprobe_terminal": "LOCALIZED"
+    },
+    {
+      "id": "405",
+      "name": "recommendation external DB deadlock during serving",
+      "stratum": "boundary_configuration",
+      "four_arm": true,
+      "source_variant": "deadlock-serving",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "ServiceBoundary",
+      "expected_liveprobe_terminal": "HANDOFF"
+    },
+    {
+      "id": "406",
+      "name": "recommendation external DB deadlock during bootstrap",
+      "stratum": "boundary_configuration",
+      "four_arm": true,
+      "source_variant": "deadlock-bootstrap",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "ServiceBoundary",
+      "expected_liveprobe_terminal": "HANDOFF"
+    },
+    {
+      "id": "407",
+      "name": "recommendation external DB timeout during bootstrap",
+      "stratum": "boundary_configuration",
+      "four_arm": true,
+      "source_variant": "deadlock-to-bootstrap",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "ServiceBoundary",
+      "expected_liveprobe_terminal": "HANDOFF"
+    },
+    {
+      "id": "408",
+      "name": "recommendation external DB timeout during serving",
+      "stratum": "boundary_configuration",
+      "four_arm": true,
+      "source_variant": "deadlock-to-serving",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "ServiceBoundary",
+      "expected_liveprobe_terminal": "HANDOFF"
+    },
+    {
+      "id": "409",
+      "name": "recommendation external DB livelock during bootstrap",
+      "stratum": "boundary_configuration",
+      "four_arm": true,
+      "source_variant": "livelock-bootstrap",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "ServiceBoundary",
+      "expected_liveprobe_terminal": "HANDOFF"
+    },
+    {
+      "id": "410",
+      "name": "recommendation external DB livelock during serving",
+      "stratum": "boundary_configuration",
+      "four_arm": true,
+      "source_variant": "livelock-serving",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "ServiceBoundary",
+      "expected_liveprobe_terminal": "HANDOFF"
+    },
+    {
+      "id": "411",
+      "name": "recommendation Return Type SW Logic Bug Failed Image",
+      "stratum": "direct_code",
+      "four_arm": true,
+      "source_variant": "logic-crash",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "Service",
+      "expected_liveprobe_terminal": "LOCALIZED"
+    },
+    {
+      "id": "412",
+      "name": "recommendation updated software logical bug slow response",
+      "stratum": "direct_code",
+      "four_arm": true,
+      "source_variant": "logic-slow",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "Service",
+      "expected_liveprobe_terminal": "LOCALIZED"
+    },
+    {
+      "id": "413",
+      "name": "recommendation broken DB label during serving",
+      "stratum": "boundary_configuration",
+      "four_arm": true,
+      "source_variant": "label-serving",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "DeploymentConfiguration",
+      "expected_liveprobe_terminal": "HANDOFF"
+    },
+    {
+      "id": "414",
+      "name": "recommendation broken DB label during bootstrap",
+      "stratum": "boundary_configuration",
+      "four_arm": true,
+      "source_variant": "label-bootstrap",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "DeploymentConfiguration",
+      "expected_liveprobe_terminal": "HANDOFF"
+    },
+    {
+      "id": "415",
+      "name": "recommendation incorrect configuration list overrun",
+      "stratum": "boundary_configuration",
+      "four_arm": true,
+      "source_variant": "incorrect-config",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "Service",
+      "expected_liveprobe_terminal": "LOCALIZED"
+    },
+    {
+      "id": "416",
+      "name": "recommendation DB configuration list overrun",
+      "stratum": "boundary_configuration",
+      "four_arm": true,
+      "source_variant": "incorrect-configdb",
+      "technologies": ["Python", "Go", "Node.js"],
+      "root_kind": "ServiceBoundary",
+      "expected_liveprobe_terminal": "HANDOFF"
+    },
+    {
+      "id": "501",
+      "name": "Ad Service Failure and High CPU",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Java", "Node.js"],
+      "root_kind": "ConfigMap",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "502",
+      "name": "Ad Service Failure and Manual GC",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Java", "Node.js"],
+      "root_kind": "ConfigMap",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "503",
+      "name": "Ad Service High CPU and Manual GC",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Java", "Node.js"],
+      "root_kind": "ConfigMap",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "504",
+      "name": "Ad Service High CPU, Manual GC, and Failures",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Java", "Node.js"],
+      "root_kind": "ConfigMap",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "505",
+      "name": "Ad failure and recommendation cache failure",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Python", "Java", "Node.js", "Go"],
+      "root_kind": "ConfigMap",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    },
+    {
+      "id": "506",
+      "name": "Ad high CPU and recommendation cache failure",
+      "stratum": "non_liveprobe_boundary",
+      "four_arm": false,
+      "technologies": ["Python", "Java", "Node.js", "Go"],
+      "root_kind": "ConfigMap",
+      "expected_liveprobe_terminal": "HANDOFF_OR_NOT_STARTED"
+    }
+  ]
+}

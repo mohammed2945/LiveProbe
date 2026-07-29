@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://liveprobe.dev/schemas/praxis-diagnosis-v1.json",
+  "title": "LiveProbe PRAXIS Evaluation Diagnosis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "root_cause",
+    "mechanism",
+    "propagation",
+    "remediation",
+    "confidence"
+  ],
+  "properties": {
+    "status": {
+      "enum": ["LOCALIZED", "HANDOFF", "INSUFFICIENT"]
+    },
+    "root_cause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity", "kind"],
+      "properties": {
+        "entity": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "service": {"type": ["string", "null"]},
+        "file": {"type": ["string", "null"]},
+        "line": {"type": ["integer", "null"], "minimum": 1},
+        "function": {"type": ["string", "null"]},
+        "namespace": {"type": ["string", "null"]},
+        "resource": {"type": ["string", "null"]},
+        "config_path": {"type": ["string", "null"]}
+      }
+    },
+    "mechanism": {
+      "type": "string",
+      "minLength": 1
+    },
+    "propagation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "to", "evidence_ids"],
+        "properties": {
+          "from": {"type": "string", "minLength": 1},
+          "to": {"type": "string", "minLength": 1},
+          "evidence_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "explanation": {"type": "string"}
+        }
+      }
+    },
+    "remediation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  }
+}

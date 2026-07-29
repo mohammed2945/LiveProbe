@@ -1,0 +1,111 @@
+{
+  "schema_version": "liveprobe-praxis-compatibility/v1",
+  "description": "Static compatibility contract for the source-available PRAXIS recommendation-service panel. This is a pre-model gate, not benchmark evidence.",
+  "source_file": "recommendation_server.py",
+  "criterion": {
+    "function": "get_product_list",
+    "return_name": "prod_list",
+    "watch_path": "prod_list",
+    "service_id": "recommendation",
+    "failure_class": "type_shape",
+    "expected_type": "sequence",
+    "probe_budget": 5
+  },
+  "negative_controls": [
+    {
+      "target": "os.environ.get",
+      "expected_kind": "local"
+    },
+    {
+      "receiver_suffix": "response",
+      "method": "get",
+      "expected_kind": "local"
+    }
+  ],
+  "incidents": {
+    "401": {
+      "required_boundaries": ["service:rpc:ListProducts"]
+    },
+    "402": {
+      "required_boundaries": ["service:rpc:ListProducts"]
+    },
+    "403": {
+      "required_boundaries": ["service:rpc:ListProducts"]
+    },
+    "404": {
+      "required_boundaries": ["service:rpc:ListProducts"]
+    },
+    "405": {
+      "required_boundaries": [
+        "service:rpc:ListProducts",
+        "http:http:GET:"
+      ]
+    },
+    "406": {
+      "required_boundaries": [
+        "service:rpc:ListProducts",
+        "http:http:GET:"
+      ]
+    },
+    "407": {
+      "required_boundaries": [
+        "service:rpc:ListProducts",
+        "http:http:GET:"
+      ]
+    },
+    "408": {
+      "required_boundaries": [
+        "service:rpc:ListProducts",
+        "http:http:GET:"
+      ]
+    },
+    "409": {
+      "required_boundaries": [
+        "service:rpc:ListProducts",
+        "service:socket:connect",
+        "service:socket:recv"
+      ]
+    },
+    "410": {
+      "required_boundaries": [
+        "service:rpc:ListProducts",
+        "service:socket:connect",
+        "service:socket:recv"
+      ]
+    },
+    "411": {
+      "required_boundaries": ["service:rpc:ListProducts"]
+    },
+    "412": {
+      "required_boundaries": [
+        "service:rpc:ListProducts",
+        "service:socket:connect",
+        "service:socket:recv"
+      ]
+    },
+    "413": {
+      "required_boundaries": [
+        "service:rpc:ListProducts",
+        "service:socket:connect",
+        "service:socket:recv"
+      ]
+    },
+    "414": {
+      "required_boundaries": [
+        "service:rpc:ListProducts",
+        "service:socket:connect",
+        "service:socket:recv"
+      ]
+    },
+    "415": {
+      "required_boundaries": ["service:rpc:ListProducts"]
+    },
+    "416": {
+      "required_boundaries": [
+        "service:rpc:ListProducts",
+        "service:socket:connect",
+        "service:socket:recv"
+      ]
+    }
+  }
+}

@@ -74,6 +74,72 @@ def capture(request):
     ]
 
 
+def test_boundary_classification_requires_client_provenance() -> None:
+    fragment = PythonFrontend().analyze_source(
+        """
+import httpx
+import os
+import redis
+import requests
+import socket
+
+def collect(url, response, product_catalog_stub, payment_client, key):
+    environment = os.environ.get(key)
+    field = response.get("field")
+    direct = requests.get(url)
+    session = httpx.Client()
+    indirect = session.post(url)
+    cache = redis.Redis()
+    cached = cache.get(key)
+    rpc = product_catalog_stub.ListProducts(key)
+    with socket.socket() as channel:
+        channel.connect(("db", 9000))
+        raw = channel.recv(1024)
+    unresolved = payment_client.charge(key)
+    return environment, field, direct, indirect, cached, rpc, raw, unresolved
+""".lstrip(),
+        "service.py",
+    )[0]
+    by_target = {call.target: call for call in fragment.calls}
+
+    assert by_target["os.environ.get"].boundary_kind == "local"
+    assert by_target["response.get"].boundary_kind == "local"
+    assert by_target["requests.get"].boundary_kind == "http"
+    assert by_target["session.post"].boundary_kind == "http"
+    assert by_target["cache.get"].boundary_kind == "durable"
+    assert (
+        by_target["product_catalog_stub.ListProducts"].boundary_kind
+        == "service"
+    )
+    assert by_target["channel.connect"].boundary_kind == "service"
+    assert by_target["channel.recv"].boundary_kind == "service"
+    assert by_target["payment_client.charge"].boundary_kind == "unknown"
+
+
+def test_extracts_flask_and_grpc_routes() -> None:
+    fragments = PythonFrontend().analyze_source(
+        """
+class Catalog(demo_pb2_grpc.CatalogServicer):
+    def ListProducts(self, request, context):
+        return {"products": []}
+
+@app.route("/health", methods=["GET", "HEAD"])
+def health():
+    return {"ok": True}
+""".lstrip(),
+        "service.py",
+    )
+    routes = {
+        (route.method, route.path)
+        for fragment in fragments
+        for route in fragment.routes
+    }
+
+    assert ("RPC", "ListProducts") in routes
+    assert ("GET", "/health") in routes
+    assert ("HEAD", "/health") in routes
+
+
 def test_imported_call_targets_are_module_qualified() -> None:
     fragment = PythonFrontend().analyze_source(
         """

@@ -1,0 +1,22 @@
+{
+  "schema_version": "praxis-liveprobe-images/v1",
+  "registry": "quay.io/shengkunrz/it-bench-dev",
+  "incidents": {
+    "401": "dev-recommendation",
+    "402": "nightly-recommendation",
+    "403": "alpha-recommendation",
+    "404": "monzo-recommendation",
+    "405": "neo4j-serving-recommendation",
+    "406": "neo4j-bootstrap-recommendation",
+    "407": "neo4jto-bootstrap-recommendation",
+    "408": "neo4jto-serving-recommendation",
+    "409": "neo4jto-live-bootstrap-recommendation",
+    "410": "neo4jto-live-serving-recommendation",
+    "411": "logicc-recommendation",
+    "412": "logics-recommendation",
+    "413": "neo4j-label-serving-recommendation",
+    "414": "neo4j-label-bootstrap-recommendation",
+    "415": "config-recommendation",
+    "416": "configdb-recommendation"
+  }
+}

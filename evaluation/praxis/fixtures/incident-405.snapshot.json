@@ -1,0 +1,128 @@
+{
+  "schema_version": "observability-snapshot/v1",
+  "snapshot_id": "fixture-405-seed-10",
+  "revision": "sha256:fixture405",
+  "incident_id": "405",
+  "detected_at": "2026-07-28T18:20:00.000Z",
+  "window": {
+    "start": "2026-07-28T18:10:00.000Z",
+    "end": "2026-07-28T18:20:00.000Z"
+  },
+  "synthetic": true,
+  "bootstrap": {
+    "alerts": [
+      {
+        "evidence_id": "evt_405_alert_recommendation",
+        "name": "RequestLatency",
+        "service": "recommendation",
+        "state": "firing",
+        "description": "Latency is above threshold"
+      }
+    ],
+    "failing_trace_summaries": [
+      {
+        "evidence_id": "trace_405_summary",
+        "trace_id": "4c050000000000000000000000000001",
+        "root_service": "frontend",
+        "root_operation": "GET /api/products",
+        "status": "ERROR",
+        "error_path": ["frontend", "recommendation", "neo4j-productdb"]
+      }
+    ]
+  },
+  "logs": [
+    {
+      "evidence_id": "log_405_1",
+      "timestamp": "2026-07-28T18:19:30.000Z",
+      "service": "recommendation",
+      "severity": "INFO",
+      "trace_id": "4c050000000000000000000000000001",
+      "message": "querying neo4j product database for additional products"
+    },
+    {
+      "evidence_id": "log_405_2",
+      "timestamp": "2026-07-28T18:19:59.000Z",
+      "service": "frontend",
+      "severity": "ERROR",
+      "trace_id": "4c050000000000000000000000000001",
+      "message": "recommendation request exceeded frontend deadline"
+    }
+  ],
+  "traces": [
+    {
+      "evidence_id": "trace_405",
+      "trace_id": "4c050000000000000000000000000001",
+      "started_at": "2026-07-28T18:19:30.000Z",
+      "duration_ms": 29000,
+      "status": "ERROR",
+      "spans": [
+        {
+          "span_id": "405-front",
+          "parent_span_id": null,
+          "service": "frontend",
+          "operation": "GET /api/products",
+          "status": "ERROR",
+          "duration_ms": 29000
+        },
+        {
+          "span_id": "405-recommendation",
+          "parent_span_id": "405-front",
+          "service": "recommendation",
+          "operation": "ListRecommendations",
+          "status": "ERROR",
+          "duration_ms": 28980
+        },
+        {
+          "span_id": "405-db",
+          "parent_span_id": "405-recommendation",
+          "service": "neo4j-productdb",
+          "operation": "GET /products",
+          "status": "UNSET",
+          "duration_ms": 28970
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "evidence_id": "metric_405_latency",
+      "service": "recommendation",
+      "name": "request_latency_p99_ms",
+      "unit": "ms",
+      "points": [
+        ["2026-07-28T18:15:00.000Z", 41],
+        ["2026-07-28T18:20:00.000Z", 29000]
+      ]
+    }
+  ],
+  "events": [],
+  "resources": [
+    {
+      "evidence_id": "resource_405_recommendation",
+      "namespace": "otel-demo",
+      "kind": "Deployment",
+      "name": "recommendation",
+      "state": {"ready_replicas": 1, "desired_replicas": 1}
+    }
+  ],
+  "deployments": [],
+  "topology": {
+    "nodes": [
+      {"id": "frontend", "kind": "Service", "namespace": "otel-demo"},
+      {"id": "recommendation", "kind": "Service", "namespace": "otel-demo"},
+      {"id": "neo4j-productdb", "kind": "Service", "namespace": "otel-demo"}
+    ],
+    "edges": [
+      {"from": "frontend", "to": "recommendation", "kind": "RPC"},
+      {"from": "recommendation", "to": "neo4j-productdb", "kind": "HTTP"}
+    ]
+  },
+  "replay_recipes": [
+    {
+      "recipe_id": "browse-product",
+      "description": "Issue the product browse request that waits on recommendation",
+      "expected_root_service": "frontend",
+      "enabled": true
+    }
+  ]
+}

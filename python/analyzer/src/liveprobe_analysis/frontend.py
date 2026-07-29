@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from .boundaries import classify_boundary_call, discover_client_bindings
 from .model import (
     CallContributionRole,
     CallSite,
@@ -623,7 +624,7 @@ class PythonFrontend:
             defs_by_node,
             import_aliases,
         )
-        routes = self._route_summaries(function, function_id)
+        routes = self._route_summaries(function, function_id, parents)
         hammocks = self._hammocks(
             function,
             function_id,
@@ -974,6 +975,10 @@ class PythonFrontend:
     ) -> tuple[list[CallSite], list[DurableAccess]]:
         calls: list[CallSite] = []
         durable: list[DurableAccess] = []
+        client_bindings = discover_client_bindings(
+            statements,
+            lambda target: _resolve_imported_target(target, import_aliases),
+        )
         for statement in statements:
             node_id = ids[statement]
             statement_source = _source_segment(source, statement)
@@ -981,16 +986,22 @@ class PythonFrontend:
                 target = _resolve_imported_target(
                     _call_name(call), import_aliases
                 )
-                boundary_kind: str = "local"
-                detail: str | None = None
-                if target.endswith((".get", ".post", ".put", ".patch", ".delete")):
-                    boundary_kind = "http"
-                    if call.args:
-                        detail = _literal_string(call.args[0]) or ast.unparse(
-                            call.args[0]
-                        )
+                classification = classify_boundary_call(
+                    call, target, client_bindings
+                )
+                boundary_kind: str = (
+                    classification.kind
+                    if classification is not None
+                    else "local"
+                )
+                detail: str | None = (
+                    classification.detail
+                    if classification is not None
+                    else None
+                )
                 if ".table" in statement_source and ".execute" in statement_source:
                     boundary_kind = "durable"
+                    detail = detail or "supabase-query"
                 contribution_role = _call_contribution_role(statement, call)
                 if boundary_kind == "durable":
                     contribution_role = "HISTORICAL_STATE_PRODUCER"
@@ -1061,6 +1072,7 @@ class PythonFrontend:
         self,
         function: ast.FunctionDef | ast.AsyncFunctionDef,
         function_id: str,
+        parents: dict[ast.AST, ast.AST],
     ) -> list[RouteSummary]:
         result: list[RouteSummary] = []
         fields = tuple(
@@ -1074,6 +1086,34 @@ class PythonFrontend:
             if target is None:
                 continue
             method = target.rsplit(".", 1)[-1].upper()
+            if method in {"ROUTE", "API_ROUTE"}:
+                methods = next(
+                    (
+                        keyword.value
+                        for keyword in decorator.keywords
+                        if keyword.arg == "methods"
+                    ),
+                    None,
+                )
+                if isinstance(methods, (ast.List, ast.Tuple, ast.Set)):
+                    route_path = (
+                        _literal_string(decorator.args[0])
+                        if decorator.args
+                        else None
+                    )
+                    if route_path:
+                        for item in methods.elts:
+                            route_method = _literal_string(item)
+                            if route_method:
+                                result.append(
+                                    RouteSummary(
+                                        method=route_method.upper(),
+                                        path=route_path,
+                                        function_id=function_id,
+                                        parameter_fields=fields,
+                                    )
+                                )
+                continue
             if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
                 continue
             path = _literal_string(decorator.args[0]) if decorator.args else None
@@ -1086,6 +1126,19 @@ class PythonFrontend:
                         parameter_fields=fields,
                     )
                 )
+        parent = parents.get(function)
+        if isinstance(parent, ast.ClassDef) and any(
+            (_attribute_path(base) or "").endswith("Servicer")
+            for base in parent.bases
+        ):
+            result.append(
+                RouteSummary(
+                    method="RPC",
+                    path=function.name,
+                    function_id=function_id,
+                    parameter_fields=fields,
+                )
+            )
         return result
 
     def _hammocks(
