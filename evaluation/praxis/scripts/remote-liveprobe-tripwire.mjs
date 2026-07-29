@@ -170,6 +170,14 @@ export async function runRemoteTripwire(options) {
     incidentCompatibility !== undefined,
     "compatibility report does not contain the selected incident",
   );
+  if (options.incident === "401") {
+    assert(
+      incidentCompatibility.criterion?.watch_path === "cat_response" &&
+        incidentCompatibility.criterion?.line === 95,
+      "compatibility report contains the stale incident-401 criterion",
+      incidentCompatibility.criterion,
+    );
+  }
   assert(
     metadata.incident_id === options.incident &&
       metadata.git_commit === incidentCompatibility.git_commit,
