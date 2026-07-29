@@ -697,7 +697,7 @@ test("LiveProbe ledger counters retain costs without raw probe values", () => {
   assert.equal(JSON.stringify(counters).includes("investigation-secret"), false);
 });
 
-test("ledger accounts exact aggregate tokens and enforces budgets", () => {
+test("ledger reports exact aggregates and budgets non-cached input plus output", () => {
   const ledger = new EvaluationLedger({
     run_id: "contract",
     arm: "normal_coding_sre",
@@ -705,7 +705,7 @@ test("ledger accounts exact aggregate tokens and enforces budgets", () => {
     seed: 10,
     model: "contract-model",
     budget: {
-      llm_total_tokens: 100,
+      llm_total_tokens: 80,
       observability_queries: 2,
     },
     clock: () => "2026-07-28T00:00:00.000Z",
@@ -747,7 +747,7 @@ test("ledger accounts exact aggregate tokens and enforces budgets", () => {
         phase: "diagnosis",
         usage: { input_tokens: 21, output_tokens: 0 },
       }),
-    /LLM token budget exceeded/,
+    /LLM weighted token budget exceeded/,
   );
 });
 

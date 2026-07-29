@@ -248,6 +248,11 @@ export async function runCodexAgent({
     const events = parseEvents(error.stdout ?? "");
     const usage = usageFromEvents(events);
     usage.model_ms = elapsedMs;
+    if (error.ledgerRecorded === true) {
+      error.usage = usage;
+      error.wall_ms = elapsedMs;
+      throw error;
+    }
     ledger.recordModel({
       phase: "incident_diagnosis",
       prompt_sha256: sha256(prompt),

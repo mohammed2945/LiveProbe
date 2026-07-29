@@ -615,7 +615,12 @@ export class EvaluationLedger {
       tool_response_bytes: payload.response_bytes ?? 0,
     });
     this.persist(record);
-    this.assertBudget();
+    try {
+      this.assertBudget();
+    } catch (error) {
+      error.ledgerRecorded = true;
+      throw error;
+    }
     return record;
   }
 
@@ -640,20 +645,29 @@ export class EvaluationLedger {
     this.records.push(record);
     addUsage(this.usage, normalized);
     this.persist(record);
-    this.assertBudget();
+    try {
+      this.assertBudget();
+    } catch (error) {
+      error.ledgerRecorded = true;
+      throw error;
+    }
     return record;
   }
 
   assertBudget() {
+    // This matches Codex's rollout-budget accounting: sampled output plus
+    // non-cached input, each at the default weight of 1. Provider-reported
+    // aggregate and cached tokens remain intact in the ledger for reporting.
+    const weightedTokens =
+      this.usage.new_input_tokens + this.usage.output_tokens;
     if (
       this.budget?.llm_total_tokens !== undefined &&
-      this.usage.input_tokens + this.usage.output_tokens >
-        this.budget.llm_total_tokens
+      weightedTokens > this.budget.llm_total_tokens
     ) {
       throw new Error(
-        `LLM token budget exceeded: ${
-          this.usage.input_tokens + this.usage.output_tokens
-        } > ${this.budget.llm_total_tokens}`,
+        `LLM weighted token budget exceeded: ${weightedTokens} > ${
+          this.budget.llm_total_tokens
+        }`,
       );
     }
     if (

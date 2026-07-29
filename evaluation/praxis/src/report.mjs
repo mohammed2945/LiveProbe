@@ -277,8 +277,8 @@ function timingTable(groups) {
 
 function tokenTable(groups) {
   const rows = [
-    "| Arm | Mean input | Mean cached | Mean new input | Mean output | Mean reasoning | Agent turns | Model samples |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Arm | Mean input | Mean cached | Mean new input | Mean output | Mean rollout-weighted | Mean reasoning | Agent turns | Model samples |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const arm of ARM_NAMES) {
     const results = groups.get(arm) ?? [];
@@ -293,6 +293,9 @@ function tokenTable(groups) {
         `${integer(usage.cached_input_tokens / results.length)} | ` +
         `${integer(usage.new_input_tokens / results.length)} | ` +
         `${integer(usage.output_tokens / results.length)} | ` +
+        `${integer(
+          (usage.new_input_tokens + usage.output_tokens) / results.length,
+        )} | ` +
         `${integer(usage.reasoning_tokens / results.length)} | ` +
         `${integer(usage.model_calls)} | ` +
         `${integer(usage.model_samples)} |`,
@@ -481,7 +484,7 @@ export async function buildReport(options) {
       "",
       tokenTable(groups),
       "",
-      "Input, cached input, output, and reasoning tokens are provider-reported aggregates. “New input” is input minus cached input. A coding-agent `codex exec` is one exact outer turn; its model-sample count is an event-derived lower bound. Each tool-free PRAXIS subprocess is counted as one exact model call/sample.",
+      "Input, cached input, output, and reasoning tokens are provider-reported aggregates. “New input” is input minus cached input. “Rollout-weighted” is new input plus output, matching the enforced Codex rollout budget's default 1.0 prefill and sampling weights; cached input remains reported but does not consume that cap. A coding-agent `codex exec` is one exact outer turn; its model-sample count is an event-derived lower bound. Each tool-free PRAXIS subprocess is counted as one exact model call/sample.",
       "",
       "### Tool and runtime operations",
       "",

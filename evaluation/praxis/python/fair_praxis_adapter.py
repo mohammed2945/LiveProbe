@@ -446,7 +446,7 @@ class CodexCLIBackend:
         self.ledger_path = Path(ledger_path)
         self.token_budget = token_budget
         self.timeout_seconds = timeout_seconds
-        self.total_tokens = 0
+        self.weighted_tokens = 0
         self.call_index = 0
 
     @staticmethod
@@ -474,11 +474,28 @@ class CodexCLIBackend:
         }
 
     def inference(self, system_prompt: str, input: str, **_kwargs):
+        remaining_tokens = self.token_budget - self.weighted_tokens
+        if remaining_tokens < 1:
+            raise RuntimeError(
+                "PRAXIS LLM weighted token budget exhausted before call"
+            )
         self.call_index += 1
         prompt = (
             f"{system_prompt}\n\n{input}\n\n"
             "Return only the requested answer. Do not call tools."
         )
+        reminder_tokens = []
+        for value in (
+            remaining_tokens // 3,
+            remaining_tokens // 6,
+            remaining_tokens // 15,
+        ):
+            if (
+                0 < value < remaining_tokens
+                and value not in reminder_tokens
+            ):
+                reminder_tokens.append(value)
+        reminder_config = json.dumps(reminder_tokens, separators=(",", ":"))
         with tempfile.TemporaryDirectory(prefix="praxis-codex-") as temporary:
             answer_path = Path(temporary) / "answer.txt"
             started = time.perf_counter()
@@ -486,6 +503,7 @@ class CodexCLIBackend:
                 [
                     "codex",
                     "exec",
+                    "--strict-config",
                     "--ignore-user-config",
                     "--ignore-rules",
                     "--ephemeral",
@@ -505,6 +523,19 @@ class CodexCLIBackend:
                     "agents.enabled=false",
                     "--config",
                     "mcp_servers={}",
+                    "--config",
+                    "features.rollout_budget.enabled=true",
+                    "--config",
+                    (
+                        "features.rollout_budget.limit_tokens="
+                        f"{remaining_tokens}"
+                    ),
+                    "--config",
+                    (
+                        "features.rollout_budget."
+                        "reminder_at_remaining_tokens="
+                        f"{reminder_config}"
+                    ),
                     "--output-last-message",
                     str(answer_path),
                     "-",
@@ -524,7 +555,9 @@ class CodexCLIBackend:
                     continue
             usage = self._usage(events)
             usage["model_ms"] = elapsed_ms
-            self.total_tokens += usage["input_tokens"] + usage["output_tokens"]
+            self.weighted_tokens += (
+                usage["new_input_tokens"] + usage["output_tokens"]
+            )
             record = {
                 "schema_version": "liveprobe-eval-ledger/v1",
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -555,10 +588,10 @@ class CodexCLIBackend:
             }
             with self.ledger_path.open("a") as ledger:
                 ledger.write(json.dumps(record) + "\n")
-            if self.total_tokens > self.token_budget:
+            if self.weighted_tokens > self.token_budget:
                 raise RuntimeError(
-                    f"PRAXIS LLM token budget exceeded: "
-                    f"{self.total_tokens} > {self.token_budget}"
+                    f"PRAXIS LLM weighted token budget exceeded: "
+                    f"{self.weighted_tokens} > {self.token_budget}"
                 )
             if result.returncode != 0 or not answer_path.exists():
                 raise RuntimeError(
