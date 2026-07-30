@@ -1,130 +1,102 @@
 # PRAXIS × LiveProbe evaluation results
 
-Current campaign: **r11**. Model `gpt-5.4`, effort `low`, 9 incidents, seed 10,
-uniform 50,000 rollout-weighted-token cap per arm. 36 runs, all scored.
+Two campaigns, `gpt-5.4`, effort `low`, 9 integrity-verified incidents.
 
-The r10 report is superseded and kept in git history. r10 scored **0/4 on every
-arm** because of three metric defects, not arm failures; those are fixed in
-`4c3e853` and documented in `../PRE_REGISTRATION.md`. `scoreDiagnosis` was never
-modified.
+| | r11 | r12 |
+| --- | --- | --- |
+| Arms | 4 | 3 (PRAXIS dropped) |
+| Seeds | 10 | 10, 20 |
+| Cap | 50,000 | 250,000 |
+| Runs | 36 | 54 |
+| LiveProbe actually used | **no** | yes |
 
-## Headline
+**Read r12 for LiveProbe's value. Read r11 only for the metric repair.**
 
-**What r11 establishes:** the metric repair works. **What it does not:**
-anything about LiveProbe's value — the LiveProbe arms barely invoked LiveProbe
-(next section), so the efficiency comparison is void and is not claimed.
+## Headline: LiveProbe costs more time and more tokens
 
-| Arm | Combined@1 | Localized | Median tokens | Median turns | Median wall |
+r12, medians per run:
+
+| Arm | Combined@1 | Localized | Tokens | Turns | Wall |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Normal coding SRE | 4/9 | 7/9 | 25,671 | 19 | 67.9 s |
-| Graph + LiveProbe | 4/9 | **8/9** | 38,270 | 18 | 61.7 s |
-| Raw LiveProbe | **5/9** | 6/9 | 34,757 | 16 | 66.1 s |
-| PRAXIS | 0/9 | 0/9 | — | 3 | 62.1 s |
+| Normal coding SRE | 10/18 | 14/18 | **26,358** | 22 | **63.9 s** |
+| Graph + LiveProbe | 10/18 | 14/18 | 41,698 | 22 | 78.4 s |
+| Raw LiveProbe | **12/18** | **16/18** | 35,714 | **20** | 72.7 s |
 
-**PRAXIS exceeded its budget on all 9 incidents and produced no diagnosis.**
-`fair_praxis_adapter.py:477` splits one 50,000 budget across ~5 sequential
-calls while each coding arm gets 50,000 for a single call. Owner decision: mark
-it, do not re-run. Its runs are excluded from accuracy and reported as
-overhead.
+There is **no time multiplier and no token multiplier**. LiveProbe is 14–23%
+slower and 35–58% more expensive. Any target of 2× or 5× on either axis is not
+supported by this data and is not close.
 
-## r11's efficiency comparison is void — the treatment was never applied
+## Where LiveProbe does pay: boundary faults
 
-Counted from the operation ledgers across all 9 incidents:
+| Stratum | Arm | Combined@1 | Localized | Tokens | Wall |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `direct_code` (10) | normal | **10/10** | 10/10 | **22,636** | **50.7 s** |
+| | graph | 8/10 | 9/10 | 36,003 | 78.4 s |
+| | raw | 9/10 | 9/10 | 25,512 | 62.2 s |
+| `boundary_configuration` (8) | normal | **0/8** | 4/8 | 36,998 | 82.4 s |
+| | graph | 2/8 | 5/8 | 50,049 | 94.2 s |
+| | raw | **3/8** | **7/8** | 42,495 | 106.9 s |
 
-| Arm | Observability calls | LiveProbe calls | Probes deployed | Failed LiveProbe calls |
-| --- | ---: | ---: | ---: | ---: |
-| Normal coding SRE | 104 | 0 | 0 | 0 |
-| Graph + LiveProbe | 112 | 13 | 1 | 3 |
-| Raw LiveProbe | 109 | 7 | **0** | 2 |
+- **Direct code faults: LiveProbe is a net loss.** The baseline gets 10/10
+  while being fastest and cheapest. Reading source is simply sufficient here.
+- **Boundary/config faults: LiveProbe is the only thing that works at all.**
+  The baseline scores 0/8. Raw LiveProbe gets 3/8 and localizes 7/8 against the
+  baseline's 4/8. It buys that with ~30% more wall time and ~15% more tokens.
 
-`raw_liveprobe` deployed **no probes at all**, on any incident; its seven calls
-were all `list_services`. `graph_liveprobe` deployed probes once in nine
-incidents. Both answered from observability, which is what the baseline does.
+So the honest positioning is **capability on external-dependency faults, not
+efficiency**.
 
-So r11 did not compare "with LiveProbe" against "without LiveProbe". It
-compared three arms that all worked from observability. **Any wall-time or
-token difference between them is not attributable to LiveProbe** and no such
-claim is made here.
+## Why the baseline scores 0/8 on boundary faults
 
-Two causes, one of them self-inflicted:
+Not a metric artifact. In r11, RCI passed 11/12 on this stratum while RCR
+failed 11/12: arms correctly name `recommendation` (an accepted root) but never
+produce the `neo4j-productdb → recommendation` edge. They locate where the
+failure *surfaces* and never establish the external database as its cause.
+That is exactly the gap probing a service boundary is for, and it is why raw
+LiveProbe is the only arm to score here.
 
-1. **A guidance regression.** The naming contract added for r11 ran to ~200
-   words and sat last in `guidance/observability-sre.md`. In r10 the raw arm
-   ran the full `set_snapshot_probe → list_probes → get_probe_data →
-   remove_probe` workflow on incident 401; in r11, on the same incident with
-   the same model, it called `list_services` and stopped. Compressed and
-   reordered in `f851705`. No probe encouragement beyond r10's was added.
-2. **The retry window was mis-scaled.** 5 of 16 LiveProbe calls failed with
-   `broker_unreachable` — confirmed by matching the recorded 423-byte failure
-   against a reproduced socket reset. Retry covered that failure class but
-   totalled under half a second, against pod rollouts that take seconds. Widened
-   to ~4.5 s in `f851705`. An arm that loses its first call abandons LiveProbe
-   for the rest of the incident.
+## r11: the metric repair
 
-For the record, the raw stratum numbers, which stand as a comparison of three
-observability-driven agents and nothing more:
+r10 scored **0/4 on every arm**. Three defects caused it, all fixed in
+`4c3e853` with `scoreDiagnosis` **never modified** — see `../PRE_REGISTRATION.md`.
 
-| Stratum | Arm | Combined@1 | Median tokens | Median wall |
-| --- | --- | ---: | ---: | ---: |
-| `direct_code` (5) | normal | 4/5 | 28,946 | 78.2 s |
-| | graph | 4/5 | 38,885 | 51.6 s |
-| | raw | 4/5 | 31,325 | 53.9 s |
-| `boundary_configuration` (4) | normal | 0/4 | 25,252 | 66.5 s |
-| | graph | 0/4 | 38,050 | 81.9 s |
-| | raw | 1/4 | 34,766 | 82.9 s |
+1. `kind` was scored against an unpublished vocabulary. Published as a schema
+   enum that deliberately **excludes** `"code"`, the value three r10 arms emitted.
+2. `rcl` was a no-op: the official oracle emits no `locations`, so
+   `locationMatches` always returned true. Localization is now measured
+   separately, never folded into `combined_pass_at_1`.
+3. Propagation identity granularity was unstated, so operation-level and prose
+   endpoints could never canonicalize.
 
-## Why the boundary stratum fails, for every arm
+r11 result: 4/9, 4/9, 5/9 versus 0/4. PRAXIS exceeded budget on all 9 and is
+excluded per owner decision — `fair_praxis_adapter.py:477` splits one 50,000
+budget across ~5 sequential calls while each coding arm gets 50,000 for one.
 
-Not a metric artifact. The sub-metrics isolate it:
+**r11's efficiency numbers are withdrawn.** Its LiveProbe arms deployed
+essentially no probes (raw: 0 across 9 incidents), so it compared three
+observability-driven agents. Causes and fixes are F0 in `../R11_FINDINGS.md`.
+Note the direction reversed once LiveProbe was actually used: r11 appeared to
+show LiveProbe ~1.5× *faster*; r12 shows it slower.
 
-| Stratum | Arm | RCI | RCR | Combined |
-| --- | --- | ---: | ---: | ---: |
-| boundary | normal | 3/4 | **0/4** | 0 |
-| boundary | graph | 4/4 | **0/4** | 0 |
-| boundary | raw | 4/4 | **1/4** | 1 |
-| direct_code | all three | 4–5/5 | 5/5 | 4 |
+## Defects fixed
 
-RCI passes 11/12 — the arms correctly name `recommendation`, an accepted root.
-RCR fails 11/12 because they never produce the `neo4j-productdb →
-recommendation` edge. They identified where the failure *surfaces* and never
-established the external database as its cause. `raw_liveprobe` on incident 409
-produced the full chain, so it is achievable, not an impossible requirement.
+| | Defect | Effect |
+| --- | --- | --- |
+| F4/F0b | Broker client had no retry, then too short a window | `broker_unreachable` failures 5 → **0** |
+| F0a | Guidance regression displaced investigative instructions | raw probes deployed 0/9 → 6/16 runs; graph 1 → 7/13 |
+| — | Readiness gated before an arm, not during it | consecutive-observation gate |
+| F1 | 3 deprecated tools exposed, 16% of tool surface | removed by default |
+| F2 | `get_probe_data` advertised 30 s long-poll, defaulted to 0 | short default |
+| F5 | PRAXIS backend failures reported no cause | stdout now surfaced |
 
-This is the clearest headroom in the product: probing across a service boundary
-to prove the external dependency is at fault.
+Open: `graph_liveprobe` still fails `start_probe_investigation` 3 of 13 times
+and `get_probe_data` twice; it reaches probe deployment in only 7 of 13 runs.
+That is the top remaining LiveProbe defect.
 
-## Scope and exclusions
+## Scope
 
-- **9 of 16 four-arm incidents.** 402, 405, 406, 413–416 are excluded because
-  the released artifact and the published images have drifted; no image tag
-  matches those locked sources. Every tag was pulled and hashed against every
-  locked source — evidence table in `../PRE_REGISTRATION.md`. Nothing was
-  excluded on performance grounds.
-- **Seed 10 only.** One run per incident per arm. Per-stratum cells are n=4 and
-  n=5. Treat the wall-time ratios as directional.
-- **Log-richness is measured, not selected on.** Only incident 401's logs name
-  the faulty line; the other 8 are log-silent. All arms sit within 4 s of each
-  other on 401 and diverge on the rest — the gain appears where logs do not
-  give the answer away.
-- Wall time carries provider-latency noise. `model_samples` is an event-derived
-  lower bound for coding arms. Turn count is the steadier of the two.
-
-## Defects found and fixed
-
-`../R11_FINDINGS.md` has the full list. In r11:
-
-- **Broker client had no retry.** A transient blip surfaced as a hard tool
-  error and cost r10's graph arm its only LiveProbe call. Fixed; idempotent
-  methods only, so probe creation can never double-fire.
-- **Readiness gated before an arm, not during it.** Now requires consecutive
-  clean observations.
-
-Held back from r11 to keep the tool surface and probe timing constant, measured
-in r12: deprecated tool removal (F1) and the `get_probe_data` long-poll default
-(F2).
-
-## What this does not support
-
-A token multiplier. 86% of input is cached, so tool-surface reductions save
-~1,497 weighted tokens once per run, ~4%. The remaining token lever is probe
-**response payload** size (F7), which is untested.
+9 of 16 four-arm incidents. 402, 405, 406, 413–416 excluded because the
+released artifact and the published images have drifted — every tag was hashed
+against every locked source, evidence in `../PRE_REGISTRATION.md`. Nothing
+excluded on performance grounds. Two seeds; per-stratum cells are n=8 and n=10.
+Wall time carries provider-latency noise; `model_samples` is a lower bound.
