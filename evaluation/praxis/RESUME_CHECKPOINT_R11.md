@@ -7,22 +7,27 @@ in a detached tmux session on the VM and continues without this session.
 Read this file plus `PRE_REGISTRATION.md` and `R11_FINDINGS.md` before acting.
 `PRE_REGISTRATION.md` is the anti-gaming contract and governs every change.
 
-## State at pause
+## State (updated 2026-07-30, r12 in flight)
 
 | Thing | Value |
 | --- | --- |
-| Local branch | `praxis-eval` @ `e91c14b` |
-| Remote `origin/praxis-eval` | `5492f36` — **`e91c14b` was not yet pushed** |
-| VM `HEAD` | `4c3e853` (deliberately behind) |
-| VM worktree | one staged file: `evaluation/praxis/python/fair_praxis_adapter.py` |
-| VM | `liveprobe-praxis-eval`, zone `us-east1-b`, project `liveprobeeval`, **RUNNING** |
-| Campaign r11 | 29/36 runs, incidents 401–410 complete, 411 in `RUNNING_ARMS(1/4)`, 412 not started |
+| Local and remote | `praxis-eval` @ `78b05dc`, in sync |
+| VM `HEAD` | `f851705`, worktree clean, MCP server rebuilt |
+| VM | `liveprobe-praxis-eval`, `us-east1-b`, `liveprobeeval`, **RUNNING** |
+| Campaign r11 | **COMPLETE**, 36/36 scored, artifacts under `results/artifacts/praxis-campaign-r11/` (gitignored) |
+| Campaign r12 | **RUNNING** in tmux `r12`, 9 incidents × 3 arms × seeds 10,20 = 54 runs at `--tier=pilot` (250k) |
 
-The VM is intentionally **not** at local HEAD. It runs `4c3e853` (contract
-repair + broker retry) plus a single-file patch of the PRAXIS diagnostics from
-`13fe2de`. The `get_probe_data` wait default (`55053ac`) and the legacy-tool
-removal (`5492f36`) are deliberately **excluded** from r11 so the tool surface
-and probe timing stay constant for the whole campaign.
+r11's results are written up in `results/README.md`. Its efficiency comparison
+was **withdrawn** — the LiveProbe arms barely invoked LiveProbe (F0 in
+`R11_FINDINGS.md`). r12 is the run that actually tests LiveProbe, with the
+guidance regression and the retry window both fixed in `f851705`.
+
+r12's first incident confirms the fix took: `raw_liveprobe` deployed a probe
+and read data (`set_snapshot_probe`, `get_probe_data` ×2), where in r11 it
+deployed none across nine incidents. `graph_liveprobe` still stalls before
+probe deployment — it reaches `start_probe_investigation` and errors there
+(460-byte failure, distinct from r11's 423-byte `broker_unreachable`). Quantify
+that across all nine incidents when r12 lands.
 
 tmux sessions on the VM: `r11` (the campaign), plus `broker-forward` (7070),
 `ingress-forward` (8080), `frontend-forward` (8081). The three forwards are
