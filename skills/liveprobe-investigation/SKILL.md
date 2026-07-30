@@ -10,19 +10,6 @@ Expected decision packet protocol: `liveprobe-adaptive-v2`.
 
 Use LiveProbe after observability has answered where to begin. Treat it as the runtime-value and causal-provenance layer of an incident investigation, not as a replacement for metrics, logs, or traces.
 
-## Decide whether to open an investigation at all
-
-An investigation is the most expensive evidence path available. Preparing the checkout, opening the investigation, deploying a bundle, replaying and collecting each cost a round trip, and every returned view enters your context and stays there. Spend that only where it changes the answer.
-
-Before preparing a checkout, state plainly what you already know and what is still undetermined.
-
-- **If the evidence you already hold fixes both the faulty location and the mechanism, stop and report it.** A traceback naming a file, line and exception, confirmed by reading that line in the deployed source, is a complete answer. Opening an investigation to re-observe a value the traceback already reports does not raise confidence; it spends budget restating a known fact.
-- **Investigate when you need a value the evidence cannot supply.** The unique thing runtime observation gives you is what a named expression actually held on one occurrence. Reach for it when the source admits several behaviours and only the observed value separates them.
-- **Investigate across a boundary you cannot see through.** An external dependency's response shape or timing, a value derived from configuration or environment at runtime, a dynamically dispatched call, mutable state written elsewhere: none of these are derivable from your own source, and they are what this layer exists for.
-- **Do not investigate to confirm.** If the observation would not change which hypothesis you report, skip it.
-
-Choosing not to open an investigation is a legitimate and frequently correct outcome. If none is warranted, say so and answer from the evidence you have.
-
 ## Establish the starting criterion
 
 Use traces, logs, metrics, and deploy history first to identify:
