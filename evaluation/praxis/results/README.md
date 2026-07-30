@@ -16,11 +16,16 @@ Two campaigns, `gpt-5.4`, effort `low`, 9 integrity-verified incidents.
 
 r12, medians per run:
 
-| Arm | Combined@1 | Localized | Tokens | Turns | Wall |
+| Arm | Combined@1 | Localized | Tokens | Tool calls | Wall |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Normal coding SRE | 10/18 | 14/18 | **26,358** | 22 | **63.9 s** |
-| Graph + LiveProbe | 10/18 | 14/18 | 41,698 | 22 | 78.4 s |
-| Raw LiveProbe | **12/18** | **16/18** | 35,714 | **20** | 72.7 s |
+| Normal coding SRE | 10/18 | 14/18 | **26,358** | 21 | **63.9 s** |
+| Graph + LiveProbe | 10/18 | 14/18 | 41,698 | 21 | 78.4 s |
+| Raw LiveProbe | **12/18** | **16/18** | 35,714 | **19** | 72.7 s |
+
+Earlier drafts reported a "turns" column. That was misleading:
+`model_samples` is computed as `tool_calls + 1`, verified across 27 of 27 r11
+runs and 51 of 54 r12 runs, so it is not an independent measurement.
+`turn.completed` fires once per `codex exec`. The column is tool-call count.
 
 There is **no time multiplier and no token multiplier**. LiveProbe is 14–23%
 slower and 35–58% more expensive. Any target of 2× or 5× on either axis is not
@@ -92,6 +97,29 @@ show LiveProbe ~1.5× *faster*; r12 shows it slower.
 Open: `graph_liveprobe` still fails `start_probe_investigation` 3 of 13 times
 and `get_probe_data` twice; it reaches probe deployment in only 7 of 13 runs.
 That is the top remaining LiveProbe defect.
+
+## Where the graph arm's tokens go
+
+Measured from the r12 ledgers. Two graph-only tools are 86% of that arm's
+LiveProbe payload:
+
+| Tool | Calls | Mean bytes | Total |
+| --- | ---: | ---: | ---: |
+| `start_probe_investigation` | 13 | **30,989** | 402,860 |
+| `collect_investigation_evidence` | 3 | **43,917** | 131,753 |
+| `deploy_investigation_probes` | 4 | 1,549 | 6,197 |
+| `set_snapshot_probe` | 7 | 1,049 | 7,343 |
+
+`start_probe_investigation` alone is 16.4% of all tool response bytes in the
+campaign. Worst case: incident 411, graph, seed 20 — a single response of
+**145,524 bytes**, 74.5% of that run's entire tool byte budget. Tool responses
+are never cacheable, so this lands wholly in the non-cached input the budget
+counts.
+
+Caveat on attribution: the operation ledger records MCP calls only. Each arm
+also makes roughly 90–110 shell and file reads, which is how the baseline reads
+source, and those bytes are invisible here. Token totals are provider-reported
+and unaffected, but byte-share comparisons understate the baseline.
 
 ## Scope
 
