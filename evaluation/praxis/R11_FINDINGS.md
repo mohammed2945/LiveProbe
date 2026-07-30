@@ -1,4 +1,44 @@
-# r11 audit findings (accumulating)
+# r11 audit findings
+
+## F0 — r11's LiveProbe arms barely used LiveProbe (the headline caveat)
+
+Counted from the r11 operation ledgers across all 9 incidents:
+
+| Arm | Observability calls | LiveProbe calls | Probes deployed | Failed |
+| --- | ---: | ---: | ---: | ---: |
+| normal | 104 | 0 | 0 | 0 |
+| graph | 112 | 13 | 1 | 3 |
+| raw | 109 | 7 | **0** | 2 |
+
+`raw_liveprobe` deployed no probes on any incident. Its seven calls were all
+`list_services`. So r11 compared three observability-driven agents, and no
+efficiency difference between them is attributable to LiveProbe. The r11
+efficiency claim was withdrawn in `7689901`.
+
+Two causes:
+
+**F0a — a guidance regression, self-inflicted.** The naming contract added for
+r11 ran to ~200 words and sat last in `guidance/observability-sre.md`. On
+incident 401, r10's raw arm ran the full
+`set_snapshot_probe → list_probes → get_probe_data → remove_probe` workflow;
+r11's called `list_services` and stopped, same incident and model. Compressed to
+one paragraph and moved ahead of the terminal-state instruction in `f851705`.
+No probe encouragement beyond r10's was added — this only undoes the
+regression.
+
+**F0b — the retry window was mis-scaled (F4's fix was too small).** 5 of 16
+LiveProbe calls failed with `broker_unreachable`. Identified by matching the
+ledger's recorded 423-byte failure against reproduced error shapes: a socket
+reset serialises to exactly 423 bytes as a full JSON-RPC message, while 503,
+502 and 401 give 252, 252 and 392. Retry covered that failure class but totalled
+under half a second against pod rollouts that take seconds. Widened to 5
+attempts at 300ms exponential backoff, ~4.5 s, in `f851705`. An arm that loses
+its first call abandons LiveProbe for the rest of the incident, so this failure
+is far more costly than its rate suggests.
+
+---
+
+# Earlier findings (recorded before r11 results landed)
 
 Efficiency defects found by zero-token inspection, before r11 results land.
 None applied during r11 — changing the tool surface mid-campaign would
