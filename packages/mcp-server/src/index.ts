@@ -1306,11 +1306,18 @@ export class BrokerClient {
     ) {
       throw new RangeError("requestTimeoutMs must be a positive safe integer");
     }
-    this.maxAttempts = options.maxAttempts ?? 3;
+    // Five attempts at 300ms exponential backoff spans roughly 4.5 seconds of
+    // outage. The failure this exists for is a broker that is restarting, or a
+    // proxy or port-forward reattaching to a replacement pod, and those take
+    // seconds. An earlier 3-attempt/150ms window totalled under half a second
+    // and was too short to survive one: campaign r11 still lost 5 of 16
+    // LiveProbe calls to `broker_unreachable`, and an arm that loses its first
+    // call abandons LiveProbe for the rest of the incident.
+    this.maxAttempts = options.maxAttempts ?? 5;
     if (!Number.isSafeInteger(this.maxAttempts) || this.maxAttempts < 1) {
       throw new RangeError("maxAttempts must be a positive safe integer");
     }
-    this.retryBaseDelayMs = options.retryBaseDelayMs ?? 150;
+    this.retryBaseDelayMs = options.retryBaseDelayMs ?? 300;
     if (
       !Number.isSafeInteger(this.retryBaseDelayMs) ||
       this.retryBaseDelayMs < 0

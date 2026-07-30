@@ -1132,6 +1132,21 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     ).toBe(0);
   });
 
+  it("retries long enough to outlast a broker restart", () => {
+    // The outage this exists for is a pod rollout or a port-forward
+    // reattaching, which take seconds. Backoff must total seconds, not
+    // milliseconds; campaign r11 lost calls to a sub-second window.
+    const client = new BrokerClient("http://127.0.0.1:7070");
+    const attempts = (client as unknown as { maxAttempts: number }).maxAttempts;
+    const base = (client as unknown as { retryBaseDelayMs: number })
+      .retryBaseDelayMs;
+    const totalBackoffMs = Array.from(
+      { length: attempts - 1 },
+      (_unused, index) => base * 2 ** index,
+    ).reduce((sum, value) => sum + value, 0);
+    expect(totalBackoffMs).toBeGreaterThanOrEqual(4_000);
+  });
+
   it("retries an idempotent read through a transient transport failure", async () => {
     let attempts = 0;
     const client = new BrokerClient("http://127.0.0.1:7070", {
