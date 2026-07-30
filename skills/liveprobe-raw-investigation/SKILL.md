@@ -9,6 +9,19 @@ Protocol compatibility: `liveprobe-raw-investigation/v1.1`.
 
 Use observability to find the failing service, operation, deployed revision, and trace or replay identity before adding probes. Raw LiveProbe supplies runtime values; it does not select a causal path or validate probe locations for you.
 
+## Decide whether to probe at all
+
+A probe is the most expensive evidence you can collect. Arming, replaying and reading one costs several round trips, and every returned observation enters your context and stays there. Spend it only where it changes the answer.
+
+Before establishing a criterion, state plainly what you already know and what is still undetermined.
+
+- **If the evidence you already hold fixes both the faulty location and the mechanism, stop and report it.** A traceback naming a file, line and exception, confirmed by reading that line in the deployed source, is a complete answer. Re-observing a value the traceback already reports does not raise confidence; it spends budget restating a known fact.
+- **Probe when you need a value the evidence cannot supply.** The unique thing a probe gives you is what a named expression actually held on one occurrence. Reach for it when the source admits several behaviours and only the observed value separates them.
+- **Probe across a boundary you cannot see through.** An external dependency's response shape or timing, a value derived from configuration or environment at runtime, a dynamically dispatched call, mutable state written elsewhere: none of these are derivable from your own source, and they are what probes exist for.
+- **Do not probe to confirm.** If the observation would not change which hypothesis you report, skip it.
+
+Choosing not to instrument is a legitimate and frequently correct outcome. If no probe is warranted, say so and answer from the evidence you have.
+
 ## Establish a criterion
 
 Start with:

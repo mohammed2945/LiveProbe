@@ -222,6 +222,54 @@ removes that pressure; it does not by itself create a gain.
 r11 itself remains a uniform 50,000 study for all arms. Any higher-budget wave
 is reported separately and never merged into r11's tables.
 
+## Post-r12 changes, and the honesty risk in one of them
+
+r12 showed LiveProbe losing to the baseline on `direct_code` (baseline 10/10,
+cheapest and fastest) and winning on `boundary_configuration` (baseline 0/8,
+raw LiveProbe 3/8 with 7/8 localization). Four changes follow from it.
+
+**P1 — shrink `start_probe_investigation` and `collect_investigation_evidence`
+responses.** Measured at 30,989 and 43,917 bytes per call, together 86% of the
+graph arm's LiveProbe payload. Tool responses are never cacheable, so this is
+pure non-cached input. Justified without reference to any incident: every
+LiveProbe user pays ~7,750 tokens per investigation start.
+
+**P2 — per-turn token tracing.** Persist the codex event stream and attribute
+tokens to turns and to the tool responses preceding them. Measurement only,
+cannot affect a score. Deliberately local rather than an external tracing
+service, since the eval handles incident data.
+
+**P3 — fix the graph investigation path.** `start_probe_investigation` failed 3
+of 13 times and the arm reached probe deployment in only 7 of 13 runs, while
+`prepare_repository_analysis` never failed. A capability the arm pays for and
+cannot reach is a defect regardless of benchmark.
+
+**P4 — an entry gate on whether to probe at all**, added to both LiveProbe
+skill files. **This is the change that carries an honesty risk and it is
+recorded here in full.**
+
+The risk: it was authored *after* seeing that LiveProbe loses where a traceback
+already names the fault and wins where the cause sits across an external
+boundary. Guidance written with that knowledge can encode the answer key rather
+than a method.
+
+Why it is defensible anyway: the gate is stated purely as evidence economics —
+do not spend an expensive observation to restate a fact you already hold;
+spend it when only an observed runtime value separates the remaining
+hypotheses, or when the cause sits behind something your source cannot derive.
+That is ordinary debugging practice and would be the same advice for any
+production system, written by someone who had never seen this benchmark. It
+names no incident, file, value, fault class, or stratum, and it does not tell
+the agent which answer to give.
+
+Why it is still not proof: it was authored with knowledge of the direction of
+the result, and there is no held-out incident set left — all 9 usable incidents
+have been observed. The correct reading is that P4 is **plausible but
+unvalidated**, and any improvement it produces must be reported with that
+caveat attached rather than as a clean win.
+
+P1–P3 carry no such risk: none of them can change which answer an arm gives.
+
 ## What r11 cannot support
 
 n is still small. Single-seed results are anecdotes; any claim of a multiplier
