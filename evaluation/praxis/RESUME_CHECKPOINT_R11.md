@@ -1,33 +1,37 @@
-# Resume checkpoint — campaign r11 / r12
+# Resume checkpoint — campaigns r11 and r12
 
-Paused at the owner's request on 2026-07-29, ~00:05 UTC (VM clock), with r11
-still executing. **Nothing needs to be restarted to keep r11 alive** — it runs
-in a detached tmux session on the VM and continues without this session.
+**Both campaigns are COMPLETE and written up. The VM is stopped, not deleted.**
+Results are in `results/README.md`; defects in `R11_FINDINGS.md`; the
+anti-gaming contract that governs every change is `PRE_REGISTRATION.md`.
 
-Read this file plus `PRE_REGISTRATION.md` and `R11_FINDINGS.md` before acting.
-`PRE_REGISTRATION.md` is the anti-gaming contract and governs every change.
+Bottom line: **LiveProbe shows no time or token gain — it is 14–23% slower and
+35–58% more expensive.** Its value is capability on boundary/configuration
+faults, where the baseline scores 0/8 and raw LiveProbe scores 3/8 with 7/8
+localization. On direct code faults the baseline wins on all three axes.
 
-## State (updated 2026-07-30, r12 in flight)
+To pick this work back up, start the VM, re-run `/home/veer/forwards.sh` to
+rebuild the port-forwards, and see "Known open items" below.
+
+## Final state (2026-07-30)
 
 | Thing | Value |
 | --- | --- |
-| Local and remote | `praxis-eval` @ `78b05dc`, in sync |
+| Local and remote | `praxis-eval`, in sync |
 | VM `HEAD` | `f851705`, worktree clean, MCP server rebuilt |
-| VM | `liveprobe-praxis-eval`, `us-east1-b`, `liveprobeeval`, **RUNNING** |
-| Campaign r11 | **COMPLETE**, 36/36 scored, artifacts under `results/artifacts/praxis-campaign-r11/` (gitignored) |
-| Campaign r12 | **RUNNING** in tmux `r12`, 9 incidents × 3 arms × seeds 10,20 = 54 runs at `--tier=pilot` (250k) |
+| VM | `liveprobe-praxis-eval`, `us-east1-b`, `liveprobeeval`, **TERMINATED (stopped, not deleted)** |
+| Campaign r11 | COMPLETE, 36/36 scored |
+| Campaign r12 | COMPLETE, 54/54 scored |
+| Cluster at shutdown | clean image, 1/1 ready, 0 probes, 0 firing alerts, replay HTTP 200 |
 
-r11's results are written up in `results/README.md`. Its efficiency comparison
-was **withdrawn** — the LiveProbe arms barely invoked LiveProbe (F0 in
-`R11_FINDINGS.md`). r12 is the run that actually tests LiveProbe, with the
-guidance regression and the retry window both fixed in `f851705`.
+Artifacts for both campaigns are under `results/artifacts/` and are
+**gitignored** by the repo's existing convention (`results/*`), so they live
+only on this machine and on the VM disk. Regenerate the scorer-only
+`oracle/fault-locations.json` with `python/build_fault_locations.py`; never
+commit it.
 
-r12's first incident confirms the fix took: `raw_liveprobe` deployed a probe
-and read data (`set_snapshot_probe`, `get_probe_data` ×2), where in r11 it
-deployed none across nine incidents. `graph_liveprobe` still stalls before
-probe deployment — it reaches `start_probe_investigation` and errors there
-(460-byte failure, distinct from r11's 423-byte `broker_unreachable`). Quantify
-that across all nine incidents when r12 lands.
+r11 validated the metric repair. Its efficiency comparison was **withdrawn**:
+its LiveProbe arms barely invoked LiveProbe (F0). r12 fixed that and is the run
+that actually tests LiveProbe — and it **reversed** r11's apparent signal.
 
 tmux sessions on the VM: `r11` (the campaign), plus `broker-forward` (7070),
 `ingress-forward` (8080), `frontend-forward` (8081). The three forwards are
@@ -121,6 +125,24 @@ Do not present a token multiplier. 86% of input is cached, so the tool-surface
 reductions (F1/F3) save only ~1,497 weighted tokens once per run. The real
 token lever is **tool response payload size** (F7 in `R11_FINDINGS.md`), which
 is untested.
+
+## Highest-value next steps
+
+1. **`graph_liveprobe` reaches probe deployment in only 7 of 13 runs.**
+   `start_probe_investigation` failed 3 times and `get_probe_data` twice. The
+   analyzer itself works (`prepare_repository_analysis` never failed), so the
+   fault is in the investigation path. Fixing this is worth more than any
+   further tuning — the graph arm currently pays a ~9,300-token tool surface
+   and often never gets to use it.
+2. **F7: shrink probe response payloads.** 83–87% of input is cached, so tool
+   *descriptions* barely matter; non-cached input is dominated by tool
+   *responses*. This is the only remaining credible token lever.
+3. **Boundary faults are the product story.** The baseline scores 0/8 there.
+   Make the boundary handoff produce the upstream propagation edge and this
+   becomes a clean capability claim.
+4. Do **not** pursue a time or token multiplier for LiveProbe on direct code
+   faults. r12 shows the baseline winning on all three axes; reading source is
+   sufficient for that class.
 
 ## Known open items
 
