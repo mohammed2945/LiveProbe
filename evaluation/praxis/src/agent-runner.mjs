@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { gzipSync } from "node:zlib";
 
 import { sha256 } from "./core.mjs";
 
@@ -35,6 +36,44 @@ export function mcpConfigArgs(servers) {
     }
     return args;
   });
+}
+
+/**
+ * The Codex event stream carries prompt and response text verbatim. It is
+ * evaluation-side forensic data with exactly the same handling rules as the
+ * operation ledger: it may never be reachable from the directory the agent is
+ * pointed at, or an arm could read its own trace (and, through it, another
+ * arm's) as evidence. `core.mjs` refuses snapshots whose keys leak oracle
+ * fields; this is the same discipline applied to a filesystem path.
+ */
+export function assertOutsideAgentWorkspace(label, path, agentCwd) {
+  if (path === undefined || path === null || agentCwd === undefined) return;
+  const target = resolve(String(path));
+  const workspace = resolve(String(agentCwd));
+  const offset = relative(workspace, target);
+  if (offset === "" || (!offset.startsWith("..") && !isAbsolute(offset))) {
+    throw new Error(
+      `${label} must never be written inside the agent working directory: ` +
+        `${target} is inside ${workspace}`,
+    );
+  }
+}
+
+/**
+ * Persist the raw stdout verbatim rather than re-serialising parsed events, so
+ * that non-JSON diagnostics stay in the record and the artifact survives a
+ * change to Codex's event schema.
+ */
+async function persistEventStream(path, stdout) {
+  if (path === undefined || path === null) return null;
+  const text = String(stdout ?? "");
+  await mkdir(dirname(resolve(path)), { recursive: true });
+  const encoded = Buffer.from(text, "utf8");
+  await writeFile(
+    path,
+    String(path).endsWith(".gz") ? gzipSync(encoded, { level: 9 }) : encoded,
+  );
+  return { path, sha256: sha256(text), bytes: encoded.byteLength };
 }
 
 function parseEvents(stdout) {
@@ -180,7 +219,11 @@ export async function runCodexAgent({
   timeoutMs,
   tokenBudget,
   ledger,
+  eventStreamPath,
 }) {
+  const agentCwd = resolve(cwd);
+  assertOutsideAgentWorkspace("codex event stream", eventStreamPath, agentCwd);
+  assertOutsideAgentWorkspace("evaluation ledger", ledger?.path, agentCwd);
   const temporaryRoot = await mkdtemp(
     join(tmpdir(), `liveprobe-praxis-${arm}-`),
   );
@@ -198,7 +241,7 @@ export async function runCodexAgent({
     "--sandbox",
     "read-only",
     "--cd",
-    resolve(cwd),
+    agentCwd,
     "--model",
     model,
     "--config",
@@ -219,16 +262,21 @@ export async function runCodexAgent({
   let result;
   try {
     result = await runCodex(args, {
-      cwd: resolve(cwd),
+      cwd: agentCwd,
       prompt,
       timeoutMs,
     });
     const elapsedMs = Math.round(performance.now() - started);
+    const eventStream = await persistEventStream(
+      eventStreamPath,
+      result.stdout,
+    );
     const events = parseEvents(result.stdout);
     const usage = usageFromEvents(events);
     usage.model_ms = elapsedMs;
     const answer = JSON.parse(await readFile(answerPath, "utf8"));
     ledger.recordModel({
+      event_stream_sha256: eventStream?.sha256 ?? null,
       phase: "incident_diagnosis",
       prompt_sha256: sha256(prompt),
       system_sha256: null,
@@ -245,19 +293,30 @@ export async function runCodexAgent({
       usage,
       wall_ms: elapsedMs,
       event_count: events.length,
+      event_stream_path: eventStream?.path ?? null,
+      event_stream_sha256: eventStream?.sha256 ?? null,
+      event_stream_bytes: eventStream?.bytes ?? null,
       stderr_tail: result.stderr.slice(-1_000),
     };
   } catch (error) {
     const elapsedMs = Math.round(performance.now() - started);
+    // A truncated or failed run is exactly when the trace is most worth
+    // keeping, so persist before deciding how to report the failure.
+    const eventStream = await persistEventStream(
+      eventStreamPath,
+      error.stdout ?? "",
+    ).catch(() => null);
     const events = parseEvents(error.stdout ?? "");
     const usage = usageFromEvents(events);
     usage.model_ms = elapsedMs;
     if (error.ledgerRecorded === true) {
       error.usage = usage;
       error.wall_ms = elapsedMs;
+      error.event_stream_path = eventStream?.path ?? null;
       throw error;
     }
     ledger.recordModel({
+      event_stream_sha256: eventStream?.sha256 ?? null,
       phase: "incident_diagnosis",
       prompt_sha256: sha256(prompt),
       system_sha256: null,
@@ -274,6 +333,7 @@ export async function runCodexAgent({
     });
     error.usage = usage;
     error.wall_ms = elapsedMs;
+    error.event_stream_path = eventStream?.path ?? null;
     throw error;
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });

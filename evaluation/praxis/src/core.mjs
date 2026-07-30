@@ -635,6 +635,9 @@ export class EvaluationLedger {
       skill_sha256: payload.skill_sha256,
       tool_schema_sha256: payload.tool_schema_sha256,
       response_sha256: payload.response_sha256,
+      // Binds this model_call to the raw provider event stream persisted beside
+      // the ledger, so a per-turn trace can be shown to belong to this run.
+      event_stream_sha256: payload.event_stream_sha256 ?? null,
       status: payload.status ?? "completed",
       provider_reported: payload.provider_reported !== false,
       usage_scope: payload.usage_scope ?? "unspecified",

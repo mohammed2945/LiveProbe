@@ -5,6 +5,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -15,11 +16,13 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import { gunzipSync } from "node:zlib";
 
 import {
   EvidenceStore,
   EvaluationLedger,
   scoreDiagnosis,
+  sha256,
   summarizeResults,
   validateEvidenceSnapshot,
   zeroUsage,
@@ -30,8 +33,10 @@ import {
   usageFromLedger,
 } from "../src/campaign.mjs";
 import {
+  assertOutsideAgentWorkspace,
   mcpConfigArgs,
   rolloutBudgetConfigArgs,
+  runCodexAgent,
   usageFromEvents,
 } from "../src/agent-runner.mjs";
 import { ARM_NAMES, armCapabilities, loadGuidance } from "../src/arms.mjs";
@@ -1508,3 +1513,215 @@ test(
     }
   },
 );
+
+const FAKE_CODEX = `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const answerPath = args[args.indexOf("--output-last-message") + 1];
+process.stdin.resume();
+process.stdin.on("end", () => {
+  writeFileSync(
+    answerPath,
+    JSON.stringify({ root_cause: { entity: "recommendation" } }),
+  );
+  for (const line of [
+    JSON.stringify({ type: "thread.started", thread_id: "fake" }),
+    JSON.stringify({ type: "turn.started" }),
+    JSON.stringify({
+      type: "token_count",
+      info: {
+        total_token_usage: { input_tokens: 900, cached_input_tokens: 400 },
+        last_token_usage: { input_tokens: 900, cached_input_tokens: 400 },
+      },
+    }),
+    "codex: a non-JSON diagnostic line that must survive verbatim",
+    JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "mcp_tool_call",
+        server: "observability",
+        tool: "get_trace",
+      },
+    }),
+    JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "SECRET-PROMPT-TEXT" },
+    }),
+    JSON.stringify({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 1200,
+        cached_input_tokens: 400,
+        output_tokens: 90,
+        reasoning_output_tokens: 30,
+      },
+    }),
+  ]) {
+    process.stdout.write(line + "\\n");
+  }
+  process.exit(0);
+});
+`;
+
+async function withFakeCodex(body) {
+  const temporary = await mkdtemp(join(tmpdir(), "praxis-event-stream-"));
+  const binDirectory = join(temporary, "bin");
+  const agentCwd = join(temporary, "agent-source");
+  const runDirectory = join(temporary, "run");
+  await mkdir(binDirectory, { recursive: true });
+  await mkdir(agentCwd, { recursive: true });
+  await mkdir(runDirectory, { recursive: true });
+  await writeFile(join(binDirectory, "codex"), FAKE_CODEX);
+  await chmod(join(binDirectory, "codex"), 0o755);
+  await writeFile(join(agentCwd, "recommendation_server.py"), "print(1)\n");
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${binDirectory}:${originalPath}`;
+  try {
+    return await body({ temporary, agentCwd, runDirectory });
+  } finally {
+    process.env.PATH = originalPath;
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+function codexAgentOptions({ agentCwd, ledger, eventStreamPath }) {
+  return {
+    arm: "normal_coding_sre",
+    model: "fake-model",
+    cwd: agentCwd,
+    prompt: "diagnose the incident",
+    schema: { type: "object" },
+    skill: "guidance",
+    mcpServers: [],
+    timeoutMs: 30_000,
+    tokenBudget: 50_000,
+    ledger,
+    eventStreamPath,
+  };
+}
+
+test("codex event streams persist beside the ledger, verbatim and bound to the run", async () => {
+  await withFakeCodex(async ({ agentCwd, runDirectory }) => {
+    const ledgerPath = join(runDirectory, "normal_coding_sre.401.jsonl");
+    const eventStreamPath = join(
+      runDirectory,
+      "normal_coding_sre.401.events.jsonl.gz",
+    );
+    const before = (await readdir(agentCwd)).sort();
+    const ledger = new EvaluationLedger({
+      run_id: "codex-401-normal_coding_sre-10",
+      arm: "normal_coding_sre",
+      incident_id: "401",
+      seed: 10,
+      model: "fake-model",
+      path: ledgerPath,
+    });
+
+    const executed = await runCodexAgent(
+      codexAgentOptions({ agentCwd, ledger, eventStreamPath }),
+    );
+
+    // The stream lands beside the run's other campaign artifacts.
+    assert.equal(executed.event_stream_path, eventStreamPath);
+    assert.ok((await stat(eventStreamPath)).isFile());
+    const stream = gunzipSync(await readFile(eventStreamPath)).toString("utf8");
+
+    // Verbatim, not re-serialised: a Codex schema change cannot silently drop
+    // evidence this version's parser did not understand.
+    assert.match(stream, /a non-JSON diagnostic line that must survive/);
+    const events = stream
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line));
+    assert.equal(events.length, 6);
+    assert.equal(
+      events.filter((event) => event.type === "token_count").length,
+      1,
+    );
+    assert.equal(events.at(-1).type, "turn.completed");
+
+    // Aggregate accounting is unchanged by the new persistence path.
+    assert.equal(executed.usage.input_tokens, 1_200);
+    assert.equal(executed.usage.new_input_tokens, 800);
+    assert.equal(executed.usage.output_tokens, 90);
+
+    // The ledger binds the run to its stream, so a per-turn trace can be shown
+    // to belong to this run and not to another arm's.
+    assert.equal(executed.event_stream_sha256, sha256(stream));
+    const persisted = (await readFile(ledgerPath, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const modelCall = persisted.find((record) => record.kind === "model_call");
+    assert.equal(modelCall.event_stream_sha256, sha256(stream));
+
+    // The stream carries prompt and response text verbatim, so it gets the
+    // ledger's handling: the agent's working directory is left untouched.
+    assert.equal(stream.includes("SECRET-PROMPT-TEXT"), true);
+    assert.deepEqual((await readdir(agentCwd)).sort(), before);
+    for (const entry of await readdir(agentCwd)) {
+      const contents = await readFile(join(agentCwd, entry), "utf8");
+      assert.equal(contents.includes("SECRET-PROMPT-TEXT"), false);
+    }
+  });
+});
+
+test("codex runs refuse to write forensic artifacts into the agent workspace", async () => {
+  await withFakeCodex(async ({ agentCwd, runDirectory }) => {
+    const ledger = new EvaluationLedger({
+      run_id: "codex-401-normal_coding_sre-10",
+      arm: "normal_coding_sre",
+      incident_id: "401",
+      seed: 10,
+      model: "fake-model",
+      path: join(runDirectory, "run.jsonl"),
+    });
+
+    await assert.rejects(
+      () =>
+        runCodexAgent(
+          codexAgentOptions({
+            agentCwd,
+            ledger,
+            eventStreamPath: join(agentCwd, "trace", "events.jsonl.gz"),
+          }),
+        ),
+      /codex event stream must never be written inside the agent working directory/,
+    );
+    assert.deepEqual(await readdir(agentCwd), ["recommendation_server.py"]);
+
+    const leakyLedger = new EvaluationLedger({
+      run_id: "codex-401-normal_coding_sre-10",
+      arm: "normal_coding_sre",
+      incident_id: "401",
+      seed: 10,
+      model: "fake-model",
+      path: join(agentCwd, "run.jsonl"),
+    });
+    await assert.rejects(
+      () =>
+        runCodexAgent(
+          codexAgentOptions({
+            agentCwd,
+            ledger: leakyLedger,
+            eventStreamPath: join(runDirectory, "events.jsonl.gz"),
+          }),
+        ),
+      /evaluation ledger must never be written inside the agent working directory/,
+    );
+
+    // A sibling directory sharing a name prefix is not "inside" the workspace.
+    assert.doesNotThrow(() =>
+      assertOutsideAgentWorkspace(
+        "codex event stream",
+        `${agentCwd}-artifacts/events.jsonl.gz`,
+        agentCwd,
+      ),
+    );
+    assert.throws(
+      () =>
+        assertOutsideAgentWorkspace("codex event stream", agentCwd, agentCwd),
+      /must never be written inside/,
+    );
+  });
+});

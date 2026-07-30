@@ -276,6 +276,12 @@ async function codexRun({
   ledgerPath,
 }) {
   const runId = `codex-${incidentId}-${arm}-${options.seed}`;
+  // Sits beside the ledger, under the campaign's run directory, never under the
+  // agent's source checkout. Gzipped: these streams run to megabytes.
+  const eventStreamPath =
+    ledgerPath === undefined
+      ? undefined
+      : ledgerPath.replace(/\.jsonl$/, ".events.jsonl.gz");
   const tokenBudget =
     options.budgetTier === "smoke"
       ? config.budgets.smoke_llm_total_tokens
@@ -354,6 +360,7 @@ async function codexRun({
         : config.budgets.wall_time_ms,
     tokenBudget,
     ledger,
+    eventStreamPath,
   });
   return {
     schema_version: RESULT_SCHEMA_VERSION,
@@ -376,6 +383,8 @@ async function codexRun({
     runtime_wall_ms: 0,
     tool_calls: executed.usage.tool_calls,
     records_sha256: sha256(ledger.records),
+    event_stream_path: executed.event_stream_path ?? null,
+    event_stream_sha256: executed.event_stream_sha256 ?? null,
   };
 }
 
