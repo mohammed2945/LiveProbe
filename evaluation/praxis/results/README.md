@@ -10,6 +10,10 @@ modified.
 
 ## Headline
 
+**What r11 establishes:** the metric repair works. **What it does not:**
+anything about LiveProbe's value — the LiveProbe arms barely invoked LiveProbe
+(next section), so the efficiency comparison is void and is not claimed.
+
 | Arm | Combined@1 | Localized | Median tokens | Median turns | Median wall |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Normal coding SRE | 4/9 | 7/9 | 25,671 | 19 | 67.9 s |
@@ -23,24 +27,51 @@ calls while each coding arm gets 50,000 for a single call. Owner decision: mark
 it, do not re-run. Its runs are excluded from accuracy and reported as
 overhead.
 
-## The result that matters
+## r11's efficiency comparison is void — the treatment was never applied
 
-Everything separates by stratum, and it separates cleanly.
+Counted from the operation ledgers across all 9 incidents:
+
+| Arm | Observability calls | LiveProbe calls | Probes deployed | Failed LiveProbe calls |
+| --- | ---: | ---: | ---: | ---: |
+| Normal coding SRE | 104 | 0 | 0 | 0 |
+| Graph + LiveProbe | 112 | 13 | 1 | 3 |
+| Raw LiveProbe | 109 | 7 | **0** | 2 |
+
+`raw_liveprobe` deployed **no probes at all**, on any incident; its seven calls
+were all `list_services`. `graph_liveprobe` deployed probes once in nine
+incidents. Both answered from observability, which is what the baseline does.
+
+So r11 did not compare "with LiveProbe" against "without LiveProbe". It
+compared three arms that all worked from observability. **Any wall-time or
+token difference between them is not attributable to LiveProbe** and no such
+claim is made here.
+
+Two causes, one of them self-inflicted:
+
+1. **A guidance regression.** The naming contract added for r11 ran to ~200
+   words and sat last in `guidance/observability-sre.md`. In r10 the raw arm
+   ran the full `set_snapshot_probe → list_probes → get_probe_data →
+   remove_probe` workflow on incident 401; in r11, on the same incident with
+   the same model, it called `list_services` and stopped. Compressed and
+   reordered in `f851705`. No probe encouragement beyond r10's was added.
+2. **The retry window was mis-scaled.** 5 of 16 LiveProbe calls failed with
+   `broker_unreachable` — confirmed by matching the recorded 423-byte failure
+   against a reproduced socket reset. Retry covered that failure class but
+   totalled under half a second, against pod rollouts that take seconds. Widened
+   to ~4.5 s in `f851705`. An arm that loses its first call abandons LiveProbe
+   for the rest of the incident.
+
+For the record, the raw stratum numbers, which stand as a comparison of three
+observability-driven agents and nothing more:
 
 | Stratum | Arm | Combined@1 | Median tokens | Median wall |
 | --- | --- | ---: | ---: | ---: |
 | `direct_code` (5) | normal | 4/5 | 28,946 | 78.2 s |
-| | graph | 4/5 | 38,885 | **51.6 s** |
-| | raw | 4/5 | 31,325 | **53.9 s** |
-| `boundary_configuration` (4) | normal | 0/4 | 25,252 | **66.5 s** |
+| | graph | 4/5 | 38,885 | 51.6 s |
+| | raw | 4/5 | 31,325 | 53.9 s |
+| `boundary_configuration` (4) | normal | 0/4 | 25,252 | 66.5 s |
 | | graph | 0/4 | 38,050 | 81.9 s |
 | | raw | 1/4 | 34,766 | 82.9 s |
-
-- **Direct code faults: LiveProbe is ~1.5× faster in wall time** (1.52× graph,
-  1.45× raw) at equal accuracy.
-- **Boundary/config faults: LiveProbe is ~1.25× slower** and nearly everyone
-  fails.
-- **LiveProbe costs 30–50% more tokens everywhere.** There is no token gain.
 
 ## Why the boundary stratum fails, for every arm
 
