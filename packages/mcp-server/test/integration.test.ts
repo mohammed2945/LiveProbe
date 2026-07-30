@@ -12,6 +12,7 @@ import {
 import { FakeAgent } from "../../broker/src/fake-agent.js";
 import {
   type AnalyzerClient,
+  AnalyzerClientError,
   type AnalyzerPlan,
   BrokerClient,
   createMcpServer,
@@ -1776,5 +1777,371 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       }),
     ).rejects.toBeInstanceOf(TypeError);
     expect(attempts).toBe(1);
+  });
+});
+
+/**
+ * Campaign r12 measured `graph_liveprobe` making 80 LiveProbe calls across 13
+ * runs and reaching probe deployment in 7. `start_probe_investigation` was the
+ * only investigation tool that failed: 3 of its 13 calls were rejected, and
+ * both recorded rejection payloads were argument-contract rejections, not
+ * analyzer failures. `prepare_repository_analysis` never failed, so the
+ * subprocess itself was healthy throughout.
+ *
+ * Reproduced by byte-and-digest matching against the ledgers in
+ * `evaluation/praxis/results/artifacts/praxis-campaign-r12`:
+ *
+ * - 309 bytes, twice (incidents 403 and 411, seed 20). Exact sha256 match on
+ *   the full JSON-RPC frame at request id 4: the SDK rejecting `watch_path`
+ *   and `expression` together. The rule lived in a `.refine()`, which never
+ *   reaches the published JSON Schema, so the caller could not have known it.
+ * - 460 bytes, once (incident 401, seed 10). Every response-schema and
+ *   `toolErrorResult` shape was enumerated and none reproduces it; the only
+ *   payload that serialises to 460 bytes at id 4 is a `.strict()`
+ *   `unrecognized_keys` rejection carrying three unknown key names.
+ * - 421 bytes, twice (incident 412, seed 10, `get_probe_data`). Exact sha256
+ *   match at request ids 13 and 14: `broker_unreachable` / "request timed
+ *   out", the client aborting its own long poll.
+ *
+ * These tests hold the reporting contract those failures violated.
+ */
+describe("investigation failure reporting", () => {
+  interface ErrorEnvelope {
+    code: string;
+    message: string;
+    retryable: boolean;
+    checks: string[];
+  }
+
+  function envelopeOf(result: unknown): ErrorEnvelope {
+    const content = ((result as { content?: unknown }).content ?? []) as Array<{
+      type: string;
+      text?: string;
+    }>;
+    const text = content.find((item) => item.type === "text")?.text ?? "";
+    // A raw SDK validation dump is not JSON, so this parse is itself part of
+    // the assertion: every rejection must arrive as the structured envelope.
+    return (JSON.parse(text) as { error: ErrorEnvelope }).error;
+  }
+
+  function offlineBroker(): BrokerClient {
+    return new BrokerClient("https://probe.example.invalid", {
+      retryBaseDelayMs: 0,
+      fetchImplementation: async () =>
+        new Response(JSON.stringify({ services: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+  }
+
+  async function withMcp<T>(
+    analyzer: AnalyzerClient,
+    broker: BrokerClient,
+    body: (client: Client) => Promise<T>,
+  ): Promise<T> {
+    const server = createMcpServer(broker, analyzer);
+    const client = new Client(
+      { name: "liveprobe-failure-reporting-test", version: "1.0.0" },
+      { capabilities: {} },
+    );
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      return await body(client);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+
+  function analyzerReturning(value: unknown): AnalyzerClient {
+    return {
+      async run() {
+        return value;
+      },
+      async getPlan(): Promise<AnalyzerPlan> {
+        return analysisPlan();
+      },
+    };
+  }
+
+  const START_ARGUMENTS = {
+    repository_root: "/repo",
+    commit_hash: NORMALIZED_COMMIT,
+    service_id: "payments",
+    file: "services/payments/app.py",
+    line: 64,
+    symptom: "fare is non-numeric on trace ride-42",
+  };
+
+  it("answers the watch_path/expression conflict with a recoverable envelope", async () => {
+    const result = await withMcp(
+      new FakeAnalyzer(),
+      offlineBroker(),
+      (client) =>
+        client.callTool({
+          name: "start_probe_investigation",
+          arguments: {
+            ...START_ARGUMENTS,
+            watch_path: "amount",
+            expression: "quote(order)",
+          },
+        }),
+    );
+
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+    // The r12 payload was a raw Zod issue dump from the SDK, which carries no
+    // code, no retryable flag and no remediation.
+    expect(text).not.toContain("Input validation error");
+    const error = envelopeOf(result);
+    expect(error.code).toBe("invalid_tool_input");
+    expect(error.message).toContain("mutually exclusive");
+    expect(error.checks.length).toBeGreaterThanOrEqual(2);
+    expect(error.checks.join(" ")).toContain("watch_path only");
+    expect(error.checks.join(" ")).toContain("expression only");
+  });
+
+  it("publishes the watch_path/expression exclusion instead of hiding it in a refinement", async () => {
+    const tools = await withMcp(
+      new FakeAnalyzer(),
+      offlineBroker(),
+      (client) => client.listTools(),
+    );
+    const start = tools.tools.find(
+      (tool) => tool.name === "start_probe_investigation",
+    );
+    const properties = (
+      start?.inputSchema as {
+        properties?: Record<string, { description?: string }>;
+      }
+    ).properties;
+
+    expect(start?.description).toContain(
+      "exactly one of watch_path or expression",
+    );
+    expect(properties?.["watch_path"]?.description).toContain("never both");
+    expect(properties?.["expression"]?.description).toContain("never both");
+  });
+
+  it("names the tools that continue a started investigation", async () => {
+    const tools = await withMcp(
+      new FakeAnalyzer(),
+      offlineBroker(),
+      (client) => client.listTools(),
+    );
+    const description =
+      tools.tools.find((tool) => tool.name === "start_probe_investigation")
+        ?.description ?? "";
+
+    // Starting an investigation is not a terminal step, but nothing in the
+    // returned view names its successor. Six of the ten r12 runs that started
+    // one either stopped immediately or fell back to manual probes.
+    expect(description).toContain("deploy_investigation_probes");
+    expect(description).toContain("apply_investigation_decision");
+    expect(description).toContain("investigation_id");
+  });
+
+  it("does not blame tool arguments for an analyzer response it cannot read", async () => {
+    const skewed = { ...investigationView(), phase: "TRIAGE" };
+    const result = await withMcp(
+      analyzerReturning(skewed),
+      offlineBroker(),
+      (client) =>
+        client.callTool({
+          name: "start_probe_investigation",
+          arguments: START_ARGUMENTS,
+        }),
+    );
+
+    const error = envelopeOf(result);
+    expect(error.code).toBe("analyzer_response_mismatch");
+    expect(error.code).not.toBe("invalid_tool_input");
+    expect(error.message).toContain("response.phase");
+    expect(error.checks.join(" ")).toContain("not an argument problem");
+    expect(error.checks.join(" ")).not.toContain("Correct the tool arguments");
+  });
+
+  it("does not blame tool arguments for a broker response it cannot read", async () => {
+    const broker = new BrokerClient("https://probe.example.invalid", {
+      retryBaseDelayMs: 0,
+      fetchImplementation: async () =>
+        new Response(JSON.stringify({ services: [{ serviceId: 42 }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const result = await withMcp(new FakeAnalyzer(), broker, (client) =>
+      client.callTool({ name: "list_services", arguments: {} }),
+    );
+
+    const error = envelopeOf(result);
+    expect(error.code).toBe("broker_response_mismatch");
+    expect(error.checks.join(" ")).toContain("not an argument problem");
+  });
+
+  it("tells a caller with no probe bundle what to call next", async () => {
+    const result = await withMcp(
+      analyzerReturning({ ...investigationView(), probe_bundle: null }),
+      offlineBroker(),
+      (client) =>
+        client.callTool({
+          name: "deploy_investigation_probes",
+          arguments: {
+            repository_root: "/repo",
+            investigation_id: INVESTIGATION_ID,
+            created_by: "regression-test",
+          },
+        }),
+    );
+
+    const error = envelopeOf(result);
+    expect(error.code).toBe("no_probe_bundle");
+    // The old fallback bucket answered every server-raised state error with
+    // analyzer installation advice.
+    expect(error.checks.join(" ")).not.toContain("Python 3.12");
+    expect(error.checks.join(" ")).toContain("apply_investigation_decision");
+    expect(error.checks.join(" ")).toContain("get_investigation_context");
+  });
+
+  it("reports an offline bundle service as a service problem", async () => {
+    const result = await withMcp(
+      new FakeAnalyzer(),
+      offlineBroker(),
+      (client) =>
+        client.callTool({
+          name: "deploy_investigation_probes",
+          arguments: {
+            repository_root: "/repo",
+            investigation_id: INVESTIGATION_ID,
+            created_by: "regression-test",
+          },
+        }),
+    );
+
+    const error = envelopeOf(result);
+    expect(error.code).toBe("service_offline");
+    expect(error.checks.join(" ")).not.toContain("Python 3.12");
+    expect(error.checks.join(" ")).toContain("list_services");
+  });
+
+  it("reports an unsupported correlation filter without analyzer install advice", async () => {
+    const { broker, brokerUrl } = await startBroker();
+    broker.liveprobeState.ingest({
+      serviceId: "payments",
+      sdk: "node",
+      commitSha: NORMALIZED_COMMIT,
+      commitSource: "config",
+      agentStatus: { state: "green" },
+      events: [],
+    });
+    const result = await withMcp(
+      new FakeAnalyzer(),
+      new BrokerClient(brokerUrl),
+      (client) =>
+        client.callTool({
+          name: "deploy_investigation_probes",
+          arguments: {
+            repository_root: "/repo",
+            investigation_id: INVESTIGATION_ID,
+            created_by: "regression-test",
+            correlation_trace_id: "trace-1",
+          },
+        }),
+    );
+
+    const error = envelopeOf(result);
+    expect(error.code).toBe("unsupported_correlation_filter");
+    expect(error.checks.join(" ")).not.toContain("Python 3.12");
+    expect(error.checks.join(" ")).toContain("without correlation_trace_id");
+  });
+
+  it("still reports a genuine analyzer failure as analysis_failed", async () => {
+    const failing: AnalyzerClient = {
+      async run(): Promise<unknown> {
+        throw new AnalyzerClientError("could not start python3.12: ENOENT");
+      },
+      async getPlan(): Promise<AnalyzerPlan> {
+        throw new AnalyzerClientError("could not start python3.12: ENOENT");
+      },
+    };
+    const result = await withMcp(failing, offlineBroker(), (client) =>
+      client.callTool({
+        name: "start_probe_investigation",
+        arguments: START_ARGUMENTS,
+      }),
+    );
+
+    const error = envelopeOf(result);
+    expect(error.code).toBe("analysis_failed");
+    expect(error.checks.join(" ")).toContain("Python 3.12");
+  });
+
+  it("keeps a long poll inside the request deadline instead of aborting itself", async () => {
+    // The broker holds a `get_probe_data` request open for `wait_seconds`
+    // before answering. A flat request deadline aborts our own long poll,
+    // retries it four more times, and then reports a healthy broker as
+    // unreachable, which is the r12 `get_probe_data` failure exactly.
+    let attempts = 0;
+    const brokerClient = new BrokerClient("https://probe.example.invalid", {
+      requestTimeoutMs: 40,
+      retryBaseDelayMs: 0,
+      fetchImplementation: async (input, init) => {
+        attempts += 1;
+        expect(new URL(String(input)).searchParams.get("waitSeconds")).toBe(
+          "1",
+        );
+        await delay(120);
+        if (init?.signal?.aborted === true) throw init.signal.reason;
+        return new Response(
+          JSON.stringify({
+            probe: {
+              id: "prb_01JAZM3Y6S8X2V4K9N7Q1T5WCE",
+              serviceId: "payments",
+              type: "snapshot",
+              file: "services/payments/app.py",
+              line: 64,
+              hitLimit: 5,
+              ttlSeconds: 60,
+              version: 1,
+              createdBy: "regression-test",
+              sourceCommit: NORMALIZED_COMMIT,
+            },
+            status: { status: "armed", updatedAt: new Date().toISOString() },
+            events: [],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    await expect(
+      brokerClient.getProbeData("prb_01JAZM3Y6S8X2V4K9N7Q1T5WCE", 1),
+    ).resolves.toMatchObject({ events: [] });
+    expect(attempts).toBe(1);
+  });
+
+  it("still aborts a request the broker never answers", async () => {
+    // The long-poll allowance must extend the deadline, not remove it.
+    const brokerClient = new BrokerClient("https://probe.example.invalid", {
+      requestTimeoutMs: 10,
+      retryBaseDelayMs: 0,
+      maxAttempts: 1,
+      fetchImplementation: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason),
+            { once: true },
+          );
+        }),
+    });
+
+    await expect(
+      brokerClient.getProbeData("prb_01JAZM3Y6S8X2V4K9N7Q1T5WCE", 0),
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 });

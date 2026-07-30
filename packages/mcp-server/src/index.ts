@@ -474,7 +474,7 @@ export const StartProbeInvestigationInputSchema = z
     watch_path: dotPathSchema
       .optional()
       .describe(
-        "Starting value path identified at the criterion, for example pricing.quote",
+        "Starting value path identified at the criterion, for example pricing.quote. Send this OR expression, never both; prefer this whenever the value is reachable as a dot path",
       ),
     expression: z
       .string()
@@ -483,7 +483,7 @@ export const StartProbeInvestigationInputSchema = z
       .max(4_096)
       .optional()
       .describe(
-        "Starting source expression when a dot path is unavailable, for example pricing.quote(order)",
+        "Starting source expression used only when no dot path exists, for example pricing.quote(order). Send this OR watch_path, never both",
       ),
     failure_class: failureClassSchema
       .optional()
@@ -540,12 +540,16 @@ export const StartProbeInvestigationInputSchema = z
       ),
     detail: investigationDetailSchema,
   })
-  .strict()
-  .refine(
-    (value) =>
-      value.watch_path === undefined || value.expression === undefined,
-    { message: "provide watch_path or expression, not both" },
-  );
+  // `watch_path` and `expression` are mutually exclusive, but that rule is
+  // deliberately NOT a `.refine()` here. A refinement is invisible in the
+  // published JSON Schema, so the caller cannot see the constraint, and the MCP
+  // SDK rejects a refinement failure before this server's handler runs — the
+  // caller then receives a raw Zod issue dump with no `checks` and no statement
+  // of which field to drop. The rule is enforced in
+  // `createToolHandlers.start_probe_investigation`, which can answer with the
+  // usual structured error envelope, and it is stated in both field
+  // descriptions so the caller sees it on every turn.
+  .strict();
 
 export const GetInvestigationInputSchema = z
   .object({
@@ -1011,10 +1015,53 @@ export class BrokerClientError extends Error {
 }
 
 export class AnalyzerClientError extends Error {
-  public constructor(message: string) {
+  /**
+   * `code` and `checks`, when supplied, are authoritative. Without them
+   * `toolErrorResult` has to guess the failure class from substrings in the
+   * message, and its fallback bucket is `analysis_failed`, whose remediation
+   * tells the caller to install Python 3.12. That is the right answer for a
+   * subprocess that would not run and the wrong answer for every contract or
+   * state violation this server raises itself, so those pass their own code.
+   */
+  public constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly checks?: readonly string[],
+  ) {
     super(message);
     this.name = "AnalyzerClientError";
   }
+}
+
+/**
+ * Parses a response produced by the analyzer subprocess.
+ *
+ * A mismatch here means this server and the installed `liveprobe-analysis`
+ * package disagree about the wire shape. Routing it through the bare
+ * `z.ZodError` branch of `toolErrorResult` reports it as `invalid_tool_input`
+ * with "Correct the tool arguments and retry", which sends the caller into a
+ * loop of rewriting arguments that were never the problem.
+ */
+function parseAnalyzerResponse<T>(
+  schema: z.ZodType<T>,
+  value: unknown,
+  command: string,
+): T {
+  const parsed = schema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  const issue = parsed.error.issues[0];
+  const at =
+    issue === undefined
+      ? ""
+      : ` at ${["response", ...issue.path.map(String)].join(".")}`;
+  throw new AnalyzerClientError(
+    `the analyzer returned a ${command} response this server cannot read${at}: ${issue?.message ?? "shape mismatch"}`,
+    "analyzer_response_mismatch",
+    [
+      "This is a server/analyzer version mismatch, not an argument problem; resending different arguments will not help.",
+      "Reinstall liveprobe-analysis so it matches this MCP server build, then retry.",
+    ],
+  );
 }
 
 const analyzerCandidateSchema = z
@@ -1502,6 +1549,14 @@ export class BrokerClient {
       "GET",
       `/v1/probes/${encodeURIComponent(probeId)}/data?${search.toString()}`,
       probeDataResponseSchema,
+      undefined,
+      // The broker deliberately holds this request open for `waitSeconds`
+      // before answering. A deadline that ignores the long poll aborts our own
+      // request, retries it four more times, and then reports the broker as
+      // unreachable while it is healthy and simply still waiting. The default
+      // wait is already 5s and the maximum is 30s, so with a flat 5s deadline
+      // every non-trivial long poll fails.
+      { extraTimeoutMs: Math.max(0, waitSeconds) * 1_000 },
     );
   }
 
@@ -1534,6 +1589,7 @@ export class BrokerClient {
     path: string,
     schema: z.ZodType<T>,
     body?: unknown,
+    options: { extraTimeoutMs?: number } = {},
   ): Promise<T> {
     const response = await this.fetchWithTimeout(
       `${this.baseUrl}${path}`,
@@ -1550,12 +1606,32 @@ export class BrokerClient {
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       },
-      { idempotent: method === "GET" },
+      {
+        idempotent: method === "GET",
+        ...(options.extraTimeoutMs === undefined
+          ? {}
+          : { extraTimeoutMs: options.extraTimeoutMs }),
+      },
     );
     if (!response.ok) {
       throw await this.toClientError(response);
     }
-    return schema.parse(await response.json());
+    // A shape the client cannot read is a broker/client version skew, not a
+    // caller mistake. Left as a bare ZodError it reaches `toolErrorResult` as
+    // `invalid_tool_input` and tells the caller to fix an argument that was
+    // never wrong.
+    const parsed = schema.safeParse(await response.json());
+    if (parsed.success) return parsed.data;
+    const issue = parsed.error.issues[0];
+    const at =
+      issue === undefined
+        ? ""
+        : ` at ${["response", ...issue.path.map(String)].join(".")}`;
+    throw new BrokerClientError(
+      `the broker returned a response this client cannot read${at}: ${issue?.message ?? "shape mismatch"}`,
+      response.status,
+      "broker_response_mismatch",
+    );
   }
 
   private async requestNoContent(
@@ -1618,16 +1694,20 @@ export class BrokerClient {
   private async fetchWithTimeout(
     input: string,
     init: RequestInit,
-    { idempotent }: { idempotent: boolean },
+    {
+      idempotent,
+      extraTimeoutMs = 0,
+    }: { idempotent: boolean; extraTimeoutMs?: number },
   ): Promise<Response> {
     const attempts = idempotent ? this.maxAttempts : 1;
+    // `requestTimeoutMs` bounds how long the broker may take to *start*
+    // answering. A long poll asks it to wait first, so that wait is added to
+    // the deadline rather than counted against it.
+    const deadlineMs = this.requestTimeoutMs + Math.max(0, extraTimeoutMs);
     let lastError: unknown;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const controller = new AbortController();
-      const timeout = setTimeout(
-        () => controller.abort(),
-        this.requestTimeoutMs,
-      );
+      const timeout = setTimeout(() => controller.abort(), deadlineMs);
       timeout.unref();
       try {
         const response = await this.fetchImplementation(input, {
@@ -2082,6 +2162,11 @@ export function createToolHandlers(
         if (!serviceIds.has(serviceId)) {
           throw new AnalyzerClientError(
             `cannot map ${candidate.file} to an online service; add a service_map entry for its source root`,
+            "unmapped_source_root",
+            [
+              "Call list_services and copy an exact online serviceId.",
+              `Add a service_map entry whose source_root prefixes ${candidate.file}, or set default_service_id.`,
+            ],
           );
         }
         if (
@@ -2093,6 +2178,11 @@ export function createToolHandlers(
         ) {
           throw new AnalyzerClientError(
             `candidate ${candidate.file} crossed into service ${conventionalService}, but no matching online service exists; add service_map`,
+            "unmapped_source_root",
+            [
+              "Call list_services to see which services are online.",
+              `Add a service_map entry mapping ${candidate.file}'s source root to an online serviceId.`,
+            ],
           );
         }
         return { candidate, serviceId };
@@ -2207,8 +2297,20 @@ export function createToolHandlers(
     },
     async start_probe_investigation(rawInput) {
       const input = StartProbeInvestigationInputSchema.parse(rawInput);
+      if (input.watch_path !== undefined && input.expression !== undefined) {
+        throw new AnalyzerClientError(
+          "watch_path and expression are mutually exclusive: a criterion has exactly one starting value",
+          "invalid_tool_input",
+          [
+            "Resend with watch_path only when the value is reachable as a dot path at the criterion line.",
+            "Resend with expression only when it is not; drop the other field.",
+            "Leave every other argument exactly as sent; nothing else was rejected.",
+          ],
+        );
+      }
       return projectInvestigationView(
-        investigationViewSchema.parse(
+        parseAnalyzerResponse(
+          investigationViewSchema,
           await analyzer.run(input.repository_root, {
             command: "start_investigation",
             criterion: {
@@ -2243,6 +2345,7 @@ export function createToolHandlers(
               })),
             },
           }),
+          "start_investigation",
         ),
         input.detail,
       );
@@ -2250,7 +2353,8 @@ export function createToolHandlers(
     async get_investigation_context(rawInput) {
       const input = GetInvestigationInputSchema.parse(rawInput);
       return projectInvestigationView(
-        investigationViewSchema.parse(
+        parseAnalyzerResponse(
+          investigationViewSchema,
           await analyzer.run(input.repository_root, {
             command: "get_investigation",
             investigationId: input.investigation_id,
@@ -2261,25 +2365,38 @@ export function createToolHandlers(
               ? {}
               : { focusTraversalId: input.focus_traversal_id }),
           }),
+          "get_investigation",
         ),
         input.detail,
       );
     },
     async deploy_investigation_probes(rawInput) {
       const input = DeployInvestigationProbesInputSchema.parse(rawInput);
-      const investigation = investigationViewSchema.parse(
+      const investigation = parseAnalyzerResponse(
+        investigationViewSchema,
         await analyzer.run(input.repository_root, {
           command: "get_investigation",
           investigationId: input.investigation_id,
         }),
+        "get_investigation",
       );
       const bundle = investigation.probe_bundle;
       if (bundle === null || bundle.sites.length === 0) {
         throw new AnalyzerClientError(
-          "investigation has no deployable probe bundle",
+          `investigation ${investigation.investigation_id} is at revision ${investigation.revision} in phase ${investigation.phase} with no deployable probe bundle`,
+          "no_probe_bundle",
+          [
+            "Call get_investigation_context and read its actions menu; a bundle appears only after an action that requires observation.",
+            "Apply a legal action with apply_investigation_decision, then deploy the bundle from the revised view.",
+            "Do not substitute model-chosen files, lines, or watch paths for a bundle site.",
+          ],
         );
       }
-      const commit = commitHashSchema.parse(investigation.criterion["commit"]);
+      const commit = parseAnalyzerResponse(
+        commitHashSchema,
+        investigation.criterion["commit"],
+        "get_investigation criterion.commit",
+      );
       const services = await client.listServices();
       const servicesById = new Map(
         services.services.map((service) => [service.serviceId, service]),
@@ -2290,6 +2407,11 @@ export function createToolHandlers(
         if (service === undefined) {
           throw new AnalyzerClientError(
             `traversal targets ${site.file} in offline service ${serviceId}; provide the deployed service in ownership_map when starting the investigation`,
+            "service_offline",
+            [
+              "Call list_services and confirm which serviceIds are online and heartbeating.",
+              `Start a new investigation whose ownership_map maps ${site.file}'s source root to an online serviceId.`,
+            ],
           );
         }
         if (
@@ -2298,6 +2420,11 @@ export function createToolHandlers(
         ) {
           throw new AnalyzerClientError(
             `correlation_trace_id requires service ${serviceId} to report sdk=python; omit the filter or use a runtime that supports exact trace filtering`,
+            "unsupported_correlation_filter",
+            [
+              "Retry this call without correlation_trace_id and correlate the retained evidence after replay.",
+              "Do not treat the missing pre-capture filter as an absence of runtime values.",
+            ],
           );
         }
         return { site, serviceId };
@@ -2375,6 +2502,11 @@ export function createToolHandlers(
         if (!occurrence.correlated) {
           throw new AnalyzerClientError(
             `${occurrence.occurrenceId} is not explicitly correlated`,
+            "uncorrelated_occurrence",
+            [
+              "Select only occurrence_id values that begin with trace:, which carry a propagated identity.",
+              "Replay the failing request with the same correlation identity, then collect again.",
+            ],
           );
         }
         const orderedEvents = [...occurrence.events].sort((left, right) => {
@@ -2442,18 +2574,22 @@ export function createToolHandlers(
       }
       const investigation =
         observations.length === 0
-          ? investigationViewSchema.parse(
+          ? parseAnalyzerResponse(
+              investigationViewSchema,
               await analyzer.run(input.repository_root, {
                 command: "get_investigation",
                 investigationId: input.investigation_id,
               }),
+              "get_investigation",
             )
-          : investigationViewSchema.parse(
+          : parseAnalyzerResponse(
+              investigationViewSchema,
               await analyzer.run(input.repository_root, {
                 command: "record_evidence",
                 investigationId: input.investigation_id,
                 observations,
               }),
+              "record_evidence",
             );
       return {
         investigation: projectInvestigationView(investigation, input.detail),
@@ -2463,7 +2599,8 @@ export function createToolHandlers(
     async apply_investigation_decision(rawInput) {
       const input = ApplyInvestigationDecisionInputSchema.parse(rawInput);
       return projectInvestigationView(
-        investigationViewSchema.parse(
+        parseAnalyzerResponse(
+          investigationViewSchema,
           await analyzer.run(input.repository_root, {
             command: "decide_investigation",
             investigationId: input.investigation_id,
@@ -2502,6 +2639,7 @@ export function createToolHandlers(
               evidenceRefs: input.evidence_refs,
             },
           }),
+          "decide_investigation",
         ),
         input.detail,
       );
@@ -2564,6 +2702,11 @@ function toolErrorResult(error: unknown): {
         "Use a Clerk organization account with the role required by this tool.",
         "Ask an organization admin to update your role if access is expected.",
       ];
+    } else if (code === "broker_response_mismatch") {
+      checks = [
+        "This is a broker/MCP-server version mismatch, not an argument problem; resending different arguments will not help.",
+        "Upgrade the broker and this MCP server to matching builds, then retry.",
+      ];
     } else if (error.status === 404) {
       checks = [
         "Refresh services or probes before retrying with the returned ID.",
@@ -2572,7 +2715,14 @@ function toolErrorResult(error: unknown): {
   } else if (error instanceof AnalyzerClientError) {
     message = error.message;
     const normalizedMessage = error.message.toLowerCase();
-    if (normalizedMessage.includes("stale investigation decision")) {
+    if (error.code !== undefined) {
+      // An error this server raised deliberately. It already knows its class
+      // and its remediation, so never re-derive either from substrings. These
+      // are all contract or state violations, so none of them is retryable as
+      // sent.
+      code = error.code;
+      checks = [...(error.checks ?? [])];
+    } else if (normalizedMessage.includes("stale investigation decision")) {
       code = "stale_revision";
       retryable = true;
       checks = [
@@ -2609,8 +2759,20 @@ function toolErrorResult(error: unknown): {
     }
   } else if (error instanceof z.ZodError) {
     code = "invalid_tool_input";
-    message = error.issues[0]?.message ?? "tool input is invalid";
-    checks = ["Correct the tool arguments and retry."];
+    const issue = error.issues[0];
+    message = issue?.message ?? "tool input is invalid";
+    // "Correct the tool arguments and retry" alone does not say *which*
+    // argument, so a caller that cannot spot the offending field burns a turn
+    // guessing or abandons the tool. Name the field when the issue carries a
+    // path, and state the closed-key rule, which is the other way this
+    // rejection is reached.
+    const field = (issue?.path ?? []).map(String).join(".");
+    checks = [
+      field.length > 0
+        ? `Correct the ${field} argument and retry; every other argument was accepted.`
+        : "Correct the reported argument and retry.",
+      "Send only fields declared in this tool's input schema: unknown fields are rejected, never ignored.",
+    ];
   } else if (
     error instanceof TypeError ||
     (error instanceof Error && error.name === "AbortError")
@@ -2865,7 +3027,7 @@ export function createMcpServer(
     {
       title: "Start runtime-guided Python investigation",
       description:
-        `Creates a persistent investigation from an observability-derived service, file, line, value, and failure criterion at an exact deployed Python commit. Returns {investigation_id,revision,phase,probe_bundle,actions,decision_context,graph_summary}; actions and bundle sites are legal menus, not templates. detail defaults to compact, which is sufficient to run the whole loop; pass detail=full only to render the structural graph. Requires prepared analysis and must not be used for cold incident discovery. Skill ${LIVEPROBE_AGENT_SKILL_VERSION}; decision protocol ${LIVEPROBE_DECISION_PROTOCOL}.`,
+        `Creates a persistent investigation from an observability-derived service, file, line, value, and failure criterion at an exact deployed Python commit. Send exactly one of watch_path or expression. Returns {investigation_id,revision,phase,probe_bundle,actions,decision_context,graph_summary}; actions and bundle sites are legal menus, not templates. detail defaults to compact, which is sufficient to run the whole loop; pass detail=full only to render the structural graph. This call only opens the investigation: continue it by copying investigation_id into deploy_investigation_probes when probe_bundle has sites, or into apply_investigation_decision to choose from actions. Do not fall back to set_snapshot_probe for a started investigation. Requires prepared analysis and must not be used for cold incident discovery. Skill ${LIVEPROBE_AGENT_SKILL_VERSION}; decision protocol ${LIVEPROBE_DECISION_PROTOCOL}.`,
       inputSchema: StartProbeInvestigationInputSchema,
       annotations: { readOnlyHint: true },
     },
