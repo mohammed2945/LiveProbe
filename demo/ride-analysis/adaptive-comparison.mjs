@@ -777,6 +777,8 @@ async function deployAndCollectPair({
     replay.failing.traceId,
   ]);
   const collected = await handlers.collect_investigation_evidence({
+    // These demos render the analyzer graph, so they opt out of the compact default.
+    detail: "full",
     repository_root: rideRoot,
     investigation_id: investigation.investigation_id,
     occurrences: [
@@ -838,6 +840,8 @@ async function verifyAndComplete({
   if (!response.ok) throw new Error("verification replay failed");
   await waitForSnapshots(handlers, deployed, [traceId]);
   const collected = await handlers.collect_investigation_evidence({
+    // These demos render the analyzer graph, so they opt out of the compact default.
+    detail: "full",
     repository_root: rideRoot,
     investigation_id: investigation.investigation_id,
     occurrences: [
@@ -859,6 +863,8 @@ async function verifyAndComplete({
     .reverse()
     .find((entry) => entry["kind"] === "EVIDENCE_RECORDED");
   investigation = await handlers.apply_investigation_decision({
+    // These demos render the analyzer graph, so they opt out of the compact default.
+    detail: "full",
     repository_root: rideRoot,
     investigation_id: investigation.investigation_id,
     action_ids: [complete.action_id],
@@ -870,6 +876,8 @@ async function verifyAndComplete({
 
 async function startInvestigation(handlers, commit) {
   let investigation = await handlers.start_probe_investigation({
+    // These demos render the analyzer graph, so they opt out of the compact default.
+    detail: "full",
     repository_root: rideRoot,
     commit_hash: commit,
     service_id: "gateway-e2e",
@@ -889,6 +897,8 @@ async function startInvestigation(handlers, commit) {
     throw new Error("investigation did not offer a differential capture");
   }
   investigation = await handlers.apply_investigation_decision({
+    // These demos render the analyzer graph, so they opt out of the compact default.
+    detail: "full",
     repository_root: rideRoot,
     investigation_id: investigation.investigation_id,
     action_ids: [differential.action_id],
@@ -925,6 +935,8 @@ async function runPolicy({
         );
         if (follow === undefined) break;
         investigation = await handlers.apply_investigation_decision({
+          // These demos render the analyzer graph, so they opt out of the compact default.
+          detail: "full",
           repository_root: rideRoot,
           investigation_id: investigation.investigation_id,
           action_ids: [follow.action_id],
@@ -1003,6 +1015,8 @@ async function runPolicy({
           .filter(Boolean),
       });
       investigation = await handlers.apply_investigation_decision({
+        // These demos render the analyzer graph, so they opt out of the compact default.
+        detail: "full",
         repository_root: rideRoot,
         investigation_id: investigation.investigation_id,
         action_ids: [selected.action_id],
@@ -1032,6 +1046,8 @@ async function runPolicy({
         mechanism,
       });
       investigation = await handlers.apply_investigation_decision({
+        // These demos render the analyzer graph, so they opt out of the compact default.
+        detail: "full",
         repository_root: rideRoot,
         investigation_id: investigation.investigation_id,
         action_ids: [verification.answer.selected_action_id],

@@ -20,6 +20,32 @@ export const INVESTIGATION_ACTION_KINDS = [
   "HANDOFF_BOUNDARY",
 ] as const;
 
+/**
+ * How much of the investigation view a tool returns.
+ *
+ * A tool response is never prompt-cacheable, so every byte one returns is
+ * charged as fresh input on the turn that reads it and again on every later
+ * turn that keeps it in context. The investigation view mixes two things with
+ * very different value per byte:
+ *
+ * - a decision surface — identifiers, the legal `actions` menu, the immutable
+ *   `probe_bundle`, correlated `value_dossiers`, `judgments`, the bounded
+ *   `decision_context` packet and its `decision_aliases` — which the caller
+ *   must have to select a legal next action; and
+ * - `graph`, a structural dump of the analyzer's focused nodes, edges,
+ *   projections and runtime traversals, which no tool accepts as input and
+ *   which grows with analysis depth rather than with decision complexity.
+ *
+ * Measured on an ordinary three-module Python service, `graph` is 80-90% of the
+ * view and its `projections` sub-object alone is roughly two thirds; the whole
+ * decision surface fits in a few kilobytes. `compact` therefore replaces
+ * `graph` with a `graph_summary` of counts and returns everything else intact.
+ * Nothing removed is accepted by any tool input, so a caller can run an entire
+ * investigation on the compact view. `full` restores `graph` unchanged for a
+ * caller that renders it.
+ */
+export const INVESTIGATION_VIEW_DETAIL_LEVELS = ["compact", "full"] as const;
+
 const serviceIdSchema = z.string().trim().min(1).max(200);
 const sourceFileSchema = z.string().trim().min(1).max(4_096);
 const commitHashSchema = z
@@ -396,6 +422,14 @@ const expectedTypeSchema = z.enum([
   "mapping",
   "sequence",
 ]);
+const investigationDetailSchema = z
+  .enum(INVESTIGATION_VIEW_DETAIL_LEVELS)
+  .optional()
+  .default("compact")
+  .describe(
+    "compact (default) returns the decision surface — ids, phase, revision, actions, probe_bundle, dossiers, judgments, decision_context, decision_aliases, stats — and replaces the structural graph with graph_summary counts. full additionally returns graph nodes, edges, projections and runtime traversals; ask for it only to render or audit the graph, never to choose an action.",
+  );
+
 const serviceSelectionSchema = z
   .object({
     source_root: z
@@ -504,6 +538,7 @@ export const StartProbeInvestigationInputSchema = z
       .describe(
         "Source-root to runtime-service mappings using service IDs from list_services",
       ),
+    detail: investigationDetailSchema,
   })
   .strict()
   .refine(
@@ -535,6 +570,7 @@ export const GetInvestigationInputSchema = z
       .describe(
         "Exact traversal_id from graph.runtimeTraversals, or the value behind a decision_aliases.traversals alias; do not pass a short alias such as t1",
       ),
+    detail: investigationDetailSchema,
   })
   .strict();
 
@@ -635,6 +671,7 @@ export const CollectInvestigationEvidenceInputSchema = z
       .optional()
       .default(0)
       .describe("Seconds to long-poll for matching captures, for example 10"),
+    detail: investigationDetailSchema,
   })
   .strict();
 
@@ -729,6 +766,7 @@ export const ApplyInvestigationDecisionInputSchema = z
       .describe(
         "For completion, exact observation IDs from EVIDENCE_RECORDED decision_log events",
       ),
+    detail: investigationDetailSchema,
   })
   .strict();
 
@@ -1115,6 +1153,93 @@ const investigationViewSchema = z
   .strict();
 
 export type InvestigationView = z.infer<typeof investigationViewSchema>;
+
+export type InvestigationViewDetail =
+  (typeof INVESTIGATION_VIEW_DETAIL_LEVELS)[number];
+
+export interface InvestigationGraphSummary {
+  detail: "compact";
+  focus_nodes: number;
+  focus_edges: number;
+  collapsed_functions: number;
+  runtime_traversals: { total: number; returned: number };
+  unresolved_branches: number;
+  manifestation_traversal_id: string | null;
+  full_graph: string;
+}
+
+/**
+ * A view as returned to a caller: `graph` is present only at `full` detail and
+ * `graph_summary` only at `compact` detail. Declaring both optional keeps one
+ * type for both projections, so callers that read the decision surface need no
+ * narrowing.
+ */
+export type ProjectedInvestigationView = Omit<InvestigationView, "graph"> & {
+  graph?: InvestigationView["graph"];
+  graph_summary?: InvestigationGraphSummary;
+};
+
+const GRAPH_DETAIL_HINT =
+  'omitted at detail="compact"; re-request the same tool, or get_investigation_context, with detail="full" for nodes, edges, projections and runtime traversals';
+
+function arrayLength(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function integerOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : fallback;
+}
+
+/**
+ * Projects an investigation view to the requested detail level.
+ *
+ * `compact` drops exactly one field, `graph`, and replaces it with counts. No
+ * tool accepts a graph node, edge, projection or traversal record as input:
+ * action IDs come from `actions`, probe sites from `probe_bundle`, mechanism
+ * anchors and probe candidates from `mechanism_context`, traversal IDs from
+ * `mechanism_context` or `decision_aliases.traversals`, and completion
+ * observation IDs from `decision_log` and `value_dossiers`. Every one of those
+ * fields is retained, so the compact view is sufficient to drive the loop to a
+ * terminal status.
+ */
+export function projectInvestigationView(
+  view: InvestigationView,
+  detail: InvestigationViewDetail,
+): ProjectedInvestigationView {
+  if (detail === "full") return view;
+  const { graph, ...rest } = view;
+  const summary =
+    typeof graph["runtimeTraversalSummary"] === "object" &&
+    graph["runtimeTraversalSummary"] !== null
+      ? (graph["runtimeTraversalSummary"] as Record<string, unknown>)
+      : {};
+  const manifestation = graph["manifestationTraversalId"];
+  return {
+    ...rest,
+    graph_summary: {
+      detail: "compact",
+      focus_nodes: arrayLength(graph["nodes"]),
+      focus_edges: arrayLength(graph["edges"]),
+      collapsed_functions: arrayLength(graph["collapsedFunctions"]),
+      runtime_traversals: {
+        total: integerOr(
+          summary["total"],
+          arrayLength(graph["runtimeTraversals"]),
+        ),
+        returned: integerOr(
+          summary["returned"],
+          arrayLength(graph["runtimeTraversals"]),
+        ),
+      },
+      unresolved_branches: integerOr(graph["unresolvedBranches"], 0),
+      manifestation_traversal_id:
+        typeof manifestation === "string" ? manifestation : null,
+      full_graph: GRAPH_DETAIL_HINT,
+    },
+  };
+}
 
 export interface AnalyzerRunnerOptions {
   pythonCommand?: string;
@@ -1623,10 +1748,10 @@ export interface ToolHandlers {
   }>;
   start_probe_investigation(
     input: z.input<typeof StartProbeInvestigationInputSchema>,
-  ): Promise<InvestigationView>;
+  ): Promise<ProjectedInvestigationView>;
   get_investigation_context(
     input: z.input<typeof GetInvestigationInputSchema>,
-  ): Promise<InvestigationView>;
+  ): Promise<ProjectedInvestigationView>;
   deploy_investigation_probes(
     input: z.input<typeof DeployInvestigationProbesInputSchema>,
   ): Promise<{
@@ -1642,7 +1767,7 @@ export interface ToolHandlers {
   collect_investigation_evidence(
     input: z.input<typeof CollectInvestigationEvidenceInputSchema>,
   ): Promise<{
-    investigation: InvestigationView;
+    investigation: ProjectedInvestigationView;
     occurrences: Array<{
       occurrenceId: string;
       correlated: boolean;
@@ -1655,7 +1780,7 @@ export interface ToolHandlers {
   }>;
   apply_investigation_decision(
     input: z.input<typeof ApplyInvestigationDecisionInputSchema>,
-  ): Promise<InvestigationView>;
+  ): Promise<ProjectedInvestigationView>;
   get_investigation_result(
     input: z.input<typeof GetInvestigationResultInputSchema>,
   ): Promise<unknown>;
@@ -2082,56 +2207,62 @@ export function createToolHandlers(
     },
     async start_probe_investigation(rawInput) {
       const input = StartProbeInvestigationInputSchema.parse(rawInput);
-      return investigationViewSchema.parse(
-        await analyzer.run(input.repository_root, {
-          command: "start_investigation",
-          criterion: {
-            commit: input.commit_hash,
-            serviceId: input.service_id,
-            file: input.file,
-            line: input.line,
-            symptom: input.symptom,
-            ...(input.watch_path === undefined
-              ? {}
-              : { watchPath: input.watch_path }),
-            ...(input.expression === undefined
-              ? {}
-              : { expression: input.expression }),
-            failureClass: input.failure_class,
-            ...(input.expected_type === undefined
-              ? {}
-              : { expectedType: input.expected_type }),
-            ...(input.minimum === undefined
-              ? {}
-              : { minimum: input.minimum }),
-            ...(input.maximum === undefined
-              ? {}
-              : { maximum: input.maximum }),
-            minimumExclusive: input.minimum_exclusive,
-            maximumExclusive: input.maximum_exclusive,
-            probeBudget: input.probe_budget,
-            sourceRoots: input.source_roots,
-            ownershipMap: input.ownership_map.map((entry) => ({
-              sourceRoot: entry.source_root,
-              serviceId: entry.service_id,
-            })),
-          },
-        }),
+      return projectInvestigationView(
+        investigationViewSchema.parse(
+          await analyzer.run(input.repository_root, {
+            command: "start_investigation",
+            criterion: {
+              commit: input.commit_hash,
+              serviceId: input.service_id,
+              file: input.file,
+              line: input.line,
+              symptom: input.symptom,
+              ...(input.watch_path === undefined
+                ? {}
+                : { watchPath: input.watch_path }),
+              ...(input.expression === undefined
+                ? {}
+                : { expression: input.expression }),
+              failureClass: input.failure_class,
+              ...(input.expected_type === undefined
+                ? {}
+                : { expectedType: input.expected_type }),
+              ...(input.minimum === undefined
+                ? {}
+                : { minimum: input.minimum }),
+              ...(input.maximum === undefined
+                ? {}
+                : { maximum: input.maximum }),
+              minimumExclusive: input.minimum_exclusive,
+              maximumExclusive: input.maximum_exclusive,
+              probeBudget: input.probe_budget,
+              sourceRoots: input.source_roots,
+              ownershipMap: input.ownership_map.map((entry) => ({
+                sourceRoot: entry.source_root,
+                serviceId: entry.service_id,
+              })),
+            },
+          }),
+        ),
+        input.detail,
       );
     },
     async get_investigation_context(rawInput) {
       const input = GetInvestigationInputSchema.parse(rawInput);
-      return investigationViewSchema.parse(
-        await analyzer.run(input.repository_root, {
-          command: "get_investigation",
-          investigationId: input.investigation_id,
-          ...(input.since_revision === undefined
-            ? {}
-            : { sinceRevision: input.since_revision }),
-          ...(input.focus_traversal_id === undefined
-            ? {}
-            : { focusTraversalId: input.focus_traversal_id }),
-        }),
+      return projectInvestigationView(
+        investigationViewSchema.parse(
+          await analyzer.run(input.repository_root, {
+            command: "get_investigation",
+            investigationId: input.investigation_id,
+            ...(input.since_revision === undefined
+              ? {}
+              : { sinceRevision: input.since_revision }),
+            ...(input.focus_traversal_id === undefined
+              ? {}
+              : { focusTraversalId: input.focus_traversal_id }),
+          }),
+        ),
+        input.detail,
       );
     },
     async deploy_investigation_probes(rawInput) {
@@ -2324,49 +2455,55 @@ export function createToolHandlers(
                 observations,
               }),
             );
-      return { investigation, occurrences };
+      return {
+        investigation: projectInvestigationView(investigation, input.detail),
+        occurrences,
+      };
     },
     async apply_investigation_decision(rawInput) {
       const input = ApplyInvestigationDecisionInputSchema.parse(rawInput);
-      return investigationViewSchema.parse(
-        await analyzer.run(input.repository_root, {
-          command: "decide_investigation",
-          investigationId: input.investigation_id,
-          decision: {
-            basedOnRevision: input.based_on_revision,
-            actionIds: input.action_ids,
-            ...(input.exploration_question === undefined
-              ? {}
-              : { explorationQuestion: input.exploration_question }),
-            ...(input.candidate_mechanism === undefined
-              ? {}
-              : {
-                  candidateMechanism: {
-                    statement: input.candidate_mechanism.statement,
-                    anchorNodeIds:
-                      input.candidate_mechanism.anchor_node_ids,
-                    traversalId:
-                      input.candidate_mechanism.traversal_id,
-                    predictions:
-                      input.candidate_mechanism.predictions.map(
-                        (prediction) => ({
-                          probeCandidateId:
-                            prediction.probe_candidate_id,
-                          watchPath: prediction.watch_path,
-                          operator: prediction.operator,
-                          ...(prediction.expected_value === undefined
-                            ? {}
-                            : {
-                                expectedValue:
-                                  prediction.expected_value,
-                              }),
-                        }),
-                      ),
-                  },
-                }),
-            evidenceRefs: input.evidence_refs,
-          },
-        }),
+      return projectInvestigationView(
+        investigationViewSchema.parse(
+          await analyzer.run(input.repository_root, {
+            command: "decide_investigation",
+            investigationId: input.investigation_id,
+            decision: {
+              basedOnRevision: input.based_on_revision,
+              actionIds: input.action_ids,
+              ...(input.exploration_question === undefined
+                ? {}
+                : { explorationQuestion: input.exploration_question }),
+              ...(input.candidate_mechanism === undefined
+                ? {}
+                : {
+                    candidateMechanism: {
+                      statement: input.candidate_mechanism.statement,
+                      anchorNodeIds:
+                        input.candidate_mechanism.anchor_node_ids,
+                      traversalId:
+                        input.candidate_mechanism.traversal_id,
+                      predictions:
+                        input.candidate_mechanism.predictions.map(
+                          (prediction) => ({
+                            probeCandidateId:
+                              prediction.probe_candidate_id,
+                            watchPath: prediction.watch_path,
+                            operator: prediction.operator,
+                            ...(prediction.expected_value === undefined
+                              ? {}
+                              : {
+                                  expectedValue:
+                                    prediction.expected_value,
+                                }),
+                          }),
+                        ),
+                    },
+                  }),
+              evidenceRefs: input.evidence_refs,
+            },
+          }),
+        ),
+        input.detail,
       );
     },
     async get_investigation_result(rawInput) {
@@ -2379,11 +2516,22 @@ export function createToolHandlers(
   };
 }
 
+/**
+ * Successful results are serialized without indentation.
+ *
+ * The indentation carries no information, but it is charged twice: once as
+ * spaces and newlines inside the text block, and again because those newlines
+ * are escaped when the block is embedded in the JSON-RPC response. Measured on
+ * a compact investigation view it added 66% to the bytes on the wire, and tool
+ * responses are never prompt-cacheable, so that overhead is re-charged on every
+ * turn that keeps the response in context. Error results stay indented: they
+ * are small, rare, and read by humans debugging a failed call.
+ */
 function toolResult(value: unknown): {
   content: [{ type: "text"; text: string }];
 } {
   return {
-    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(value) }],
   };
 }
 
@@ -2717,7 +2865,7 @@ export function createMcpServer(
     {
       title: "Start runtime-guided Python investigation",
       description:
-        `Creates a persistent investigation from an observability-derived service, file, line, value, and failure criterion at an exact deployed Python commit. Returns {investigation_id,revision,graph,probe_bundle,actions,decision_context}; actions and bundle sites are legal menus, not templates. Requires prepared analysis and must not be used for cold incident discovery. Skill ${LIVEPROBE_AGENT_SKILL_VERSION}; decision protocol ${LIVEPROBE_DECISION_PROTOCOL}.`,
+        `Creates a persistent investigation from an observability-derived service, file, line, value, and failure criterion at an exact deployed Python commit. Returns {investigation_id,revision,phase,probe_bundle,actions,decision_context,graph_summary}; actions and bundle sites are legal menus, not templates. detail defaults to compact, which is sufficient to run the whole loop; pass detail=full only to render the structural graph. Requires prepared analysis and must not be used for cold incident discovery. Skill ${LIVEPROBE_AGENT_SKILL_VERSION}; decision protocol ${LIVEPROBE_DECISION_PROTOCOL}.`,
       inputSchema: StartProbeInvestigationInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2729,7 +2877,7 @@ export function createMcpServer(
     {
       title: "Get bounded investigation context",
       description:
-        "Returns the latest revisioned investigation view: phase/status, graph focus, correlated dossiers, immutable probe_bundle, legal actions, deferred-frontier counts, and mechanism context. Call it after start or any stale_revision/illegal_action rejection; copy revision and current action_id values exactly.",
+        "Returns the latest revisioned investigation view: phase/status, correlated dossiers, immutable probe_bundle, legal actions, deferred-frontier counts, and mechanism context. Call it after start or any stale_revision/illegal_action rejection; copy revision and current action_id values exactly. detail defaults to compact and carries graph_summary counts instead of the graph; this is the tool to call with detail=full when the structural graph itself is needed.",
       inputSchema: GetInvestigationInputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2753,7 +2901,7 @@ export function createMcpServer(
     {
       title: "Collect correlated investigation evidence",
       description:
-        "Reads deployed bundle captures, groups them by exact propagated occurrence identity, and records at most one selected failing replay in the investigation ledger. Call after deployment and replay; occurrence_id must be the real propagated ID such as trace:replay-42. Returns a revised view with typed value dossiers and evidence events; missing captures are not negative evidence.",
+        "Reads deployed bundle captures, groups them by exact propagated occurrence identity, and records at most one selected failing replay in the investigation ledger. Call after deployment and replay; occurrence_id must be the real propagated ID such as trace:replay-42. Returns a revised view with typed value dossiers and evidence events; missing captures are not negative evidence. detail defaults to compact; pass detail=full only to render the structural graph.",
       inputSchema: CollectInvestigationEvidenceInputSchema,
       annotations: { readOnlyHint: false },
     },
@@ -2765,7 +2913,7 @@ export function createMcpServer(
     {
       title: "Apply AI-SRE investigation decision",
       description:
-        "Applies up to two exact legal actions from the current actions menu and returns the revised investigation view. based_on_revision must equal the current revision; stale_revision or illegal_action requires refreshing context, while budget_exceeded requires a smaller returned cut. Candidate anchors/predictions are accepted only with CONFIRM_CANDIDATE, and completion evidence_refs must be returned observation IDs.",
+        "Applies up to two exact legal actions from the current actions menu and returns the revised investigation view. based_on_revision must equal the current revision; stale_revision or illegal_action requires refreshing context, while budget_exceeded requires a smaller returned cut. Candidate anchors/predictions are accepted only with CONFIRM_CANDIDATE, and completion evidence_refs must be returned observation IDs. detail defaults to compact; pass detail=full only to render the structural graph.",
       inputSchema: ApplyInvestigationDecisionInputSchema,
       annotations: { readOnlyHint: false },
     },

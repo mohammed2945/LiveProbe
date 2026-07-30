@@ -316,6 +316,8 @@ async function paymentsCase({ handlers, brokerUrl, commit }) {
   try {
     await waitForService(handlers, "payments-e2e", port);
     let investigation = await handlers.start_probe_investigation({
+      // These demos render the analyzer graph, so they opt out of the compact default.
+      detail: "full",
       repository_root: rideRoot,
       commit_hash: commit,
       service_id: "payments-e2e",
@@ -373,6 +375,8 @@ async function paymentsCase({ handlers, brokerUrl, commit }) {
     }
     await waitForSnapshots(handlers, deployed, [replayId]);
     const collected = await handlers.collect_investigation_evidence({
+      // These demos render the analyzer graph, so they opt out of the compact default.
+      detail: "full",
       repository_root: rideRoot,
       investigation_id: investigation.investigation_id,
       occurrences: [
@@ -408,6 +412,8 @@ async function paymentsCase({ handlers, brokerUrl, commit }) {
       );
     }
     investigation = await handlers.apply_investigation_decision({
+      // These demos render the analyzer graph, so they opt out of the compact default.
+      detail: "full",
       repository_root: rideRoot,
       investigation_id: investigation.investigation_id,
       based_on_revision: investigation.revision,
@@ -458,6 +464,8 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
     await waitForService(handlers, "pricing-e2e", pricingPort);
     await waitForService(handlers, "gateway-e2e", gatewayPort);
     let investigation = await handlers.start_probe_investigation({
+      // These demos render the analyzer graph, so they opt out of the compact default.
+      detail: "full",
       repository_root: rideRoot,
       commit_hash: commit,
       service_id: "gateway-e2e",
@@ -540,6 +548,8 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
         snapshots.map((event) => event.correlation),
       );
       const collected = await handlers.collect_investigation_evidence({
+        // These demos render the analyzer graph, so they opt out of the compact default.
+        detail: "full",
         repository_root: rideRoot,
         investigation_id: investigation.investigation_id,
         occurrences: [{ occurrence_id: `trace:${replayId}` }],
@@ -630,6 +640,8 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
       assertLegalAction(investigation, next);
       appliedLegalActionKinds.add(next.kind);
       investigation = await handlers.apply_investigation_decision({
+        // These demos render the analyzer graph, so they opt out of the compact default.
+        detail: "full",
         repository_root: rideRoot,
         investigation_id: investigation.investigation_id,
         based_on_revision: investigation.revision,
@@ -650,6 +662,8 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
     assertLegalAction(investigation, inspect);
     appliedLegalActionKinds.add(inspect.kind);
     investigation = await handlers.apply_investigation_decision({
+      // These demos render the analyzer graph, so they opt out of the compact default.
+      detail: "full",
       repository_root: rideRoot,
       investigation_id: investigation.investigation_id,
       based_on_revision: investigation.revision,
@@ -701,6 +715,8 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
     assertLegalAction(investigation, confirm);
     appliedLegalActionKinds.add(confirm.kind);
     investigation = await handlers.apply_investigation_decision({
+      // These demos render the analyzer graph, so they opt out of the compact default.
+      detail: "full",
       repository_root: rideRoot,
       investigation_id: investigation.investigation_id,
       based_on_revision: investigation.revision,
@@ -743,6 +759,8 @@ async function semanticCase({ handlers, brokerUrl, commit }) {
     assertLegalAction(investigation, complete);
     appliedLegalActionKinds.add(complete.kind);
     investigation = await handlers.apply_investigation_decision({
+      // These demos render the analyzer graph, so they opt out of the compact default.
+      detail: "full",
       repository_root: rideRoot,
       investigation_id: investigation.investigation_id,
       based_on_revision: investigation.revision,

@@ -54,7 +54,7 @@ Do not submit log IDs or metric IDs as LiveProbe `evidence_refs`.
 
 ## Run the investigation loop
 
-1. Read the current view from `start_probe_investigation`, `get_investigation_context`, or the preceding mutation.
+1. Read the current view from `start_probe_investigation`, `get_investigation_context`, or the preceding mutation. Those tools return a compact view by default: identifiers, phase, revision, the legal `actions` menu, `probe_bundle`, `value_dossiers`, `judgments`, `mechanism_context`, `decision_context`, `decision_aliases`, `decision_log`, `stats`, and `graph_summary` counts in place of the structural graph. Every value any tool accepts as an argument is in that view, so run the loop on it. Ask `get_investigation_context` for `detail: "full"` only when the graph itself is the object of study, and use `get_investigation_result` for the complete judgment and decision history.
 2. Auto-traverse a unique causal chain by choosing its returned `FOLLOW_PATH` action.
 3. At each frontier, choose between structural expansion and runtime observation. Treat graph expansion as cheap navigation and probes as costed interventions.
 4. Expand without probing when an exact legal `FOLLOW_PATH` action continues a unique, trace-confirmed, or already evidence-supported direction and a later frontier is likely to be more discriminating. This is especially useful when the current sites are intermediate, repeat an established value, or sit before the branch, boundary, or mutation that matters.

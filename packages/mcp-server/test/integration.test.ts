@@ -180,6 +180,349 @@ function investigationView() {
   };
 }
 
+/**
+ * Byte ceilings for the compact investigation view.
+ *
+ * A tool response is never prompt-cacheable, so its bytes are charged as fresh
+ * input on the turn that reads it and on every later turn that keeps it in
+ * context. Campaign r12 measured `start_probe_investigation` at 30,989 bytes
+ * per call and `collect_investigation_evidence` at 43,917 — together 86% of the
+ * graph arm's LiveProbe payload. Driving the real Python analyzer over an
+ * ordinary three-module service
+ * (`evaluation/praxis/scripts/measure-investigation-payload.mjs`) reproduced
+ * that scale and attributed it: `graph` was 89.6% of a 41,426-byte start view
+ * and 79.9% of a 46,432-byte post-evidence view, with `graph.projections` alone
+ * roughly two thirds of the whole response. Dropping `graph` took those views
+ * to 4,699 and 9,705 bytes.
+ *
+ * The ceilings are measured on the wire, the same basis as the campaign
+ * ledger's `response_bytes`. The fixture below is built to that measured scale:
+ * its full view is over 30 KB and its compact decision surface, at 11.8 KB, is
+ * slightly larger than the largest compact view the real analyzer produced
+ * (9.7 KB), so the ceilings already absorb an investigation with more dossiers,
+ * more legal actions and a longer decision log than either measurement showed.
+ * The fixture's compact responses land at 13.4 KB on the wire, leaving roughly
+ * 20% headroom, while any regression that puts the graph — or anything else
+ * that scales with analysis depth rather than with decision complexity — back
+ * into a default response is several times over the limit.
+ */
+const COMPACT_START_CEILING_BYTES = 16_000;
+const COMPACT_COLLECT_CEILING_BYTES = 18_000;
+
+function repeatId(prefix: string, index: number): string {
+  return `${prefix}_${String(index).padStart(24, "0")}`;
+}
+
+/**
+ * The bytes an MCP client actually receives for one tool call — the same basis
+ * as the campaign ledger's `response_bytes`
+ * (`evaluation/praxis/src/mcp-filter-proxy.mjs`), so a ceiling here is directly
+ * comparable to the numbers the campaign reports.
+ */
+function wireBytes(result: unknown): number {
+  return Buffer.byteLength(JSON.stringify(result));
+}
+
+function toolPayload(result: unknown): Record<string, unknown> {
+  const content = (result as { content?: unknown }).content as
+    | Array<{ type: string; text?: string }>
+    | undefined;
+  const text = content?.find((item) => item.type === "text")?.text;
+  if (text === undefined) throw new Error("tool result carried no text");
+  return JSON.parse(text) as Record<string, unknown>;
+}
+
+/**
+ * An investigation view at the scale the real analyzer produces: a focused
+ * graph of 60 nodes with edges and three region projections, beside a decision
+ * surface of legal actions, probe sites, typed dossiers, judgments, mechanism
+ * anchors and a bounded decision packet.
+ */
+function largeInvestigationView(): Record<string, unknown> {
+  const nodes = Array.from({ length: 60 }, (_, index) => ({
+    node_id: `svc:services/recommend/app.py:${100 + index}`,
+    file: "services/recommend/app.py",
+    line: 100 + index,
+    end_line: 100 + index,
+    kind: index % 3 === 0 ? "assign" : index % 3 === 1 ? "call" : "branch",
+    function_id: `services/recommend/app.py:handler_${index % 9}`,
+    defs: [`local_${index}`, `local_${index}.value`],
+    uses: [`local_${index - 1}`, `config.threshold_${index % 5}`],
+    synthetic: false,
+    distance: index % 11,
+  }));
+  const edges = Array.from({ length: 120 }, (_, index) => ({
+    source: nodes[index % nodes.length]?.node_id,
+    target: nodes[(index + 7) % nodes.length]?.node_id,
+    kind: index % 2 === 0 ? "reaching-definition" : "control",
+    variable_paths: [`local_${index % 17}`, `config.threshold_${index % 5}`],
+  }));
+  const regions = (kind: string, count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      region_id: `${kind}_region_${index}`,
+      kind,
+      label: `${kind} region ${index} over services/recommend/app.py`,
+      member_node_ids: nodes
+        .slice(index * 3, index * 3 + 6)
+        .map((node) => node.node_id),
+      member_function_ids: [`services/recommend/app.py:handler_${index % 9}`],
+      input_paths: [`config.threshold_${index % 5}`, `local_${index}`],
+      output_paths: [`local_${index + 1}`, `result_${index}`],
+      control_paths: [`flag_${index % 4}`],
+    }));
+  const projection = (kind: string, count: number) => ({
+    regions: regions(kind, count),
+    edges: Array.from({ length: count }, (_, index) => ({
+      source_region_id: `${kind}_region_${index}`,
+      target_region_id: `${kind}_region_${(index + 1) % count}`,
+      edge_kinds: ["value"],
+      variable_paths: [`local_${index}`, `config.threshold_${index % 5}`],
+    })),
+  });
+  return {
+    investigation_id: INVESTIGATION_ID,
+    revision: 4,
+    criterion: {
+      repository_root: "/repo",
+      commit: NORMALIZED_COMMIT,
+      service_id: "recommend",
+      file: "services/recommend/app.py",
+      line: 24,
+      symptom: "response_ids is empty for a session that should return results",
+      watch_path: "response_ids",
+      expression: null,
+      failure_class: "semantic",
+      expected_type: null,
+      probe_budget: 5,
+      source_roots: ["services"],
+    },
+    phase: "DECIDING",
+    status: "ACTIVE",
+    round: 2,
+    graph: {
+      nodes,
+      edges,
+      collapsedFunctions: Array.from({ length: 12 }, (_, index) => ({
+        function_id: `services/recommend/app.py:handler_${index}`,
+        qualifiedName: `RecommendationHandler.handler_${index}`,
+        file: "services/recommend/app.py",
+        line: 100 + index * 4,
+        dependencies: [
+          {
+            output_path: `result_${index}`,
+            input_paths: [`local_${index}`, `config.threshold_${index % 5}`],
+          },
+        ],
+      })),
+      projections: {
+        boundary: projection("boundary", 6),
+        function: projection("function", 12),
+        segment: projection("segment", 18),
+      },
+      runtimeTraversalVersion: 1,
+      runtimeTraversals: Array.from({ length: 8 }, (_, index) => ({
+        traversal_id: repeatId("trv", index),
+        function_id: `services/recommend/app.py:handler_${index}`,
+        service_id: "recommend",
+        depth: index,
+        tracked_paths: [`local_${index}`, `result_${index}`],
+        parent_traversal_ids: index === 0 ? [] : [repeatId("trv", index - 1)],
+        anchors: [nodes[index]?.node_id],
+      })),
+      runtimeTraversalSummary: { total: 14, returned: 8 },
+      manifestationTraversalId: repeatId("trv", 0),
+      unresolvedBranches: 5,
+    },
+    probe_bundle: {
+      bundle_id: `bnd_${"d".repeat(24)}`,
+      round: 2,
+      sites: Array.from({ length: 3 }, (_, index) => ({
+        site_id: repeatId("cand", index),
+        node_id: nodes[index]?.node_id,
+        function_id: `services/recommend/app.py:handler_${index}`,
+        file: "services/recommend/app.py",
+        line: 100 + index,
+        watch_paths: [`local_${index}`, `result_${index}`],
+        reason: "region output port on the selected causal path",
+        certainty: "MUST",
+        service_id: "recommend",
+        traversal_ids: [repeatId("trv", index)],
+        path_node_ids: [],
+      })),
+      reason: "frontier cut for round 2",
+    },
+    value_dossiers: Array.from({ length: 4 }, (_, index) => ({
+      dossier_id: repeatId("dos", index),
+      evidence_ref: repeatId("obs", index),
+      occurrence_id: "trace:replay-42",
+      site_id: repeatId("cand", index % 3),
+      service_id: "recommend",
+      location: `services/recommend/app.py:${100 + index}`,
+      watch_path: `local_${index}`,
+      value: { t: "seq", v: [] },
+      interpretation: index % 2 === 0 ? "VIOLATES" : "UNKNOWN",
+      static_certainty: "MUST",
+    })),
+    judgments: Array.from({ length: 3 }, (_, index) => ({
+      judgment_id: repeatId("jdg", index),
+      dossier_id: repeatId("dos", index),
+      classification: "VIOLATES",
+      rule: "domain_range",
+      detail: "observed empty sequence where a non-empty sequence is required",
+    })),
+    actions: Array.from({ length: 4 }, (_, index) => ({
+      action_id: repeatId("act", index),
+      kind: index === 0 ? "PROBE_REGION" : "FOLLOW_PATH",
+      label: `follow value into handler_${index}`,
+      reason: "unique reaching definition for the tracked path",
+      function_id: `services/recommend/app.py:handler_${index}`,
+      anchor_node_id: nodes[index]?.node_id,
+      tracked_paths: [`local_${index}`, `result_${index}`],
+      boundary_kind: null,
+      estimated_nodes: 6 + index,
+      source_traversal_id: repeatId("trv", index % 8),
+      target_service_id: "recommend",
+      region_id: `segment_region_${index}`,
+      dependency_role: "VALUE_PRODUCER",
+    })),
+    mechanism_context: {
+      statements: Array.from({ length: 3 }, (_, index) => ({
+        node_id: nodes[index]?.node_id,
+        file: "services/recommend/app.py",
+        line: 100 + index,
+        kind: "assign",
+        source: `local_${index} = compute(config.threshold_${index})`,
+        defs: [`local_${index}`],
+        uses: [`config.threshold_${index}`],
+      })),
+      traversalIds: [repeatId("trv", 0), repeatId("trv", 1)],
+      probeCandidates: Array.from({ length: 3 }, (_, index) => ({
+        site_id: repeatId("cand", index),
+        file: "services/recommend/app.py",
+        line: 100 + index,
+        watch_paths: [`local_${index}`],
+      })),
+      evidenceRefs: [repeatId("obs", 0)],
+    },
+    candidate_mechanism: null,
+    decision_context: {
+      protocol: "liveprobe-adaptive-v2",
+      rev: 4,
+      incident: {
+        symptom:
+          "response_ids is empty for a session that should return results",
+        class: "semantic",
+      },
+      phase: "DECIDING",
+      focus: {
+        regions: Array.from({ length: 4 }, (_, index) => ({
+          id: `r${index + 1}`,
+          kind: "segment",
+          label: `segment region ${index}`,
+          in: [`config.threshold_${index % 5}`],
+          out: [`local_${index}`],
+          control: [`flag_${index % 4}`],
+        })),
+        edges: Array.from({ length: 4 }, (_, index) => ({
+          from: `r${(index % 4) + 1}`,
+          to: `r${((index + 1) % 4) + 1}`,
+          kind: ["value"],
+          path: [`local_${index}`],
+        })),
+      },
+      traversals: Array.from({ length: 3 }, (_, index) => ({
+        id: `t${index + 1}`,
+        function: `RecommendationHandler.handler_${index}`,
+        service: "recommend",
+        depth: index,
+        paths: [`local_${index}`],
+      })),
+      evidence: Array.from({ length: 4 }, (_, index) => ({
+        at: `services/recommend/app.py:${100 + index}`,
+        svc: "recommend",
+        path: `local_${index}`,
+        value: { t: "seq", v: [] },
+        state: index % 2 === 0 ? "VIOLATES" : "UNKNOWN",
+        certainty: "MUST",
+      })),
+      actions: Array.from({ length: 4 }, (_, index) => ({
+        id: `a${index + 1}`,
+        kind: index === 0 ? "PROBE_REGION" : "FOLLOW_PATH",
+        label: `follow value into handler_${index}`,
+        role: "VALUE_PRODUCER",
+        service: "recommend",
+        paths: [`local_${index}`],
+      })),
+      deferred: { count: 5, byKind: { FOLLOW_PATH: 5 } },
+    },
+    decision_aliases: {
+      actions: Object.fromEntries(
+        Array.from({ length: 4 }, (_, index) => [
+          `a${index + 1}`,
+          repeatId("act", index),
+        ]),
+      ),
+      statements: Object.fromEntries(
+        Array.from({ length: 3 }, (_, index) => [
+          `s${index + 1}`,
+          nodes[index]?.node_id,
+        ]),
+      ),
+      traversals: Object.fromEntries(
+        Array.from({ length: 3 }, (_, index) => [
+          `t${index + 1}`,
+          repeatId("trv", index),
+        ]),
+      ),
+      probes: Object.fromEntries(
+        Array.from({ length: 3 }, (_, index) => [
+          `p${index + 1}`,
+          repeatId("cand", index),
+        ]),
+      ),
+    },
+    coverage_notes: [
+      "dynamic dispatch through getattr was not resolved",
+      "third-party package boundary was summarised, not expanded",
+    ],
+    decision_log: Array.from({ length: 5 }, (_, index) => ({
+      kind: index % 3 === 0 ? "EVIDENCE_RECORDED" : "AI_SRE_DECISION",
+      round: 1 + Math.floor(index / 6),
+      revision: index + 1,
+      occurrenceId: "trace:replay-42",
+      observationIds: [repeatId("obs", index % 10)],
+      actionIds: [repeatId("act", index % 8)],
+      explorationQuestion: null,
+    })),
+    stats: {
+      summariesLoaded: 21,
+      fragmentsLoaded: 9,
+      expandedFunctions: 12,
+      graphNodes: 214,
+      graphEdges: 486,
+      boundaryRegions: 6,
+      functionRegions: 12,
+      segmentRegions: 18,
+      runtimeTraversals: 14,
+      decisionPacketBytes: 2_591,
+      viewBytes: 41_426,
+    },
+  };
+}
+
+class LargeViewAnalyzer implements AnalyzerClient {
+  public async run(
+    _repositoryRoot: string,
+    _command: Record<string, unknown>,
+  ): Promise<unknown> {
+    return largeInvestigationView();
+  }
+
+  public async getPlan(): Promise<AnalyzerPlan> {
+    return analysisPlan();
+  }
+}
+
 class FakeAnalyzer implements AnalyzerClient {
   public readonly commands: Record<string, unknown>[] = [];
 
@@ -465,6 +808,209 @@ describe("Phase 1 MCP and fake-agent integration", () => {
     });
   });
 
+  it("keeps the default investigation responses under their byte ceilings", async () => {
+    const { brokerUrl } = await startBroker();
+    const server = createMcpServer(
+      new BrokerClient(brokerUrl),
+      new LargeViewAnalyzer(),
+    );
+    const client = new Client(
+      { name: "liveprobe-payload-budget-test", version: "1.0.0" },
+      { capabilities: {} },
+    );
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+
+      // The fixture must be at the scale campaign r12 measured, otherwise the
+      // ceilings below would pass on a payload nobody actually pays for.
+      const fullFixtureBytes = Buffer.byteLength(
+        JSON.stringify(largeInvestigationView()),
+      );
+      expect(fullFixtureBytes).toBeGreaterThan(30_000);
+
+      const started = await client.callTool({
+        name: "start_probe_investigation",
+        arguments: {
+          repository_root: "/repo",
+          commit_hash: NORMALIZED_COMMIT,
+          service_id: "recommend",
+          file: "services/recommend/app.py",
+          line: 24,
+          symptom: "response_ids is empty",
+          watch_path: "response_ids",
+        },
+      });
+      expect(started.isError).toBeFalsy();
+      expect(wireBytes(started)).toBeLessThan(COMPACT_START_CEILING_BYTES);
+      const startedView = toolPayload(started) as {
+        graph?: unknown;
+        graph_summary?: Record<string, unknown>;
+      };
+      expect(startedView).not.toHaveProperty("graph");
+      expect(startedView.graph_summary).toMatchObject({
+        detail: "compact",
+        focus_nodes: 60,
+        focus_edges: 120,
+        unresolved_branches: 5,
+        runtime_traversals: { total: 14, returned: 8 },
+      });
+
+      const collected = await client.callTool({
+        name: "collect_investigation_evidence",
+        arguments: {
+          repository_root: "/repo",
+          investigation_id: INVESTIGATION_ID,
+        },
+      });
+      expect(collected.isError).toBeFalsy();
+      expect(wireBytes(collected)).toBeLessThan(COMPACT_COLLECT_CEILING_BYTES);
+      const collectedPayload = toolPayload(collected) as {
+        investigation: { graph?: unknown; graph_summary?: { detail: string } };
+      };
+      expect(collectedPayload.investigation).not.toHaveProperty("graph");
+      expect(collectedPayload.investigation.graph_summary?.detail).toBe(
+        "compact",
+      );
+
+      const decided = await client.callTool({
+        name: "apply_investigation_decision",
+        arguments: {
+          repository_root: "/repo",
+          investigation_id: INVESTIGATION_ID,
+          based_on_revision: 4,
+          action_ids: [],
+        },
+      });
+      expect(decided.isError).toBeFalsy();
+      expect(wireBytes(decided)).toBeLessThan(COMPACT_START_CEILING_BYTES);
+
+      const context = await client.callTool({
+        name: "get_investigation_context",
+        arguments: {
+          repository_root: "/repo",
+          investigation_id: INVESTIGATION_ID,
+        },
+      });
+      expect(context.isError).toBeFalsy();
+      expect(wireBytes(context)).toBeLessThan(COMPACT_START_CEILING_BYTES);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("keeps every field a legal next action needs in the compact view", async () => {
+    const { brokerUrl } = await startBroker();
+    const handlers = createToolHandlers(
+      new BrokerClient(brokerUrl),
+      new LargeViewAnalyzer(),
+    );
+    const view = await handlers.start_probe_investigation({
+      repository_root: "/repo",
+      commit_hash: NORMALIZED_COMMIT,
+      service_id: "recommend",
+      file: "services/recommend/app.py",
+      line: 24,
+      symptom: "response_ids is empty",
+      watch_path: "response_ids",
+    });
+    const reference = largeInvestigationView();
+
+    // Everything a tool input accepts must survive the projection: revision and
+    // action_id for apply_investigation_decision, probe_bundle sites for
+    // deploy_investigation_probes, mechanism anchors, traversal and probe
+    // candidate IDs for candidate_mechanism, dossier and decision-log
+    // observation IDs for completion evidence_refs.
+    for (const field of [
+      "investigation_id",
+      "revision",
+      "phase",
+      "status",
+      "round",
+      "criterion",
+      "probe_bundle",
+      "actions",
+      "value_dossiers",
+      "judgments",
+      "mechanism_context",
+      "candidate_mechanism",
+      "decision_context",
+      "decision_aliases",
+      "coverage_notes",
+      "decision_log",
+      "stats",
+    ] as const) {
+      expect(view[field]).toEqual(reference[field]);
+    }
+    expect(view.actions.map((action) => action.action_id)).toEqual(
+      (reference["actions"] as Array<{ action_id: string }>).map(
+        (action) => action.action_id,
+      ),
+    );
+    expect(view.probe_bundle?.sites.length).toBe(3);
+  });
+
+  it("restores the graph only when detail=full is requested", async () => {
+    const { brokerUrl } = await startBroker();
+    const server = createMcpServer(
+      new BrokerClient(brokerUrl),
+      new LargeViewAnalyzer(),
+    );
+    const client = new Client(
+      { name: "liveprobe-payload-test", version: "1.0.0" },
+      { capabilities: {} },
+    );
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const call = async (detail?: "compact" | "full") =>
+        client.callTool({
+          name: "start_probe_investigation",
+          arguments: {
+            repository_root: "/repo",
+            commit_hash: NORMALIZED_COMMIT,
+            service_id: "recommend",
+            file: "services/recommend/app.py",
+            line: 24,
+            symptom: "response_ids is empty",
+            watch_path: "response_ids",
+            ...(detail === undefined ? {} : { detail }),
+          },
+        });
+
+      const compact = await call();
+      const full = await call("full");
+
+      expect(compact.isError).toBeFalsy();
+      expect(full.isError).toBeFalsy();
+      expect(wireBytes(compact)).toBeLessThan(COMPACT_START_CEILING_BYTES);
+      expect(wireBytes(full)).toBeGreaterThan(wireBytes(compact) * 4);
+
+      expect(toolPayload(compact)).not.toHaveProperty("graph");
+      expect(toolPayload(full)).toHaveProperty("graph");
+      expect(toolPayload(full)).not.toHaveProperty("graph_summary");
+
+      const tools = await client.listTools();
+      const detailProperty = (
+        tools.tools.find(({ name }) => name === "start_probe_investigation")
+          ?.inputSchema as {
+          properties?: Record<string, { enum?: string[] }>;
+        }
+      ).properties?.["detail"];
+      expect(detailProperty?.enum).toEqual(["compact", "full"]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("serves the complete tool set over authenticated Streamable HTTP", async () => {
     const principal = {
       type: "user" as const,
@@ -537,7 +1083,9 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       ]);
       const ping = await client.callTool({ name: "ping_broker", arguments: {} });
       expect(ping.isError).not.toBe(true);
-      expect(ping.content).toEqual([{ type: "text", text: '{\n  "ok": true\n}' }]);
+      // Successful results carry no indentation: it is information-free and is
+      // charged as fresh, uncacheable input on every turn that reads them.
+      expect(ping.content).toEqual([{ type: "text", text: '{"ok":true}' }]);
     } finally {
       await client.close();
     }

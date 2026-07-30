@@ -75,6 +75,19 @@ Exploration requires no hypothesis. A structured candidate mechanism with
 validated anchors and predicted probe observations is accepted only for the
 final confirmation replay.
 
+Every tool that returns an investigation view — `start_probe_investigation`,
+`get_investigation_context`, `collect_investigation_evidence`, and
+`apply_investigation_decision` — takes a `detail` argument. It defaults to
+`compact`, which returns the decision surface (ids, phase, revision, legal
+`actions`, `probe_bundle`, `value_dossiers`, `judgments`, `mechanism_context`,
+`decision_context`, `decision_aliases`, `decision_log`, `stats`) and replaces
+the structural `graph` with `graph_summary` counts. No tool accepts a graph
+node, edge, projection or traversal record as an argument, so the compact view
+is sufficient to drive an investigation to a terminal status; on a measured
+three-module service it is 4.7 KB where the full view is 41 KB. Pass
+`detail: "full"` to render or audit the graph itself, and use
+`get_investigation_result` for the complete judgment and decision history.
+
 `start_probe_investigation` accepts `ownership_map` entries mapping source
 roots to deployed service IDs. The analyzer keeps canonical source regions
 owner-neutral and carries those service IDs in separate runtime traversal
