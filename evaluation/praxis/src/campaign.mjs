@@ -16,7 +16,7 @@ import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 
-import { ARM_NAMES } from "./arms.mjs";
+import { ALL_ARM_NAMES, ARM_NAMES, LIVEPROBE_ARMS } from "./arms.mjs";
 import {
   RESULT_SCHEMA_VERSION,
   normalizeUsage,
@@ -567,7 +567,7 @@ function validateOptions(options, scenarios, config) {
     throw new Error("--artifact-root is required");
   }
   for (const arm of options.arms) {
-    if (!ARM_NAMES.includes(arm)) throw new Error(`unknown arm ${arm}`);
+    if (!ALL_ARM_NAMES.includes(arm)) throw new Error(`unknown arm ${arm}`);
   }
   const defaults = tierDefaults(config, options.tier);
   options.seeds ??= defaults.seeds;
@@ -1179,7 +1179,7 @@ export async function runCampaign(options) {
           const runLog = resolve(runDirectory, `${arm}.log`);
           let result;
           const usesLiveProbe =
-            arm === "graph_liveprobe" || arm === "raw_liveprobe";
+            LIVEPROBE_ARMS.has(arm);
           try {
             if (usesLiveProbe) {
               await resetBroker(options, runLog);

@@ -39,8 +39,15 @@ import {
   runCodexAgent,
   usageFromEvents,
 } from "../src/agent-runner.mjs";
-import { ARM_NAMES, armCapabilities, loadGuidance } from "../src/arms.mjs";
 import {
+  ALL_ARM_NAMES,
+  ARM_NAMES,
+  EXPERIMENT_ARM_NAMES,
+  armCapabilities,
+  loadGuidance,
+} from "../src/arms.mjs";
+import {
+  PROBE_DEPLOY_TOOLS,
   RAW_LIVEPROBE_TOOLS,
   toolCostCounters,
 } from "../src/mcp-filter-proxy.mjs";
@@ -1108,6 +1115,13 @@ test("four arm capabilities and guidance remain intentionally distinct", async (
     "graph_liveprobe",
     "raw_liveprobe",
   ]);
+  // Experiment arms are opt-in and deliberately outside the default set, so a
+  // routine campaign still runs exactly the four leaderboard arms.
+  assert.deepEqual(EXPERIMENT_ARM_NAMES, [
+    "graph_probe_off",
+    "graph_probe_on",
+  ]);
+  assert.deepEqual(ALL_ARM_NAMES, [...ARM_NAMES, ...EXPERIMENT_ARM_NAMES]);
   assert.equal(armCapabilities("normal_coding_sre").raw_liveprobe, false);
   assert.equal(armCapabilities("praxis").repository, false);
   assert.equal(armCapabilities("graph_liveprobe").graph_liveprobe, true);
@@ -1128,6 +1142,68 @@ test("four arm capabilities and guidance remain intentionally distinct", async (
   }
   assert.match(graph, /Expand without probing/);
   assert.match(raw, /model-selected raw-LiveProbe evidence/);
+});
+
+test("forced-probe arms differ only in whether probing is available", async () => {
+  // Probing is normally the agent's own choice, which makes "runs that probed
+  // did worse" uninterpretable: the runs that reach for a probe may be the
+  // runs that were already stuck. These two arms make it an assignment.
+  for (const arm of ["graph_probe_off", "graph_probe_on"]) {
+    assert.equal(armCapabilities(arm).graph_liveprobe, true, arm);
+    assert.equal(armCapabilities(arm).repository, true, arm);
+  }
+  assert.equal(armCapabilities("graph_probe_off").probe_deployment, false);
+  assert.equal(armCapabilities("graph_probe_on").probe_deployment, true);
+
+  const off = await loadGuidance("graph_probe_off");
+  const on = await loadGuidance("graph_probe_on");
+  const graph = await loadGuidance("graph_liveprobe");
+  // Both carry the full investigation skill, so the only deliberate
+  // difference is the probing instruction.
+  for (const text of [off, on]) {
+    assert.match(text, /liveprobe-investigation\/v1\.2/);
+    assert.match(text, /FOLLOW_PATH/);
+  }
+  assert.match(off, /Probe deployment is unavailable/);
+  assert.match(off, /HANDOFF/);
+  assert.match(on, /Deploy at least one probe/);
+  assert.doesNotMatch(graph, /Probe deployment is unavailable/);
+  assert.doesNotMatch(graph, /Deploy at least one probe before answering/);
+});
+
+test("the no-probe profile removes every probe-deploying tool", async () => {
+  // A hard capability removal, not a discouragement: the arm must be unable to
+  // probe, otherwise the assignment is not forced and the confound returns.
+  for (const tool of [
+    "set_snapshot_probe",
+    "set_log_probe",
+    "set_counter_probe",
+    "set_metric_probe",
+    "deploy_investigation_probes",
+    "deploy_probe_frontier",
+  ]) {
+    assert.ok(
+      PROBE_DEPLOY_TOOLS.has(tool),
+      `${tool} must be removed by the no-probe profile`,
+    );
+  }
+  // Read-only and analysis tools must survive, or the arm loses the graph too
+  // and the comparison stops being about probing.
+  for (const tool of [
+    "list_services",
+    "get_probe_data",
+    "list_probes",
+    "prepare_repository_analysis",
+    "start_probe_investigation",
+    "get_investigation_context",
+    "collect_investigation_evidence",
+    "apply_investigation_decision",
+  ]) {
+    assert.ok(
+      !PROBE_DEPLOY_TOOLS.has(tool),
+      `${tool} must remain available without probing`,
+    );
+  }
 });
 
 test("the source panel, image map, and compatibility matrix cover 401-416", async () => {

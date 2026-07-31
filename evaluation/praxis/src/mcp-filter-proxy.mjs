@@ -6,6 +6,25 @@ import { appendFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import process from "node:process";
 
+/**
+ * Tools that deploy a probe, i.e. that cause runtime observation.
+ *
+ * The `graph-noprobe` profile removes exactly these. Probing is normally the
+ * agent's own choice, which makes "runs that probed did worse" uninterpretable:
+ * the runs that reach for a probe may simply be the runs that were already
+ * stuck. Removing the capability rather than discouraging it makes the
+ * assignment forced, so the difference against the probing arm is the causal
+ * effect of runtime observation rather than a correlate of difficulty.
+ */
+export const PROBE_DEPLOY_TOOLS = new Set([
+  "set_snapshot_probe",
+  "set_log_probe",
+  "set_counter_probe",
+  "set_metric_probe",
+  "deploy_investigation_probes",
+  "deploy_probe_frontier",
+]);
+
 export const RAW_LIVEPROBE_TOOLS = new Set([
   "set_snapshot_probe",
   "set_log_probe",
@@ -128,7 +147,7 @@ export function parseArgs(argv) {
     } else if (options[index] === "--model") result.model = options[++index];
     else throw new Error(`unknown option ${options[index]}`);
   }
-  if (!["raw", "graph"].includes(result.profile)) {
+  if (!["raw", "graph", "graph-noprobe"].includes(result.profile)) {
     throw new Error(`unsupported profile ${result.profile}`);
   }
   if (!Number.isInteger(result.seed)) throw new Error("--seed must be an integer");
@@ -193,13 +212,19 @@ export async function runProxy(options) {
         message.result.tools = message.result.tools.filter((tool) =>
           RAW_LIVEPROBE_TOOLS.has(tool.name),
         );
+        } else if (options.profile === "graph-noprobe") {
+          message.result.tools = message.result.tools.filter(
+            (tool) => !PROBE_DEPLOY_TOOLS.has(tool.name),
+          );
         }
       }
       if (call?.method === "initialize" && message.result !== undefined) {
         const scope =
           options.profile === "raw"
             ? "Manual raw LiveProbe tools only. This profile exposes no analyzer graph, investigation frontier, or generated probe locations."
-            : "Full LiveProbe profile with persistent causal-graph investigations and canonical probe frontiers.";
+            : options.profile === "graph-noprobe"
+              ? "Analyzer graph and investigation frontier only. This profile deploys no probes: reason from static structure and observability, and report an honest boundary or insufficient result when a runtime value would be required."
+              : "Full LiveProbe profile with persistent causal-graph investigations and canonical probe frontiers.";
         message.result.instructions = `${message.result.instructions ?? ""}\n${scope}`.trim();
       }
       if (call?.method === "tools/call") {
@@ -227,11 +252,12 @@ export async function runProxy(options) {
       });
       continue;
     }
-    if (
-      message.method === "tools/call" &&
-      options.profile === "raw" &&
-      !RAW_LIVEPROBE_TOOLS.has(message.params?.name)
-    ) {
+    const blockedByProfile =
+      (options.profile === "raw" &&
+        !RAW_LIVEPROBE_TOOLS.has(message.params?.name)) ||
+      (options.profile === "graph-noprobe" &&
+        PROBE_DEPLOY_TOOLS.has(message.params?.name));
+    if (message.method === "tools/call" && blockedByProfile) {
       const response = {
         jsonrpc: "2.0",
         id: message.id,

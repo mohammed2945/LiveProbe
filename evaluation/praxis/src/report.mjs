@@ -19,6 +19,8 @@ const armLabels = {
   praxis: "PRAXIS (fair adapter)",
   graph_liveprobe: "Graph + LiveProbe",
   raw_liveprobe: "Raw LiveProbe",
+  graph_probe_off: "Graph, probes removed",
+  graph_probe_on: "Graph, probe required",
 };
 
 function parseArgs(argv) {

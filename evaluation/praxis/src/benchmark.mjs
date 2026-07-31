@@ -12,7 +12,9 @@ import process from "node:process";
 import { promisify } from "node:util";
 
 import {
+  ALL_ARM_NAMES,
   ARM_NAMES,
+  GRAPH_ARMS,
   armCapabilities,
   buildTaskPrompt,
   liveProbeMcpServer,
@@ -125,7 +127,7 @@ function validateOptions(options, config) {
     throw new Error("--mode must be fixture or codex");
   }
   for (const arm of options.arms) {
-    if (!ARM_NAMES.includes(arm)) throw new Error(`unknown arm ${arm}`);
+    if (!ALL_ARM_NAMES.includes(arm)) throw new Error(`unknown arm ${arm}`);
   }
   if (!Number.isInteger(options.seed)) throw new Error("--seed must be an integer");
   if (options.mode === "codex") {
@@ -331,11 +333,11 @@ async function codexRun({
         model: options.model,
       }),
     );
-  } else if (arm === "graph_liveprobe") {
+  } else if (GRAPH_ARMS.has(arm)) {
     mcpServers.push(
       liveProbeMcpServer({
         brokerUrl: options.brokerUrl,
-        profile: "graph",
+        profile: arm === "graph_probe_off" ? "graph-noprobe" : "graph",
         ledgerPath,
         arm,
         runId,

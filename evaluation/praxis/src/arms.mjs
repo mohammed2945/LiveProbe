@@ -6,12 +6,38 @@ import { OBSERVABILITY_TOOL_SCHEMA_SHA256 } from "./observability-mcp.mjs";
 const evaluationRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const repositoryRoot = resolve(evaluationRoot, "../..");
 
+/** The canonical leaderboard arms. This is the default set for a campaign. */
 export const ARM_NAMES = [
   "normal_coding_sre",
   "praxis",
   "graph_liveprobe",
   "raw_liveprobe",
 ];
+
+/**
+ * Forced-probe experiment arms, opt-in via --arms and deliberately NOT in the
+ * default set.
+ *
+ * Both are graph_liveprobe with probing made an assignment rather than a
+ * choice. Probing is normally the agent's own decision, which makes "runs that
+ * probed did worse" uninterpretable, because the runs that reach for a probe
+ * may be the runs that were already stuck. Forcing the assignment makes the
+ * difference between these two arms the causal effect of runtime observation.
+ */
+export const EXPERIMENT_ARM_NAMES = ["graph_probe_off", "graph_probe_on"];
+
+/** Every arm the harness can run, canonical plus experimental. */
+export const ALL_ARM_NAMES = [...ARM_NAMES, ...EXPERIMENT_ARM_NAMES];
+
+/** Arms that carry the analyzer investigation surface. */
+export const GRAPH_ARMS = new Set([
+  "graph_liveprobe",
+  "graph_probe_off",
+  "graph_probe_on",
+]);
+
+/** Arms that talk to the LiveProbe broker and therefore need its isolation. */
+export const LIVEPROBE_ARMS = new Set([...GRAPH_ARMS, "raw_liveprobe"]);
 
 export async function loadGuidance(arm) {
   const common = await readFile(
@@ -25,11 +51,17 @@ export async function loadGuidance(arm) {
     );
     return `${common}\n\n${raw}`;
   }
-  if (arm === "graph_liveprobe") {
+  if (GRAPH_ARMS.has(arm)) {
     const graph = await readFile(
       resolve(repositoryRoot, "skills/liveprobe-investigation/SKILL.md"),
       "utf8",
     );
+    if (arm === "graph_probe_off") {
+      return `${common}\n\n${graph}\n\n## Probe deployment is unavailable in this configuration\n\nThe probe-deploying tools are not present. Use the analyzer graph, the investigation frontier and observability, and return an honest \`HANDOFF\` or \`INSUFFICIENT\` when a runtime value would be required to separate the remaining explanations. Do not report a localization you could not support.`;
+    }
+    if (arm === "graph_probe_on") {
+      return `${common}\n\n${graph}\n\n## Deploy at least one probe before answering\n\nThis configuration requires runtime observation: deploy at least one probe and collect its evidence before returning a diagnosis. Choose the site that best separates the explanations you are still weighing rather than a site that restates something already established.`;
+    }
     return `${common}\n\n${graph}`;
   }
   return common;
@@ -108,13 +140,14 @@ export function liveProbeMcpServer({
 }
 
 export function armCapabilities(arm) {
-  if (!ARM_NAMES.includes(arm)) throw new Error(`unknown arm ${arm}`);
+  if (!ALL_ARM_NAMES.includes(arm)) throw new Error(`unknown arm ${arm}`);
   return {
     repository: arm !== "praxis",
     observability: true,
     replay: arm !== "praxis",
     raw_liveprobe: arm === "raw_liveprobe",
-    graph_liveprobe: arm === "graph_liveprobe",
+    graph_liveprobe: GRAPH_ARMS.has(arm),
+    probe_deployment: arm !== "praxis" && arm !== "normal_coding_sre" && arm !== "graph_probe_off",
     praxis_graphs: arm === "praxis",
     observability_tool_schema_sha256: OBSERVABILITY_TOOL_SCHEMA_SHA256,
   };
