@@ -36,6 +36,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "gpt-tokenizer": "^3.4.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

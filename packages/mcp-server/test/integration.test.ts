@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { encode } from "gpt-tokenizer/encoding/o200k_base";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -18,6 +19,7 @@ import {
   createMcpServer,
   createToolHandlers,
   GetProbeDataInputSchema,
+  ListAuditEventsInputSchema,
 } from "../src/index.js";
 
 const openBrokers: Awaited<ReturnType<typeof buildBroker>>[] = [];
@@ -240,6 +242,75 @@ const COMPACT_COLLECT_CEILING_BYTES = 18_000;
  * the wire, the same basis as the campaign ledger's `response_bytes`.
  */
 const PROBE_DATA_CEILING_BYTES = 34_000;
+
+/**
+ * Token ceilings for the *fixed prefix* — the tool surface plus the server
+ * instructions — of each profile the LiveProbe arms run with.
+ *
+ * This is a different cost from the byte ceilings above. A tool response is
+ * charged once when it is read and again on every turn that keeps it in
+ * context; a tool's name, description and input schema are charged on **every**
+ * turn from the first, whether or not the tool is ever called. Campaign r13
+ * measured the whole per-turn prefix at 4,023 tokens for the arm with no
+ * LiveProbe server, 9,649 for `raw_liveprobe` and 15,067 for `graph_liveprobe`,
+ * while the evidence those arms actually collected was near-identical
+ * (12,067 / 12,739 / 12,737). The graph arm's ~43% token premium was almost
+ * entirely prefix, not data.
+ *
+ * The unit is `o200k_base` tokens, not bytes. A bytes/4 estimate understates
+ * this corpus badly: the graph surface runs at 4.58 bytes per token, so bytes/4
+ * overstates it by 15%, and the error is not uniform across tools.
+ *
+ * Both halves of the prefix are bounded, and the combined figure is bounded
+ * too. Server `instructions` are returned once, in the `initialize` result,
+ * which makes them the right home for prose several tools would otherwise
+ * repeat — but only if "move it to instructions" cannot become a way to grow
+ * the prefix without a test noticing.
+ *
+ * `evaluation/praxis/scripts/measure-tool-surface.mjs` reports the same numbers
+ * through `evaluation/praxis/src/mcp-filter-proxy.mjs`, which is what the
+ * campaign actually pays; it reads a few tokens higher on `instructions`
+ * because the proxy appends a one-line profile scope. At the time of writing
+ * this test measures raw 3,286 and graph 6,758 tokens of surface over 218
+ * tokens of instructions. The ceilings leave roughly 8% of headroom — enough
+ * for a genuinely new field, not enough to absorb a restored `$schema` block,
+ * a regenerated RFC 3339 regex, or a paragraph of rationale copied into four
+ * tool descriptions.
+ */
+const RAW_SURFACE_CEILING_TOKENS = 3_550;
+const GRAPH_SURFACE_CEILING_TOKENS = 7_300;
+const INSTRUCTIONS_CEILING_TOKENS = 260;
+const RAW_PREFIX_CEILING_TOKENS = 3_750;
+const GRAPH_PREFIX_CEILING_TOKENS = 7_500;
+
+/**
+ * The tools the `raw` evaluation profile forwards, copied from
+ * `RAW_LIVEPROBE_TOOLS` in `evaluation/praxis/src/mcp-filter-proxy.mjs`. The
+ * test below asserts every one of them is actually published, so a rename on
+ * either side fails here rather than silently shrinking the measured profile.
+ */
+const RAW_PROFILE_TOOLS = [
+  "get_probe_data",
+  "get_safety_overview",
+  "list_audit_events",
+  "list_probes",
+  "list_services",
+  "ping_broker",
+  "remove_probe",
+  "set_counter_probe",
+  "set_log_probe",
+  "set_metric_probe",
+  "set_snapshot_probe",
+] as const;
+
+/**
+ * The prefix tokens a client is charged for a set of tools, on the same basis
+ * as `measure-tool-surface.mjs`: the JSON the server puts on the wire for
+ * `tools/list`, tokenised with `o200k_base`.
+ */
+function surfaceTokens(tools: readonly unknown[]): number {
+  return encode(JSON.stringify(tools)).length;
+}
 
 /**
  * One captured occurrence shaped exactly as the Python SDK emits it — see the
@@ -1899,6 +1970,82 @@ describe("Phase 1 MCP and fake-agent integration", () => {
         expect(tool.description?.length ?? 0).toBeGreaterThan(80);
         expect(tool.description?.length ?? 0).toBeLessThan(1_000);
       }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("keeps each profile's fixed prompt prefix under its token ceiling", async () => {
+    const { brokerUrl } = await startBroker();
+    const server = createMcpServer(new BrokerClient(brokerUrl));
+    const client = new Client(
+      { name: "liveprobe-prefix-budget-test", version: "1.0.0" },
+      { capabilities: {} },
+    );
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+
+      const { tools } = await client.listTools();
+      const published = new Map(tools.map((tool) => [tool.name, tool]));
+      const rawTools = RAW_PROFILE_TOOLS.map((name) => {
+        const tool = published.get(name);
+        // A rename on either side must fail loudly: silently dropping a tool
+        // from this list would shrink the measured profile, not the real one.
+        if (tool === undefined) {
+          throw new Error(`raw profile tool ${name} is no longer published`);
+        }
+        return tool;
+      });
+
+      const graphSurface = surfaceTokens(tools);
+      const rawSurface = surfaceTokens(rawTools);
+      const instructions = encode(client.getInstructions() ?? "").length;
+
+      expect(rawSurface).toBeLessThan(RAW_SURFACE_CEILING_TOKENS);
+      expect(graphSurface).toBeLessThan(GRAPH_SURFACE_CEILING_TOKENS);
+      expect(instructions).toBeLessThan(INSTRUCTIONS_CEILING_TOKENS);
+      // Prose moved out of a tool description and into `instructions` is
+      // cheaper, never free. Bounding the sum stops the surface ceiling from
+      // being met by relocation.
+      expect(rawSurface + instructions).toBeLessThan(RAW_PREFIX_CEILING_TOKENS);
+      expect(graphSurface + instructions).toBeLessThan(
+        GRAPH_PREFIX_CEILING_TOKENS,
+      );
+
+      // The ceilings are only meaningful if `instructions` is actually
+      // published: the shared prose lives there instead of in four tool
+      // descriptions, so a client that receives nothing has lost it.
+      expect(instructions).toBeGreaterThan(80);
+
+      // Two generated keywords are deliberately absent from the published
+      // schemas. Both cost prompt tokens on every turn and neither is
+      // something a caller can act on, so their return is a regression even if
+      // the totals above still fit.
+      const serialized = JSON.stringify(tools);
+      expect(serialized).not.toContain("$schema");
+      expect(serialized).not.toContain("9007199254740991");
+
+      // Validation is unchanged by their removal: the safe-integer bound and
+      // the RFC 3339 cursor format are still enforced on input.
+      expect(
+        GetProbeDataInputSchema.safeParse({
+          probe_id: `prb_${"0".repeat(26)}`,
+          max_events: Number.MAX_SAFE_INTEGER,
+        }).success,
+      ).toBe(false);
+      expect(
+        ListAuditEventsInputSchema.safeParse({ before: "not-a-timestamp" })
+          .success,
+      ).toBe(false);
+      expect(
+        ListAuditEventsInputSchema.safeParse({ before: "2026-07-28T18:30:00Z" })
+          .success,
+      ).toBe(true);
     } finally {
       await client.close();
       await server.close();
