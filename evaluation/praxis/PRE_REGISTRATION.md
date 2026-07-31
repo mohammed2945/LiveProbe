@@ -270,6 +270,33 @@ caveat attached rather than as a clean win.
 
 P1–P3 carry no such risk: none of them can change which answer an arm gives.
 
+## Post-r13 contract change: the propagation edge set
+
+Recorded before the next wave. `core.mjs:810` requires every oracle
+propagation edge, but the schema declared `propagation` as an untyped array and
+guidance constrained only the identity namespace. Nothing ever said the chain
+must be complete.
+
+The cost of that silence was the entire measurement: 21 of 23 scored failures
+in r13 failed on `rcr` alone, 20 of them missing the same
+`neo4j-productdb -> recommendation` edge, and in 18 of those the entity was
+already present in the run's own tool output. Arms read `propagation` as
+"downstream of my root"; the oracle means "the complete causal chain".
+
+This is rule 3 applied as written: where an answer failed a check, state the
+contract rather than relax the check. `scoreDiagnosis` is untouched. The
+requirement is satisfiable as stated, proven by `graph_liveprobe` passing 408
+on both seeds while rooting at `recommendation` and still emitting the upstream
+edge.
+
+The guidance example identifier was also changed from `neo4j-productdb` to
+`checkout`. The former is the correct answer for the boundary stratum, and
+naming it in guidance is an avoidable rule 2 risk even though it appears in
+every incident's topology.
+
+Expect accuracy to rise across all arms. That is the contract being stated, not
+the arms improving, and the writeup must say so.
+
 ## What r11 cannot support
 
 n is still small. Single-seed results are anecdotes; any claim of a multiplier
