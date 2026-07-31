@@ -225,6 +225,16 @@ export const GetProbeDataInputSchema = z
       .describe(
         "Long-poll duration; returns immediately when retained data already exists. Defaults to a short wait because a probe armed moments ago has usually not been hit yet, and returning empty forces another round trip. Pass 0 for a non-blocking peek.",
       ),
+    max_events: z
+      .number()
+      .int()
+      .positive()
+      .max(500)
+      .optional()
+      .default(25)
+      .describe(
+        "Maximum captured occurrences to return, newest first-kept; status events are never capped. Defaults to 25, which exceeds any observed correlated replay. Raise it only after a response reports eventsOmitted, for example 100.",
+      ),
   })
   .strict();
 export const RemoveProbeInputSchema = z
@@ -1288,6 +1298,125 @@ export function projectInvestigationView(
   };
 }
 
+/**
+ * The default number of captured occurrences `get_probe_data` returns.
+ *
+ * A snapshot probe defaults to one hit, but `hit_limit` is unbounded and the
+ * broker retains 500 events per probe, so an uncorrelated probe on a hot path
+ * can accumulate hundreds of near-identical captures. Campaign r12 measured
+ * `get_probe_data` at 8,628 bytes mean and 26,125 bytes worst case — roughly
+ * thirteen occurrences — so this default cuts nothing that campaign observed
+ * while bounding the case that has no bound at all.
+ */
+const DEFAULT_PROBE_DATA_EVENT_LIMIT = 25;
+
+export type ProjectedProbeData = {
+  probe: BrokerProbeData["probe"];
+  status: BrokerProbeData["status"];
+  events: Array<Record<string, unknown>>;
+  stacks?: Array<Array<Record<string, unknown>>>;
+  // camelCase to match the rest of this response, which is broker-shaped
+  // (probe.serviceId, event.probeId, correlation.localHitSequence).
+  eventsOmitted?: {
+    returned: number;
+    total: number;
+    olderCapturesDropped: number;
+    hint: string;
+  };
+};
+
+/**
+ * A stack is only informative once. `capture` is only informative when it
+ * reports truncation: `watchValues` is a schema literal and `status:"complete"`
+ * is the absence of a problem.
+ */
+const COMPLETE_CAPTURE = '{"watchValues":"callback-frozen","status":"complete"}';
+
+const PROBE_DATA_OMISSION_HINT =
+  "older captures beyond max_events were dropped; re-request with a larger max_events to read them, or redeploy with correlation_trace_id to capture only the occurrence under test";
+
+/**
+ * Projects one probe's retained data for return to an agent.
+ *
+ * Captured values are the product of this tool, so nothing that carries
+ * evidence is touched: `variables`, `watches`, `message`, counter and metric
+ * aggregates, `ts`, and the whole `correlation` block — the trace identity the
+ * skills correlate a replay against — are returned verbatim on every occurrence.
+ *
+ * Three things that are not evidence are removed:
+ *
+ *  - `probeId` on each event. This response is for exactly one probe and
+ *    `probe.id` already names it, so the per-event copy is the same string
+ *    repeated once per occurrence.
+ *  - Repeated identical stacks. The same probe line reached by the same call
+ *    path produces a byte-identical frame list on every hit; measured at 36% of
+ *    a 25-occurrence response. Unique stacks are hoisted into `stacks` and each
+ *    event carries `stackId`, so a genuinely different call path is still
+ *    reported — this is a deduplication, not a drop.
+ *  - A `capture` block that says nothing was truncated. Truncation is kept,
+ *    because a truncated value is weaker evidence and the agent must know.
+ *
+ * Status events are never capped: `armed` and `error` are how a caller learns a
+ * probe is live or rejected. Only captured occurrences are bounded, and the
+ * newest are kept — a replay is driven after arming, so the correlated
+ * occurrence is always the most recent one.
+ */
+export function projectProbeData(
+  data: BrokerProbeData,
+  maxEvents: number = DEFAULT_PROBE_DATA_EVENT_LIMIT,
+): ProjectedProbeData {
+  const stacks: Array<Array<Record<string, unknown>>> = [];
+  const stackIds = new Map<string, number>();
+
+  const captures: number[] = [];
+  data.events.forEach((event, index) => {
+    if (event["type"] !== "status") captures.push(index);
+  });
+  const kept = new Set(captures.slice(Math.max(0, captures.length - maxEvents)));
+
+  const events = data.events
+    .filter((event, index) => event["type"] === "status" || kept.has(index))
+    .map((event) => {
+      const { probeId: _probeId, stack, capture, ...rest } = event as Record<
+        string,
+        unknown
+      >;
+      const projected: Record<string, unknown> = { ...rest };
+      if (Array.isArray(stack)) {
+        const key = JSON.stringify(stack);
+        let stackId = stackIds.get(key);
+        if (stackId === undefined) {
+          stackId = stacks.length;
+          stackIds.set(key, stackId);
+          stacks.push(stack as Array<Record<string, unknown>>);
+        }
+        projected["stackId"] = stackId;
+      }
+      if (capture !== undefined && JSON.stringify(capture) !== COMPLETE_CAPTURE) {
+        projected["capture"] = capture;
+      }
+      return projected;
+    });
+
+  const dropped = captures.length - kept.size;
+  return {
+    probe: data.probe,
+    status: data.status,
+    events,
+    ...(stacks.length === 0 ? {} : { stacks }),
+    ...(dropped === 0
+      ? {}
+      : {
+          eventsOmitted: {
+            returned: kept.size,
+            total: captures.length,
+            olderCapturesDropped: dropped,
+            hint: PROBE_DATA_OMISSION_HINT,
+          },
+        }),
+  };
+}
+
 export interface AnalyzerRunnerOptions {
   pythonCommand?: string;
   pythonPath?: string;
@@ -1791,7 +1920,7 @@ export interface ToolHandlers {
   ): Promise<z.infer<typeof listProbesResponseSchema>>;
   get_probe_data(
     input: z.input<typeof GetProbeDataInputSchema>,
-  ): Promise<BrokerProbeData>;
+  ): Promise<ProjectedProbeData>;
   remove_probe(
     input: z.input<typeof RemoveProbeInputSchema>,
   ): Promise<{ removed: true; probeId: string }>;
@@ -2090,7 +2219,13 @@ export function createToolHandlers(
     },
     async get_probe_data(rawInput) {
       const input = GetProbeDataInputSchema.parse(rawInput);
-      return client.getProbeData(input.probe_id, input.wait_seconds);
+      // Projected here rather than in the client: the investigation paths call
+      // `client.getProbeData` directly and group occurrences by event index and
+      // full correlation, so they must keep the unprojected payload.
+      return projectProbeData(
+        await client.getProbeData(input.probe_id, input.wait_seconds),
+        input.max_events,
+      );
     },
     async remove_probe(rawInput) {
       const input = RemoveProbeInputSchema.parse(rawInput);
@@ -2989,7 +3124,7 @@ export function createMcpServer(
     {
       title: "Get probe evidence",
       description:
-        "Returns {probe,status,events} for an exact probe.id from a set, deploy, or list response. wait_seconds may long-poll up to 30 seconds; empty events require checking arm state, reachability, runtime path, and replay correlation rather than assuming a value was absent.",
+        "Returns {probe,status,events,stacks?} for an exact probe.id from a set, deploy, or list response. Every event keeps its captured values and its full correlation block; identical stacks are deduplicated into stacks and referenced by stackId, and probeId is omitted because probe.id already names it. wait_seconds may long-poll up to 30 seconds; empty events require checking arm state, reachability, runtime path, and replay correlation rather than assuming a value was absent. Captured occurrences are capped by max_events, newest kept, and a response that dropped any reports eventsOmitted.",
       inputSchema: GetProbeDataInputSchema,
       annotations: { readOnlyHint: true },
     },

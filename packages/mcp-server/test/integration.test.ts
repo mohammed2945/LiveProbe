@@ -67,6 +67,18 @@ function dataEvents(events: Record<string, unknown>[]): ProbeEvent[] {
   ) as ProbeEvent[];
 }
 
+/**
+ * The captured occurrences of a projected `get_probe_data` response. Unlike
+ * `dataEvents` this keeps the open record type, because a projected event drops
+ * `probeId` and carries `stackId` and so is deliberately not a broker
+ * `ProbeEvent`.
+ */
+function capturedEvents(
+  events: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  return events.filter((event) => event["type"] !== "status");
+}
+
 const ANALYSIS_PLAN_ID = `inv_${"1".repeat(24)}`;
 const CANDIDATE_A = `cand_${"a".repeat(24)}`;
 const CANDIDATE_B = `cand_${"b".repeat(24)}`;
@@ -209,6 +221,107 @@ function investigationView() {
  */
 const COMPACT_START_CEILING_BYTES = 16_000;
 const COMPACT_COLLECT_CEILING_BYTES = 18_000;
+
+/**
+ * Byte ceiling for `get_probe_data`, the largest remaining LiveProbe payload
+ * once the compact investigation view landed: campaign r12 measured 31 calls at
+ * 8,628 bytes mean, 26,125 bytes worst case, 267,468 bytes total.
+ *
+ * Driving the real broker and the real handler over Python-SDK-shaped snapshot
+ * events (`evaluation/praxis/scripts/measure-probe-data-payload.mjs`) attributed
+ * that cost: at 25 captured occurrences the unprojected payload is 49,525 bytes,
+ * of which `stack` is 36%, `capture` 3% and the per-event `probeId` echo 2% —
+ * all three byte-identical on every occurrence. Deduplicating stacks, dropping
+ * the probeId echo and dropping a `capture` block that reports no truncation
+ * takes the same 25 occurrences to 30,233 bytes, a 39.0% reduction with every
+ * captured value and every correlation identity returned verbatim.
+ *
+ * The fixture below is built to that measured scale. The ceiling is measured on
+ * the wire, the same basis as the campaign ledger's `response_bytes`.
+ */
+const PROBE_DATA_CEILING_BYTES = 34_000;
+
+/**
+ * One captured occurrence shaped exactly as the Python SDK emits it — see the
+ * `probe.kind == "snapshot"` branch of `python/sdk/src/liveprobe/runtime.py`.
+ * `stackDepth` varies the call path so a test can prove that genuinely
+ * different stacks are preserved rather than collapsed.
+ */
+function snapshotFixture(
+  probeId: string,
+  index: number,
+  options: { traceId?: string; stackDepth?: number } = {},
+): Record<string, unknown> {
+  const frames = [
+    { fn: "get_product_list", file: "/usr/src/app/recommendation_server.py", line: 47 },
+    { fn: "list_recommendations", file: "/usr/src/app/recommendation_server.py", line: 88 },
+    { fn: "_with_retry", file: "/usr/src/app/retry.py", line: 31 },
+    { fn: "_unary_response", file: "/usr/local/lib/python3.12/site-packages/grpc/_server.py", line: 542 },
+    { fn: "_call_behavior", file: "/usr/local/lib/python3.12/site-packages/grpc/_server.py", line: 611 },
+    { fn: "_handle_call", file: "/usr/local/lib/python3.12/site-packages/grpc/_server.py", line: 789 },
+    { fn: "_serve", file: "/usr/local/lib/python3.12/site-packages/grpc/_server.py", line: 941 },
+    { fn: "run", file: "/usr/local/lib/python3.12/threading.py", line: 975 },
+  ];
+  const productIds = {
+    t: "arr" as const,
+    c: [
+      { t: "str" as const, v: "OLJCESPC7Z" },
+      { t: "str" as const, v: "66VCHSJNUP" },
+      { t: "str" as const, v: "1YMWWN1N4O" },
+    ],
+  };
+  const sessionId = `ab3f9c${String(index).padStart(4, "0")}-4d21-11ef-9c2a`;
+  return {
+    probeId,
+    type: "snapshot",
+    ts: new Date(Date.UTC(2026, 6, 30, 20, 13, 37, index)).toISOString(),
+    correlation: {
+      traceId:
+        options.traceId ??
+        `4bf92f3577b34da6a3ce929d0e0e${String(index).padStart(4, "0")}`,
+      spanId: `00f067aa0ba9${String(index).padStart(4, "0")}`,
+      source: "controlled-replay",
+      quality: "exact-execution",
+      serviceInstance: "recommendation-7d9f8c4b6d-x2ktp",
+      localHitSequence: index,
+    },
+    variables: {
+      t: "obj",
+      c: {
+        self: {
+          t: "obj",
+          c: {
+            max_responses: { t: "num", v: 5 },
+            cache_ttl: { t: "num", v: 30 },
+          },
+        },
+        request_product_ids: productIds,
+        products_list: { t: "arr", c: [] },
+        max_responses: { t: "num", v: 5 },
+        num_products: { t: "num", v: 0 },
+        num_return: { t: "num", v: 0 },
+        session_id: { t: "str", v: sessionId },
+        logger: { t: "redacted" },
+        catalog_response: {
+          t: "obj",
+          c: {
+            products: { t: "arr", c: [] },
+            status_code: { t: "num", v: 200 },
+          },
+        },
+      },
+    },
+    watches: {
+      products_list: { t: "arr", c: [] },
+      "self.max_responses": { t: "num", v: 5 },
+      "catalog_response.products": { t: "arr", c: [] },
+      request_product_ids: productIds,
+      session_id: { t: "str", v: sessionId },
+    },
+    capture: { watchValues: "callback-frozen", status: "complete" },
+    stack: frames.slice(0, options.stackDepth ?? frames.length),
+  };
+}
 
 function repeatId(prefix: string, index: number): string {
   return `${prefix}_${String(index).padStart(24, "0")}`;
@@ -902,6 +1015,248 @@ describe("Phase 1 MCP and fake-agent integration", () => {
       await client.close();
       await server.close();
     }
+  });
+
+  it("keeps get_probe_data under its byte ceiling without losing evidence", async () => {
+    const { broker, brokerUrl } = await startBroker();
+    const handlers = createToolHandlers(new BrokerClient(brokerUrl));
+    broker.liveprobeState.ingest({
+      serviceId: "recommendation",
+      sdk: "python",
+      commitSha: NORMALIZED_COMMIT,
+      commitSource: "env",
+      agentStatus: { state: "green" },
+      events: [],
+    });
+
+    const probe = await handlers.set_snapshot_probe({
+      service_id: "recommendation",
+      commit_hash: DEPLOYED_COMMIT,
+      file: "recommendation_server.py",
+      line: 47,
+      watch_paths: [
+        "products_list",
+        "self.max_responses",
+        "catalog_response.products",
+        "request_product_ids",
+        "session_id",
+      ],
+      hit_limit: 25,
+    });
+
+    const captured = Array.from({ length: 25 }, (_, index) =>
+      snapshotFixture(probe.id, index),
+    );
+    broker.liveprobeState.ingest({
+      serviceId: "recommendation",
+      sdk: "python",
+      commitSha: NORMALIZED_COMMIT,
+      commitSource: "env",
+      agentStatus: { state: "green" },
+      events: captured as ProbeEvent[],
+    });
+
+    // The fixture must be at the scale campaign r12 measured, otherwise the
+    // ceiling below would pass on a payload nobody actually pays for.
+    const unprojected = await new BrokerClient(brokerUrl).getProbeData(
+      probe.id,
+      0,
+    );
+    expect(wireBytes(unprojected)).toBeGreaterThan(45_000);
+
+    const data = await handlers.get_probe_data({
+      probe_id: probe.id,
+      wait_seconds: 0,
+    });
+    expect(wireBytes(data)).toBeLessThan(PROBE_DATA_CEILING_BYTES);
+    expect(wireBytes(data)).toBeLessThan(wireBytes(unprojected) * 0.7);
+
+    // Every captured occurrence is still returned, and nothing was capped.
+    const events = capturedEvents(data.events);
+    expect(events).toHaveLength(25);
+    expect(data).not.toHaveProperty("eventsOmitted");
+
+    // The correlation identity survives on every occurrence: the skills and
+    // `evaluation/praxis/scripts/remote-liveprobe-tripwire.mjs` select
+    // snapshots by exact traceId and exact-execution quality.
+    for (const [index, event] of events.entries()) {
+      expect(event["correlation"]).toEqual(captured[index]!["correlation"]);
+    }
+    expect(
+      new Set(
+        events.map(
+          (event) =>
+            (event["correlation"] as { traceId: string } | undefined)?.traceId,
+        ),
+      ).size,
+    ).toBe(25);
+    expect(
+      events.filter(
+        (event) =>
+          (event["correlation"] as { quality?: string } | undefined)
+            ?.quality === "exact-execution",
+      ),
+    ).toHaveLength(25);
+
+    // The captured runtime values and their types survive verbatim. They are
+    // the reason the tool exists.
+    for (const [index, event] of events.entries()) {
+      expect(event["variables"]).toEqual(captured[index]!["variables"]);
+      expect(event["watches"]).toEqual(captured[index]!["watches"]);
+      expect(event["ts"]).toEqual(captured[index]!["ts"]);
+      expect(event["type"]).toBe("snapshot");
+    }
+
+    // The stack is deduplicated, not dropped: one entry, resolvable per event.
+    expect(data.stacks).toHaveLength(1);
+    expect(data.stacks?.[0]).toEqual(captured[0]!["stack"]);
+    for (const event of events) {
+      expect(data.stacks?.[event["stackId"] as number]).toEqual(
+        captured[0]!["stack"],
+      );
+    }
+
+    // What was removed carries no evidence.
+    for (const event of events) {
+      expect(event).not.toHaveProperty("probeId");
+      expect(event).not.toHaveProperty("capture");
+      expect(event).not.toHaveProperty("stack");
+    }
+    expect(data.probe.id).toBe(probe.id);
+  });
+
+  it("preserves a truncated capture and a genuinely different call path", async () => {
+    const { broker, brokerUrl } = await startBroker();
+    const handlers = createToolHandlers(new BrokerClient(brokerUrl));
+    broker.liveprobeState.ingest({
+      serviceId: "recommendation",
+      sdk: "python",
+      commitSha: NORMALIZED_COMMIT,
+      commitSource: "env",
+      agentStatus: { state: "green" },
+      events: [],
+    });
+    const probe = await handlers.set_snapshot_probe({
+      service_id: "recommendation",
+      commit_hash: DEPLOYED_COMMIT,
+      file: "recommendation_server.py",
+      line: 47,
+      hit_limit: 5,
+    });
+
+    const shallow = snapshotFixture(probe.id, 1, { stackDepth: 3 });
+    const truncated = {
+      ...snapshotFixture(probe.id, 2),
+      capture: { watchValues: "callback-frozen", status: "truncated" },
+    };
+    broker.liveprobeState.ingest({
+      serviceId: "recommendation",
+      sdk: "python",
+      commitSha: NORMALIZED_COMMIT,
+      commitSource: "env",
+      agentStatus: { state: "green" },
+      events: [
+        snapshotFixture(probe.id, 0),
+        shallow,
+        truncated,
+      ] as ProbeEvent[],
+    });
+
+    const data = await handlers.get_probe_data({
+      probe_id: probe.id,
+      wait_seconds: 0,
+    });
+    const events = capturedEvents(data.events);
+
+    // Two distinct call paths stay distinct; the third reuses the first.
+    expect(data.stacks).toHaveLength(2);
+    expect(events[0]!["stackId"]).toBe(0);
+    expect(events[1]!["stackId"]).toBe(1);
+    expect(events[2]!["stackId"]).toBe(0);
+    expect(data.stacks?.[1]).toHaveLength(3);
+
+    // Truncation is weaker evidence and the agent must still be told.
+    expect(events[0]).not.toHaveProperty("capture");
+    expect(events[2]!["capture"]).toEqual({
+      watchValues: "callback-frozen",
+      status: "truncated",
+    });
+  });
+
+  it("bounds captured occurrences to the newest and never caps status events", async () => {
+    const { broker, brokerUrl } = await startBroker();
+    const handlers = createToolHandlers(new BrokerClient(brokerUrl));
+    broker.liveprobeState.ingest({
+      serviceId: "recommendation",
+      sdk: "python",
+      commitSha: NORMALIZED_COMMIT,
+      commitSource: "env",
+      agentStatus: { state: "green" },
+      events: [],
+    });
+    const probe = await handlers.set_snapshot_probe({
+      service_id: "recommendation",
+      commit_hash: DEPLOYED_COMMIT,
+      file: "recommendation_server.py",
+      line: 47,
+      hit_limit: 200,
+    });
+
+    // A hot-path probe: an armed status, then 60 captures. The broker retains
+    // events chronologically, and a replay is driven after arming, so the
+    // correlated occurrence is always among the newest.
+    broker.liveprobeState.ingest({
+      serviceId: "recommendation",
+      sdk: "python",
+      commitSha: NORMALIZED_COMMIT,
+      commitSource: "env",
+      agentStatus: { state: "green" },
+      events: [
+        {
+          probeId: probe.id,
+          type: "status",
+          ts: new Date(Date.UTC(2026, 6, 30, 20, 13, 0)).toISOString(),
+          status: "armed",
+        },
+        ...Array.from({ length: 60 }, (_, index) =>
+          snapshotFixture(probe.id, index),
+        ),
+      ] as ProbeEvent[],
+    });
+
+    const data = await handlers.get_probe_data({
+      probe_id: probe.id,
+      wait_seconds: 0,
+    });
+    const events = capturedEvents(data.events);
+    expect(events).toHaveLength(25);
+    expect(data.eventsOmitted).toMatchObject({
+      returned: 25,
+      total: 60,
+      olderCapturesDropped: 35,
+    });
+
+    // The newest captures are the ones kept.
+    expect(
+      (events[24]!["correlation"] as { localHitSequence: number }).localHitSequence,
+    ).toBe(59);
+    expect(
+      (events[0]!["correlation"] as { localHitSequence: number }).localHitSequence,
+    ).toBe(35);
+
+    // Arm state is how a caller learns a probe is live, so it is never capped.
+    expect(
+      data.events.filter((event) => event["type"] === "status"),
+    ).toHaveLength(1);
+
+    // The omission is recoverable by an explicit request, as the hint says.
+    const full = await handlers.get_probe_data({
+      probe_id: probe.id,
+      wait_seconds: 0,
+      max_events: 100,
+    });
+    expect(capturedEvents(full.events)).toHaveLength(60);
+    expect(full).not.toHaveProperty("eventsOmitted");
   });
 
   it("keeps every field a legal next action needs in the compact view", async () => {

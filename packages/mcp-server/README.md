@@ -88,6 +88,26 @@ three-module service it is 4.7 KB where the full view is 41 KB. Pass
 `detail: "full"` to render or audit the graph itself, and use
 `get_investigation_result` for the complete judgment and decision history.
 
+`get_probe_data` returns `{probe, status, events, stacks?}`. Captured runtime
+values are the product of the tool, so `variables`, `watches`, log messages,
+counter and metric aggregates, `ts` and the whole `correlation` block are
+returned verbatim on every occurrence. What it does not repeat is the part that
+carries no evidence: the per-event `probeId` echo, since the response is for one
+probe that `probe.id` already names; a `capture` block that reports no
+truncation, since `watchValues` is a schema literal and `complete` is the
+absence of a problem; and identical stacks, which are deduplicated into `stacks`
+and referenced by `stackId`, so a genuinely different call path is still
+reported. On 25 Python-SDK-shaped occurrences this is 30.2 KB where the raw
+broker payload is 49.5 KB.
+
+Captured occurrences are bounded by `max_events`, default 25, keeping the
+newest — a replay is driven after arming, so the correlated occurrence is the
+most recent. Status events are never capped, because `armed` and `error` are how
+a caller learns a probe is live or was rejected. A response that dropped any
+occurrence says so in `eventsOmitted`; re-request with a larger `max_events`,
+or redeploy with `correlation_trace_id` so the runtime captures only the
+occurrence under test.
+
 `start_probe_investigation` accepts `ownership_map` entries mapping source
 roots to deployed service IDs. The analyzer keeps canonical source regions
 owner-neutral and carries those service IDs in separate runtime traversal
