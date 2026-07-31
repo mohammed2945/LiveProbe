@@ -1144,6 +1144,64 @@ test("four arm capabilities and guidance remain intentionally distinct", async (
   assert.match(raw, /model-selected raw-LiveProbe evidence/);
 });
 
+test("the evidence window is anchored to the incident, not a fixed lookback", async () => {
+  // Campaign r13 shipped 8 of 9 snapshots carrying earlier incidents' runtime.
+  // Incident 407's snapshot contained a `products_list` AttributeError that
+  // appears nowhere in 407's own source, and every arm confidently diagnosed
+  // it: they were reading incident 401's fault. Cause was a fixed 10-minute
+  // lookback against incidents that soak for 36-164 seconds.
+  const collector = await readFile(
+    resolve(evaluationRoot, "python/collect_snapshot.py"),
+    "utf8",
+  );
+  assert.match(collector, /--window-start/);
+  // An absolute start must win over the lookback when supplied.
+  assert.match(collector, /utc\(args\.window_start\)\s*\n\s*if args\.window_start/);
+
+  const campaign = await readFile(
+    resolve(evaluationRoot, "src/campaign.mjs"),
+    "utf8",
+  );
+  // The window must be captured before injection, or it cannot exclude what
+  // ran before this incident.
+  const windowIndex = campaign.indexOf("const evidenceWindowStart");
+  const injectIndex = campaign.indexOf("inject_incident_fault");
+  assert.ok(windowIndex > 0 && windowIndex < injectIndex);
+  assert.match(campaign, /"--window-start",\s*\n\s*evidenceWindowStart,/);
+  // And leakage must fail the run rather than pass silently.
+  assert.match(campaign, /leaking across incidents/);
+});
+
+test("a snapshot carrying another incident's image is rejected", () => {
+  // Exercises the assertion's logic directly: the same detection the campaign
+  // performs, over a snapshot deliberately polluted the way r13's were.
+  const detect = (snapshot, incidentId) => [
+    ...new Set(
+      (JSON.stringify(snapshot).match(/liveprobe-praxis:incident-(\d+)/g) ?? [])
+        .map((match) => match.split("-").pop()),
+    ),
+  ].filter((seen) => seen !== incidentId);
+
+  const clean = { resources: [{ image: "liveprobe-praxis:incident-407" }] };
+  assert.deepEqual(detect(clean, "407"), []);
+
+  // Exactly the shape r13 produced: 407 carrying 401, 403 and 404.
+  const leaked = {
+    resources: [
+      { image: "liveprobe-praxis:incident-407" },
+      { image: "liveprobe-praxis:incident-401" },
+      { image: "liveprobe-praxis:incident-403" },
+      { image: "liveprobe-praxis:incident-404" },
+    ],
+  };
+  assert.deepEqual(detect(leaked, "407").sort(), ["401", "403", "404"]);
+  // Unrelated demo images must not trip it.
+  const stock = {
+    resources: [{ image: "ghcr.io/open-telemetry/demo:2.0.1-recommendation" }],
+  };
+  assert.deepEqual(detect(stock, "407"), []);
+});
+
 test("forced-probe arms differ only in whether probing is available", async () => {
   // Probing is normally the agent's own choice, which makes "runs that probed
   // did worse" uninterpretable: the runs that reach for a probe may be the

@@ -33,6 +33,17 @@ def parse_args():
     parser.add_argument("--output", required=True)
     parser.add_argument("--detected-at")
     parser.add_argument("--window-minutes", type=int, default=10)
+    parser.add_argument(
+        "--window-start",
+        help=(
+            "Absolute ISO start of the evidence window. Prefer this over "
+            "--window-minutes: a fixed lookback sweeps in whatever ran before "
+            "this incident. Campaign r13 soaked each incident for only 36-164s "
+            "inside a 10-minute window, so 92-94%% of every snapshot was the "
+            "previous incident, and incident 407's snapshot carried incident "
+            "401's traceback."
+        ),
+    )
     parser.add_argument("--namespace", default="otel-demo")
     parser.add_argument("--services", required=True)
     parser.add_argument("--prometheus-url", default="http://localhost:8080")
@@ -428,7 +439,15 @@ def _canonical(value):
 def main():
     args = parse_args()
     detected = utc(args.detected_at)
-    start = detected - timedelta(minutes=args.window_minutes)
+    start = (
+        utc(args.window_start)
+        if args.window_start
+        else detected - timedelta(minutes=args.window_minutes)
+    )
+    if start >= detected:
+        raise SystemExit(
+            f"window start {iso(start)} is not before detection {iso(detected)}"
+        )
     services = [item.strip() for item in args.services.split(",") if item.strip()]
     alerts = prometheus_alerts(args.prometheus_url)
     rows = clickhouse_spans(

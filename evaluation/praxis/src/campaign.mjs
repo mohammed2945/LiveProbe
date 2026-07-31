@@ -1051,6 +1051,12 @@ export async function runCampaign(options) {
       baseline = new Set(
         (await firingAlerts(options.prometheusUrl)).map(alertKey),
       );
+      // Anchor for the evidence window. Nothing before this instant belongs to
+      // this incident, so this is what the collector must use instead of a
+      // fixed lookback. A few seconds of slack absorbs clock skew between this
+      // host and the cluster.
+      const evidenceWindowStart = new Date(Date.now() - 5_000).toISOString();
+      incidentState.evidence_window_start = evidenceWindowStart;
       incidentState.status = "INJECTING";
       incidentState.baseline_firing_alerts = baseline.size;
       await writeState(state, campaignPath);
@@ -1099,6 +1105,8 @@ export async function runCampaign(options) {
           incidentId,
           "--output",
           snapshotPath,
+          "--window-start",
+          evidenceWindowStart,
           "--services",
           "frontend-proxy,frontend,recommendation,product-catalog,neo4j-productdb",
           "--prometheus-url",
@@ -1114,6 +1122,24 @@ export async function runCampaign(options) {
       const snapshot = await readJson(snapshotPath);
       if (snapshot.synthetic || snapshot.incident_id !== incidentId) {
         throw new Error("collector did not produce the expected real snapshot");
+      }
+      // Cross-incident leakage is silent and it invalidates the measurement:
+      // an arm can "solve" this incident by reading the previous one's
+      // traceback. Campaign r13 shipped 8 of 9 snapshots contaminated this way
+      // before anyone noticed, so assert it rather than trust the window.
+      const foreignImages = [
+        ...new Set(
+          (JSON.stringify(snapshot).match(
+            /liveprobe-praxis:incident-(\d+)/g,
+          ) ?? []).map((match) => match.split("-").pop()),
+        ),
+      ].filter((seen) => seen !== incidentId);
+      if (foreignImages.length > 0) {
+        throw new Error(
+          `snapshot for incident ${incidentId} contains runtime evidence from ` +
+            `incident(s) ${foreignImages.join(", ")}; the evidence window is ` +
+            `leaking across incidents`,
+        );
       }
       incidentState.snapshot = {
         path: snapshotPath,
