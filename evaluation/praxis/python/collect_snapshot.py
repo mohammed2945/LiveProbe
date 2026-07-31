@@ -377,17 +377,37 @@ def capture_resources(namespace: str):
     return resources, deployments
 
 
-def capture_events(namespace: str):
+def capture_events(namespace: str, start: datetime, end: datetime):
+    """Namespace events inside the incident's own window.
+
+    Unwindowed events leak across incidents just as spans do: a rollout event
+    naming a previous incident's image tells the agent which other faults have
+    been staged on this cluster. Campaign r13 carried up to four foreign
+    incident images this way, and the leakage survived the span-window fix
+    because events were never filtered at all.
+    """
     payload = kubectl_json(
         ["get", "events", "-n", namespace, "-o", "json"]
     )
     events = []
     for item in payload.get("items", []):
         involved = item.get("involvedObject", {})
-        event = {
-            "timestamp": item.get("eventTime")
+        stamp = (
+            item.get("eventTime")
             or item.get("lastTimestamp")
-            or item.get("metadata", {}).get("creationTimestamp"),
+            or item.get("metadata", {}).get("creationTimestamp")
+        )
+        if stamp:
+            try:
+                observed = utc(stamp)
+            except ValueError:
+                observed = None
+            # Keep an unparseable stamp rather than silently dropping evidence;
+            # drop anything demonstrably outside this incident's window.
+            if observed is not None and not (start <= observed <= end):
+                continue
+        event = {
+            "timestamp": stamp,
             "namespace": involved.get("namespace", namespace),
             "kind": involved.get("kind", "Unknown"),
             "name": involved.get("name", "unknown"),
@@ -498,7 +518,7 @@ def main():
             )
         )
     resources, deployments = capture_resources(args.namespace)
-    events = capture_events(args.namespace)
+    events = capture_events(args.namespace, start, detected)
     snapshot = {
         "schema_version": "observability-snapshot/v1",
         "snapshot_id": f"praxis-{args.incident_id}-{detected.strftime('%Y%m%dT%H%M%S')}",
